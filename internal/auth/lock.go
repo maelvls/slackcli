@@ -52,6 +52,12 @@ func lockFile(path string) (unlock func(), err error) {
 			return holdLock(lock, token), nil
 		}
 		if !lockHeld(lock, err) {
+			// The lock may have gone between the refusal and the look at
+			// it (see lockHeld): only a refusal that lasts is final.
+			if transientRefusal(err) && time.Now().Before(deadline.Add(lockTransient-lockWait)) {
+				time.Sleep(lockPoll)
+				continue
+			}
 			return nil, fmt.Errorf("creating the lock file of the credentials file (%s; is its directory writable?): %w", lock, err)
 		}
 		if removeStaleLock(lock) {
@@ -104,6 +110,17 @@ func lockHeld(lock string, createErr error) bool {
 		return !errors.Is(err, fs.ErrNotExist)
 	}
 	return false
+}
+
+// lockTransient is how long a refusal that may come from a lock file being
+// deleted is retried before it is taken for a directory that cannot be
+// written.
+const lockTransient = time.Second
+
+// transientRefusal reports whether a failed creation may be due to a lock
+// file that was being deleted, which Windows reports as "access denied".
+func transientRefusal(createErr error) bool {
+	return runtime.GOOS == "windows" && errors.Is(createErr, fs.ErrPermission)
 }
 
 // isStale reports whether the file was last written longer than lockStale
