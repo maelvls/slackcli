@@ -1,24 +1,24 @@
 # Target selection
 
-Prefer a Slack message URL whenever one is available, and quote it (an unquoted `&` truncates it):
+Prefer a Slack message URL whenever one is available, and quote it: the shell cuts an unquoted URL at `&`, silently dropping part of the query.
 
 ```text
 https://<workspace>.slack.com/archives/<channel_id>/p<digits>[?thread_ts=...]
 ```
 
-A message URL supplies the workspace, channel and message timestamp:
+A message URL supplies the workspace, channel and message timestamp, and with `?thread_ts=` the thread. Flags that repeat what the URL says (`--ts`, `--thread-ts`, `--workspace`) are accepted; flags that contradict it are an error.
 
-- `message get`, `edit`, `delete`, `react add/remove` act on that message. A `--ts` that contradicts the URL is an error.
+- `message get`, `edit`, `delete`, `react add/remove` and `later save/complete/archive/reopen/remove/remind` act on that message.
 - `message list` returns the whole thread the message belongs to.
-- `message send` and `message compose` reply in that message's thread; `--thread-ts` is redundant there and refused when it names another thread. `message draft create` replies in the thread too, unless `--thread-ts` overrides it.
-- `channel mark` moves the read cursor to that message (`--ts` overrides the timestamp); `later save/complete/archive/reopen/remove/remind` act on that message and refuse `--ts`. Both refuse `--workspace` with a URL that names its workspace.
+- `message send`, `message compose` and `message draft create` reply in that message's thread; so does `message draft update --channel <url>`.
+- `channel mark` moves the read cursor to that message; here `--ts` overrides the URL's timestamp.
 
-A Slack URL that points at a channel rather than a message is a channel target. Hosts other than `*.slack.com` / `*.slack-gov.com` are rejected.
+A Slack URL that points at a channel rather than a message is a channel target. Rejected: hosts other than `*.slack.com` / `*.slack-gov.com`, a URL with a port, and a `thread_ts` that is not a timestamp.
 
 Use a channel (`#name`, `name`, or a `C...`/`G...`/`D...` ID) when there is no URL:
 
 - `message get`, `edit`, `delete`, `react`, `channel mark` and the `later` write commands require `--ts <seconds>.<micros>`.
-- `message list` reads channel history, unless `--ts` or `--thread-ts` selects a thread.
+- `message list` reads channel history, unless `--ts` or `--thread-ts` selects a thread (both given must be equal). `--oldest` must be before `--latest`.
 - `message send` posts to the channel; add `--thread-ts` to reply.
 
 A user ID (`U...` or `W...`, equivalent) means the direct message with that user. It is accepted by `message send`, `message compose`, `message draft create`, `message draft update --channel` and `message scheduled list/cancel --channel`. `message get/list/edit/delete/react` reject it: use `user dm-open <users...>` (one to 8 other users; IDs or emails are fastest) to get the `dm_channel_id` of a DM or group DM, then use that as a channel target.

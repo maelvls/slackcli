@@ -60,11 +60,11 @@ API: it needs browser session credentials (xoxc- token and "d" cookie), not
 a bot or user token.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			if maxMessages < 1 || maxMessages > unreads.MaxMessagesLimit {
-				return fmt.Errorf("invalid --max-messages value %d: must be between 1 and %d (use --counts-only to fetch no messages)", maxMessages, unreads.MaxMessagesLimit)
+			if err := cmdutil.CheckRange("--max-messages", maxMessages, unreads.MaxMessagesLimit, "use --counts-only to fetch no messages"); err != nil {
+				return err
 			}
-			if maxBodyChars < -1 || maxBodyChars == 0 {
-				return fmt.Errorf("invalid --max-body-chars value %d: must be a positive integer, or -1 for unlimited", maxBodyChars)
+			if err := cmdutil.CheckMaxChars("--max-body-chars", maxBodyChars); err != nil {
+				return err
 			}
 			ctx := cmd.Context()
 			ws := rt.EffectiveWorkspace(workspace)

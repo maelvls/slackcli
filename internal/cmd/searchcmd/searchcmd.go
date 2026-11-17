@@ -62,7 +62,7 @@ when it helps, the --before date that continues the search with older results.`,
 	}
 	cmd.AddCommand(
 		newKind(rt, search.KindAll, "Search messages and files", "Both searches run concurrently; --limit applies to each."),
-		newKind(rt, search.KindMessages, "Search messages", "Files attached to the messages found are downloaded unless --no-download is given."),
+		newKind(rt, search.KindMessages, "Search messages", "Files attached to the messages found are downloaded unless --no-download is\ngiven."),
 		newKind(rt, search.KindFiles, "Search files", "The files found are downloaded unless --no-download is given."),
 	)
 	return cmd
@@ -73,7 +73,7 @@ func newKind(rt *clictx.Context, kind search.Kind, short, detail string) *cobra.
 	cmd := &cobra.Command{
 		Use:   string(kind) + " <query>",
 		Short: short,
-		Long: short + ". " + detail + `
+		Long: short + ".\n" + detail + `
 
 <query> is a Slack search query, or with --channel words to look for in the
 channels scanned; it may be "" when a filter (--user, --after, --before,

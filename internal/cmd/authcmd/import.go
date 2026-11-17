@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"slices"
+	"strings"
 
 	"github.com/spf13/cobra"
 
@@ -37,9 +38,9 @@ func runImport(ctx context.Context, rt *clictx.Context, source, advice string, e
 	case errors.Is(err, authextract.ErrBraveAppleScriptDisabled), errors.Is(err, authextract.ErrChromeAppleScriptDisabled):
 		return nil, nil, fmt.Errorf("%w (macOS asks for your password the first time)", err)
 	case errors.Is(err, authextract.ErrNotFound):
-		return nil, nil, fmt.Errorf("could not import from %s: %w. %s", source, err, advice)
+		return nil, nil, fmt.Errorf("could not import from %s: %w. %s", source, withoutSource(source, err), advice)
 	case err != nil:
-		return nil, nil, fmt.Errorf("could not import from %s: %w", source, err)
+		return nil, nil, fmt.Errorf("could not import from %s: %w", source, withoutSource(source, err))
 	}
 
 	var found []importedWorkspace
@@ -66,13 +67,43 @@ func runImport(ctx context.Context, rt *clictx.Context, source, advice string, e
 			imported = append(imported, w)
 		}
 	}
+	// A kept workspace is usually a stored one. It can also be one that is
+	// not in the store yet: its standard token is in the predecessor's
+	// credentials, whose migration is waiting (the store has warned why).
+	// "auth remove" knows nothing of that one.
+	creds, _ := rt.Store.Load()
 	for _, u := range kept {
+		if creds != nil && creds.Find(u) == nil {
+			rt.Hintf(`note: the browser session found in %[2]s was not imported for %[1]s: %[4]s has a standard token for that workspace, which could not be migrated yet (see the warning above) and which an import must not replace with a browser session. The workspace is not configured until that migration goes through: fix what the warning says, then run this command again`,
+				u, source, appinfo.Name, appinfo.LegacyName)
+			continue
+		}
 		rt.Hintf(`note: %[1]s keeps its standard token (saved with "auth add"); the browser session found in %[2]s was not imported for it. To use the browser session instead, run "%[3]s auth remove %[1]s" and import again`,
 			u, source, appinfo.Name)
 	}
 	hintNoDefault(rt)
 	return extracted, imported, nil
 }
+
+// withoutSource drops the "<source>: " that an extractor's error starts
+// with, which runImport has just said itself ("could not import from Slack
+// Desktop: Slack Desktop: no Slack data at …"). The result still wraps err.
+func withoutSource(source string, err error) error {
+	rest, found := strings.CutPrefix(err.Error(), source+": ")
+	if !found {
+		return err
+	}
+	return &rewordedError{msg: rest, err: err}
+}
+
+// rewordedError is err under another wording.
+type rewordedError struct {
+	msg string
+	err error
+}
+
+func (e *rewordedError) Error() string { return e.msg }
+func (e *rewordedError) Unwrap() error { return e.err }
 
 // hintNoDefault tells the user, after credentials were saved, that several
 // workspaces are configured and none is the default.
@@ -113,7 +144,9 @@ with a note on stderr. When several workspaces are imported at once and none
 was configured before, no default workspace is set: choose one with
 "auth set-default", or pass --workspace to every command.
 
-Prints the number of imported workspaces, their URLs and the files read.`,
+Prints {imported, source: {leveldb_path, cookies_path}, workspaces:
+[{workspace_url, workspace_name}]}: the number of workspaces imported, the
+files read and the workspaces.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			extracted, imported, err := runImport(cmd.Context(), rt, "Slack Desktop",
@@ -140,7 +173,9 @@ Chrome (macOS only). Chrome must be running with Slack open in a tab.
 
 Requires View → Developer → Allow JavaScript from Apple Events to be enabled
 in Chrome. The cookie is read from Chrome's cookie database, decrypted with
-the "Chrome Safe Storage" keychain item: macOS may ask for permission.`,
+the "Chrome Safe Storage" keychain item: macOS may ask for permission.
+
+Prints one line of text, not JSON: the number of workspaces imported.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			_, imported, err := runImport(cmd.Context(), rt, "Chrome",
@@ -162,7 +197,9 @@ Browser (macOS only). Brave must be running with Slack open in a tab.
 
 Requires View → Developer → Allow JavaScript from Apple Events to be enabled
 in Brave. The cookie is read from Brave's cookie database, decrypted with the
-"Brave Safe Storage" keychain item: macOS may ask for permission.`,
+"Brave Safe Storage" keychain item: macOS may ask for permission.
+
+Prints one line of text, not JSON: the number of workspaces imported.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			_, imported, err := runImport(cmd.Context(), rt, "Brave",
@@ -181,7 +218,9 @@ func newImportFirefox(rt *clictx.Context) *cobra.Command {
 		Short: "Import xoxc/xoxd from Firefox profile storage (macOS/Linux)",
 		Long: `Import xoxc tokens and the "d" cookie from Firefox profile storage (macOS
 and Linux). The default profile is tried first, then the others; Firefox does
-not need to be quit, and nothing is modified.`,
+not need to be quit, and nothing is modified.
+
+Prints one line of text, not JSON: the number of workspaces imported.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			_, imported, err := runImport(cmd.Context(), rt, "Firefox",
@@ -211,7 +250,15 @@ https://<workspace>.slack.com/api/… and choose Copy → Copy as cURL. Then:
   pbpaste | %s auth parse-curl
 
 The command is read from standard input so that the credentials never appear
-in the process list or the shell history.`, appinfo.Name),
+in the process list or the shell history.
+
+Secrets are saved in the macOS keychain, and elsewhere in the credentials
+file, which only your user can read (mode 0600). On macOS, a secret that the
+keychain refuses (locked, prompt denied or timed out) is kept in that file
+too, in plain text, with a warning on stderr: the command still succeeds, and
+"auth whoami" then shows "secrets_storage": "file" for the workspace.
+
+Prints one line of text, not JSON: the workspace the tokens were saved for.`, appinfo.Name),
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			raw, err := io.ReadAll(io.LimitReader(cmd.InOrStdin(), maxCurlInput+1))

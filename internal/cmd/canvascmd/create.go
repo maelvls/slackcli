@@ -7,6 +7,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/maelvls/slackcli/internal/appinfo"
 	"github.com/maelvls/slackcli/internal/clictx"
 	"github.com/maelvls/slackcli/internal/cmd/cmdutil"
 	"github.com/maelvls/slackcli/internal/slack/canvas"
@@ -29,9 +30,9 @@ canvases only.
 Prints {"canvas": {"id", "title"?, "channel_id"?}}; "id" (F…) is what
 "canvas get" and "canvas edit" take. This is a write action: it is blocked
 in safe mode.`,
-		Example: `  canvas create --file ./launch-plan.md --title "Launch plan"
-  generate-report | canvas create --file - --title "Weekly report"
-  canvas create --markdown $'# Launch plan\n\n- [ ] Ship it' --channel "#project-launch"`,
+		Example: fmt.Sprintf(`  %[1]s canvas create --file ./launch-plan.md --title "Launch plan"
+  generate-report | %[1]s canvas create --file - --title "Weekly report"
+  %[1]s canvas create --markdown $'# Launch plan\n\n- [ ] Ship it' --channel "#project-launch"`, appinfo.Name),
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if err := rt.CheckSafeMode("canvas create"); err != nil {

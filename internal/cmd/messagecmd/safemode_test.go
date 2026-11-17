@@ -52,9 +52,14 @@ func TestSafeModeBlocksEditAndDelete(t *testing.T) {
 	h.mustFail(`"message delete" is blocked`, "delete", testChannel)
 	h.wantCalls()
 
-	if err := h.rt.CheckSafeMode("message edit"); !strings.Contains(err.Error(), "SLACKCLI_SAFE_MODE") {
+	if err := h.rt.CheckSafeMode("message edit"); !strings.Contains(err.Error(), "(turned on by --safe-mode)") {
 		t.Errorf("error does not say how safe mode was enabled: %v", err)
 	}
+	// The legacy variable is named when it is what turned safe mode on.
+	h.rt.SafeModeFlag = false
+	t.Setenv("AGENT_SLACK_SAFE_MODE", "1")
+	h.mustFail("safe mode is active (turned on by AGENT_SLACK_SAFE_MODE)", "delete", testURL)
+	h.mustFail(`safe mode is active (turned on by AGENT_SLACK_SAFE_MODE): "message send" is redirected`, "send", testChannel, "x", "--schedule-in", "1h")
 }
 
 // The --safe-mode flag belongs to the root command; "send" and "edit"
@@ -123,7 +128,7 @@ func TestSafeModeSendOpensTheEditorWhenCIIsOff(t *testing.T) {
 	for _, value := range []string{"0", "false", "FALSE"} {
 		h := newHarness(t)
 		h.rt.SafeModeFlag = true
-		h.composeResult = map[string]any{"ok": true, "cancelled": true}
+		h.composeResult = composecmd.Result{OK: true, Cancelled: true}
 		t.Setenv("CI", value)
 		h.mustRun("send", "#general", "hi")
 		h.wantCalls()
@@ -136,7 +141,7 @@ func TestSafeModeSendOpensTheEditorWhenCIIsOff(t *testing.T) {
 func TestSafeModeSendOpensComposeEditor(t *testing.T) {
 	h := newHarness(t)
 	h.rt.SafeModeFlag = true
-	h.composeResult = map[string]any{"ok": true, "sent": true}
+	h.composeResult = composecmd.Result{OK: true, Sent: true, ChannelID: testChannel, TS: testTS, Permalink: testURL, Text: "reviewed"}
 	watchdogStopped := false
 	h.rt.SetWatchdogCanceller(func() { watchdogStopped = true })
 
@@ -149,7 +154,12 @@ func TestSafeModeSendOpensComposeEditor(t *testing.T) {
 	if !reflect.DeepEqual(h.composed, want) {
 		t.Errorf("compose calls = %+v\nwant %+v", h.composed, want)
 	}
-	wantJSON(t, got, `{"safe_mode": true, "redirected_from": "send", "ok": true, "sent": true}`)
+	wantJSON(t, got, `{"safe_mode": true, "redirected_from": "send", "ok": true, "sent": true,
+		"channel_id": "C12345678", "ts": "1770165109.628379", "permalink": "`+testURL+`", "text": "reviewed"}`)
+	// The fields are printed in the documented order, not sorted.
+	if order := jsonKeys(t, h.stdout.String()); !reflect.DeepEqual(order, []string{"safe_mode", "redirected_from", "ok", "sent", "channel_id", "ts", "permalink", "text"}) {
+		t.Errorf("fields are printed in the order %v", order)
+	}
 	// Nothing is sent by "send" itself, and the editor may take forever.
 	h.wantCalls()
 	if !watchdogStopped {
@@ -166,7 +176,7 @@ func TestSafeModeSendOpensComposeEditor(t *testing.T) {
 func TestSafeModeSendPassesWorkspaceFlag(t *testing.T) {
 	h := newHarness(t)
 	h.rt.SafeModeFlag = true
-	h.composeResult = map[string]any{"ok": true, "cancelled": true}
+	h.composeResult = composecmd.Result{OK: true, Cancelled: true}
 	t.Setenv("SLACK_WORKSPACE_URL", "https://other.slack.com")
 	got := h.mustRun("send", testURL, "hi")
 	if len(h.composed) != 1 || h.composed[0].opts.Workspace != "" || h.composed[0].target != testURL {
@@ -183,7 +193,7 @@ func TestSafeModeSendPassesWorkspaceFlag(t *testing.T) {
 func TestSafeModeSendStillValidates(t *testing.T) {
 	h := newHarness(t)
 	h.rt.SafeModeFlag = true
-	h.mustFail("<text> is required", "send", "#general")
+	h.mustFail("[text] is required", "send", "#general")
 	h.mustFail("invalid --thread-ts", "send", "#general", "hi", "--thread-ts", "x")
 	if len(h.composed) != 0 {
 		t.Error("the editor was opened")

@@ -79,9 +79,17 @@ func TestHelpContracts(t *testing.T) {
 	wantContains(t, "message help", root.Long, `short for "slackcli message get <target>"`)
 	// What safe mode covers, and what it does not, comes from the one
 	// list in clictx.
-	wantContains(t, "message help", root.Long, clictx.SafeModeSummary())
-	wantContains(t, "message help", root.Long, `"message scheduled cancel"`)
-	wantContains(t, "message help", root.Long, `"message react", "message draft *", "channel mark", "later *" and "user dm-open" are NOT covered by safe mode`)
+	wantContains(t, "message help", root.Long, clictx.SafeModeHelp())
+	wantContains(t, "message help", root.Long, "message scheduled cancel")
+	wantContains(t, "message help", root.Long, "not covered  message react, message draft *, channel mark, later *,")
+
+	// What a command prints is part of its help.
+	wantContains(t, "list help", list.Long, "Prints {channel_id, messages: [{channel_id, ts, thread_ts, author: {user_id,")
+	wantContains(t, "list help", list.Long, `"messages" is [] when there are none`)
+	wantContains(t, "send help", send.Long, `must come after "--"`)
+	if usage := flagUsage(t, send, "blocks"); strings.Contains(usage, "<text>") {
+		t.Errorf("send --blocks calls [text] <text>: %q", usage)
+	}
 	wantContains(t, "react help", findCommand(t, root, "react").Long, "not covered by safe mode")
 	wantContains(t, "edit help", findCommand(t, root, "edit").Long, "Refused in safe mode")
 	wantContains(t, "delete help", findCommand(t, root, "delete").Long, "Refused in safe mode")

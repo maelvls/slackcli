@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/maelvls/slackcli/internal/jsonx"
+	"github.com/maelvls/slackcli/internal/slack/enrich"
 	"github.com/maelvls/slackcli/internal/slack/slackurl"
 	"github.com/maelvls/slackcli/internal/slackapi"
 )
@@ -61,7 +62,12 @@ func nextCursor(resp map[string]any) string {
 	return jsonx.GetStr(resp, "response_metadata", "next_cursor")
 }
 
-func findTS(resp map[string]any, ts string) map[string]any {
+// FindTS returns the raw message with that ts among the "messages" of a
+// conversations.history or conversations.replies response, or nil when it
+// is not there (a nil response included). Both methods answer with the
+// nearest messages rather than fail, so a response must be checked for the
+// message that was asked for.
+func FindTS(resp map[string]any, ts string) map[string]any {
 	for _, m := range jsonx.Maps(resp["messages"]) {
 		if jsonx.Str(m["ts"]) == ts {
 			return m
@@ -98,7 +104,7 @@ func findMessage(ctx context.Context, client *slackapi.Client, ref slackurl.Mess
 	if err != nil {
 		return nil, fmt.Errorf("fetching message %s in %s: %w", ts, channel, err)
 	}
-	if m := findTS(resp, ts); m != nil {
+	if m := FindTS(resp, ts); m != nil {
 		return m, nil
 	}
 
@@ -115,12 +121,12 @@ func findMessage(ctx context.Context, client *slackapi.Client, ref slackurl.Mess
 			metadataParam(params, includeReactions)
 			resp, err := client.API(ctx, "conversations.replies", params)
 			if err != nil {
-				if isFatal(ctx, err) {
+				if enrich.MustAbortRequired(ctx, err) {
 					return nil, fmt.Errorf("fetching message %s in %s: %w", ts, channel, err)
 				}
 				break // e.g. thread_not_found: the hint was wrong
 			}
-			if m := findTS(resp, ts); m != nil {
+			if m := FindTS(resp, ts); m != nil {
 				return m, nil
 			}
 			next := nextCursor(resp)
@@ -136,11 +142,11 @@ func findMessage(ctx context.Context, client *slackapi.Client, ref slackurl.Mess
 	params = map[string]any{"channel": channel, "ts": ts, "limit": 1}
 	metadataParam(params, includeReactions)
 	resp, err = client.API(ctx, "conversations.replies", params)
-	if err != nil && isFatal(ctx, err) {
+	if enrich.MustAbortRequired(ctx, err) {
 		return nil, fmt.Errorf("fetching message %s in %s: %w", ts, channel, err)
 	}
 	if err == nil {
-		if m := findTS(resp, ts); m != nil {
+		if m := FindTS(resp, ts); m != nil {
 			return m, nil
 		}
 	}
@@ -287,7 +293,32 @@ func FetchThread(ctx context.Context, client *slackapi.Client, channelID, thread
 		return nil, fmt.Errorf("fetching thread %s in %s: %w", threadTS, channelID, err)
 	}
 	sortChronologically(out)
+	nameThread(out)
 	return out, nil
+}
+
+// nameThread makes every message of a thread say which thread it is in,
+// as the messages of a channel history do: a message of a thread listing
+// is then the same {channel_id, ts, thread_ts} wherever it came from.
+// Slack sets thread_ts on the replies and on a root that has some; the
+// messages it left out get the one of the others. A lone message without
+// replies is not a thread and stays as it is.
+func nameThread(msgs []Message) {
+	root := ""
+	for _, m := range msgs {
+		if m.ThreadTS != "" {
+			root = m.ThreadTS
+			break
+		}
+	}
+	if root == "" {
+		return
+	}
+	for i := range msgs {
+		if msgs[i].ThreadTS == "" {
+			msgs[i].ThreadTS = root
+		}
+	}
 }
 
 func fetchReplies(ctx context.Context, client *slackapi.Client, channelID, threadTS string, includeReactions bool) ([]Message, error) {

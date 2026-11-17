@@ -47,10 +47,10 @@ func TestSafeModeCoverage(t *testing.T) {
 	c := newContext(t)
 	commands := []string{"message edit", "message delete", "canvas create", "canvas edit", "workflow run"}
 
-	summary := SafeModeSummary()
+	help := SafeModeHelp()
 	for _, command := range append([]string{SafeModeReviewed}, commands...) {
-		if !strings.Contains(summary, `"`+command+`"`) {
-			t.Errorf("the summary %q does not mention %q", summary, command)
+		if !strings.Contains(help, command) {
+			t.Errorf("the help %q does not mention %q", help, command)
 		}
 	}
 
@@ -66,7 +66,7 @@ func TestSafeModeCoverage(t *testing.T) {
 			t.Errorf("safe mode on: %q allowed", command)
 			continue
 		}
-		for _, want := range []string{"safe mode is active", "SLACKCLI_SAFE_MODE or --safe-mode", `"` + command + `" is blocked`, "without human review"} {
+		for _, want := range []string{"safe mode is active (turned on by --safe-mode)", `"` + command + `" is blocked`, "without human review"} {
 			if !strings.Contains(err.Error(), want) {
 				t.Errorf("%q: error %q does not contain %q", command, err, want)
 			}

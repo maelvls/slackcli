@@ -7,6 +7,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/maelvls/slackcli/internal/appinfo"
 	"github.com/maelvls/slackcli/internal/clictx"
 	"github.com/maelvls/slackcli/internal/slack/canvas"
 )
@@ -23,8 +24,8 @@ method. One call applies exactly one operation:
                                                      or only that section
   insert_at_start  --file|--markdown                 add content at the top
   insert_at_end    --file|--markdown                 add content at the bottom
-  insert_before    --file|--markdown --section-id    add content before a section
-  insert_after     --file|--markdown --section-id    add content after a section
+  insert_before    --file|--markdown --section-id    add content before it
+  insert_after     --file|--markdown --section-id    add content after it
   delete           --section-id                      delete a section
   rename           --title                           change the canvas title
 
@@ -35,12 +36,14 @@ entire canvas. Flags an operation does not list are rejected.
 
 Editing requires a standard Slack token (xoxb-/xoxp-, from SLACK_TOKEN or
 saved with "auth add") with the canvases:write scope; imported browser
-credentials can create standalone canvases but cannot edit. Prints {"ok": true, "canvas": {"id", "operation"}} once Slack
-has accepted the change. This is a write action: it is blocked in safe mode.`,
-		Example: `  canvas edit F12345678 --file ./revised-plan.md
-  canvas edit F12345678 --operation insert_at_end --markdown "- [ ] One more thing"
-  canvas edit F12345678 --operation delete --section-id "temp:C:SECTION"
-  canvas edit "https://acme.slack.com/docs/T12345678/F12345678" --operation rename --title "Launch plan (final)"`,
+credentials can create standalone canvases but cannot edit.
+
+Prints {"ok": true, "canvas": {"id", "operation"}} once Slack has accepted
+the change. This is a write action: it is blocked in safe mode.`,
+		Example: fmt.Sprintf(`  %[1]s canvas edit F12345678 --file ./revised-plan.md
+  %[1]s canvas edit F12345678 --operation insert_at_end --markdown "- [ ] One more thing"
+  %[1]s canvas edit F12345678 --operation delete --section-id "temp:C:SECTION"
+  %[1]s canvas edit "https://acme.slack.com/docs/T12345678/F12345678" --operation rename --title "Launch plan (final)"`, appinfo.Name),
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if err := rt.CheckSafeMode("canvas edit"); err != nil {

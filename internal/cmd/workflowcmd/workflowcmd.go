@@ -8,6 +8,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/maelvls/slackcli/internal/appinfo"
 	"github.com/maelvls/slackcli/internal/clictx"
 	"github.com/maelvls/slackcli/internal/cmd/cmdutil"
 	"github.com/maelvls/slackcli/internal/slack/workflows"
@@ -43,9 +44,10 @@ func newList(rt *clictx.Context) *cobra.Command {
 
 Prints {"channel_id", "workflows": [{"title", "trigger_id", "link"?,
 "app_id"?, "featured"}]}: bookmarked workflows first, then featured ones
-that are not bookmarked; "workflows" is [] when there are none. If Slack refuses the featured-workflows lookup
-(not every workspace or token has it), only bookmarked workflows are
-listed and a warning is printed on stderr. No side effects.`,
+that are not bookmarked; "workflows" is [] when there are none. If Slack
+refuses the featured-workflows lookup (not every workspace or token has
+it), only bookmarked workflows are listed and a warning is printed on
+stderr. No side effects.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			channel, err := cmdutil.ParseChannel(rt, args[0], workspace)
@@ -168,9 +170,9 @@ trigger's metadata. Form inputs cannot be supplied from the command line.
 Prints {"function_execution_id", "trigger_execution_id",
 "is_slow_workflow"}: Slack accepted the trigger, which does not say
 whether the workflow's steps then succeeded.`,
-		Example: `  workflow list "#helpdesk"
-  workflow get Ft0123ABCDEF
-  workflow run Ft0123ABCDEF --channel "#helpdesk"`,
+		Example: fmt.Sprintf(`  %[1]s workflow list "#helpdesk"
+  %[1]s workflow get Ft0123ABCDEF
+  %[1]s workflow run Ft0123ABCDEF --channel "#helpdesk"`, appinfo.Name),
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if err := rt.CheckSafeMode("workflow run"); err != nil {

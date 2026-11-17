@@ -4,6 +4,8 @@
 package appinfo
 
 import (
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime/debug"
@@ -94,20 +96,73 @@ func Env(suffix string) string {
 	return strings.TrimSpace(os.Getenv(LegacyEnvPrefix + suffix))
 }
 
+// EnvSource returns the name and the (trimmed) value of the variable Env
+// reads for suffix: the current name, else the legacy AGENT_SLACK_ one.
+// Both are "" when neither is set.
+func EnvSource(suffix string) (name, value string) {
+	for _, prefix := range []string{EnvPrefix, LegacyEnvPrefix} {
+		if v := strings.TrimSpace(os.Getenv(prefix + suffix)); v != "" {
+			return prefix + suffix, v
+		}
+	}
+	return "", ""
+}
+
 // EnvDurationMS reads a millisecond duration from a tool-specific variable.
-// It returns def when the variable is unset or invalid. Zero is only accepted
-// when allowZero is true.
+// It returns def when the variable is unset or invalid (see
+// ParseDurationMS). An invalid value is not reported here, deep in the
+// code that needs the duration: the root command warns about it once, with
+// CheckEnvDurationMS.
 func EnvDurationMS(suffix string, def time.Duration, allowZero bool) time.Duration {
-	raw := Env(suffix)
+	_, raw := EnvSource(suffix)
 	if raw == "" {
 		return def
 	}
-	n, err := strconv.ParseFloat(raw, 64)
-	if err != nil || n < 0 || (n == 0 && !allowZero) {
+	d, err := ParseDurationMS(raw, allowZero)
+	if err != nil {
 		return def
 	}
-	return time.Duration(n) * time.Millisecond
+	return d
 }
+
+// CheckEnvDurationMS says what is wrong with the value EnvDurationMS reads
+// for suffix, naming the variable; it returns nil when the variable is
+// unset or valid.
+func CheckEnvDurationMS(suffix string, allowZero bool) error {
+	name, raw := EnvSource(suffix)
+	if raw == "" {
+		return nil
+	}
+	if _, err := ParseDurationMS(raw, allowZero); err != nil {
+		return fmt.Errorf("%s=%q is not valid: %w", name, raw, err)
+	}
+	return nil
+}
+
+// ParseDurationMS parses a duration given as a number of milliseconds:
+// positive, or zero when allowZero is true. The error says what is
+// accepted.
+func ParseDurationMS(raw string, allowZero bool) (time.Duration, error) {
+	accepted := "expected a positive number of milliseconds, e.g. 30000"
+	if allowZero {
+		accepted = "expected a number of milliseconds, 0 or more, e.g. 30000"
+	}
+	n, err := strconv.ParseFloat(strings.TrimSpace(raw), 64)
+	// The upper bound also keeps NaN and infinities out.
+	if err != nil || !(n >= 0 && n <= maxDurationMS) {
+		return 0, errors.New(accepted)
+	}
+	// Fractions of a millisecond are dropped: 0.5 is zero.
+	d := time.Duration(n) * time.Millisecond
+	if d == 0 && !allowZero {
+		return 0, errors.New(accepted)
+	}
+	return d, nil
+}
+
+// maxDurationMS is the longest duration ParseDurationMS accepts: ten years,
+// far below what a time.Duration can hold.
+const maxDurationMS = 10 * 365 * 24 * 60 * 60 * 1000
 
 // EnvBool reports whether a tool-specific variable is set to a truthy value
 // ("1", "true", "yes", "on"; case-insensitive). Anything else is false: do
@@ -148,6 +203,19 @@ func isOffValue(v string) bool {
 // (SLACKCLI_SAFE_MODE or the legacy AGENT_SLACK_SAFE_MODE; see
 // EnvOnUnlessOff).
 func SafeModeEnv() bool { return EnvOnUnlessOff("SAFE_MODE") }
+
+// SafeModeEnvNames returns the names of the variables that turn safe mode
+// on (see EnvOnUnlessOff), the current name first. It is empty exactly
+// when SafeModeEnv is false.
+func SafeModeEnvNames() []string {
+	var names []string
+	for _, prefix := range []string{EnvPrefix, LegacyEnvPrefix} {
+		if !isOffValue(os.Getenv(prefix + "SAFE_MODE")) {
+			names = append(names, prefix+"SAFE_MODE")
+		}
+	}
+	return names
+}
 
 func home() string {
 	h, err := os.UserHomeDir()

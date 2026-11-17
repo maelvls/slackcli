@@ -60,18 +60,10 @@ func ToCompactUser(u map[string]any) CompactUser {
 	if b, ok := u["deleted"].(bool); ok {
 		out.Deleted = &b
 	}
-	if n, ok := jsonx.Num(profile["status_expiration"]); ok {
-		out.StatusExpiration = int64(n)
+	if n, ok := jsonx.Int64(profile["status_expiration"]); ok {
+		out.StatusExpiration = n
 	}
 	return out
-}
-
-// isFatal reports whether err must abort the operation rather than be
-// worked around: the command was cancelled, the credentials are dead (the
-// caller refreshes them and retries), or Slack is rate limiting us.
-func isFatal(ctx context.Context, err error) bool {
-	var rl *slackapi.RateLimitError
-	return err != nil && (ctx.Err() != nil || slackapi.IsAuthError(err) || errors.As(err, &rl))
 }
 
 func nextCursor(resp map[string]any) string {

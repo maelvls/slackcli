@@ -20,6 +20,7 @@ import (
 	"github.com/maelvls/slackcli/internal/cmd/cmdutil"
 	"github.com/maelvls/slackcli/internal/jsonx"
 	"github.com/maelvls/slackcli/internal/slack/channels"
+	"github.com/maelvls/slackcli/internal/slack/messages"
 	"github.com/maelvls/slackcli/internal/slack/slacktext"
 	"github.com/maelvls/slackcli/internal/slack/slackurl"
 	"github.com/maelvls/slackcli/internal/slackid"
@@ -37,7 +38,7 @@ type Options struct {
 
 // Compose opens the editor for target (message URL, #channel, channel ID,
 // or user ID for a DM) pre-filled with initialText and blocks until the
-// human sends or cancels. The returned value is the JSON payload to print:
+// human sends or cancels. The returned Result is what to print:
 //
 //	{ok, sent, channel_id, ts, thread_ts, permalink, text}  the human sent `text`
 //	{ok, cancelled, reason}                                 nothing was sent
@@ -67,8 +68,36 @@ type Options struct {
 // print the editor's link where an agent could read it and press Send
 // itself: always under safe mode, and otherwise unless stderr is a real
 // terminal.
-func Compose(ctx context.Context, rt *clictx.Context, target, initialText string, opts Options) (map[string]any, error) {
+func Compose(ctx context.Context, rt *clictx.Context, target, initialText string, opts Options) (Result, error) {
 	return newComposer(rt).compose(ctx, target, initialText, opts)
+}
+
+// Result is the output of "message compose". It is a struct rather than a
+// map so that the fields are printed in the order the help gives. Blank
+// fields are not printed, and neither are Sent and Cancelled when false:
+// exactly one of them is set.
+type Result struct {
+	OK bool `json:"ok"`
+	// Sent says that the message was posted: OK alone does not.
+	Sent bool `json:"sent,omitempty"`
+	// Cancelled says that nothing was sent, and Reason why.
+	Cancelled bool   `json:"cancelled,omitempty"`
+	Reason    string `json:"reason"`
+	// Editor is "skipped" when the text was sent without the editor (CI).
+	Editor    string `json:"editor"`
+	ChannelID string `json:"channel_id"`
+	TS        string `json:"ts"`
+	ThreadTS  string `json:"thread_ts"`
+	// Permalink is "" when Slack would not give it for a token that names
+	// no workspace (messages.SentPermalink): the message is sent all the
+	// same.
+	Permalink string `json:"permalink"`
+	// Text is what the human sent; not set when the editor was skipped.
+	Text string `json:"text"`
+}
+
+func sentResult(sent sentMessage) Result {
+	return Result{OK: true, Sent: true, ChannelID: sent.ChannelID, TS: sent.TS, ThreadTS: sent.ThreadTS, Permalink: sent.Permalink}
 }
 
 // New returns the "compose" command, to be added under "message".
@@ -94,14 +123,17 @@ unless they press Send.
 
 Prints {ok, sent, channel_id, ts, thread_ts, permalink, text}, where text is
 what the human sent. If they cancel, close the tab, or never open the editor
-(30 minutes), prints {ok, cancelled, reason}.
+(30 minutes), prints {ok, cancelled, reason}. "permalink" is only left out,
+with a warning on stderr, when Slack would not give it for a token that names
+no workspace: the message is sent all the same.
 
 The command does not time out: it waits for the human. Stop it with Ctrl-C.
 
 CI: when the CI environment variable is set there is no browser, so the
-editor is skipped and [text] is sent immediately; the output then has
-editor: "skipped" and no text. In safe mode the command fails instead: safe
-mode never sends without a human.
+editor is skipped and [text] is sent immediately; the output is then
+{ok, sent, editor: "skipped", channel_id, ts, thread_ts, permalink}, without
+text. In safe mode the command fails instead: safe mode never sends without
+a human.
 
 No browser: when no browser can be opened the command fails, unless it runs
 in an interactive terminal, where it prints a one-time link to open by hand.
@@ -160,25 +192,25 @@ func isTerminal(w io.Writer) bool {
 	return isatty.IsTerminal(f.Fd()) || isatty.IsCygwinTerminal(f.Fd())
 }
 
-func (c *composer) compose(ctx context.Context, targetInput, initialText string, opts Options) (map[string]any, error) {
+func (c *composer) compose(ctx context.Context, targetInput, initialText string, opts Options) (Result, error) {
 	rt := c.rt
 	target, err := cmdutil.ParseTarget(rt, targetInput, opts.Workspace)
 	if err != nil {
-		return nil, err
+		return Result{}, err
 	}
 	threadTS, err := cmdutil.ParseTS("--thread-ts", opts.ThreadTS)
 	if err != nil {
-		return nil, err
+		return Result{}, err
 	}
 	ci := clictx.IsCI()
 	if ci {
 		// The one rule that must hold whatever the caller checked: safe
 		// mode never sends without a human.
 		if rt.SafeMode() {
-			return nil, fmt.Errorf("safe mode is active and the compose editor is unavailable in CI (the CI environment variable is set): refusing to send without human review. Unset CI to review the message in the editor, or disable safe mode (--safe-mode / %s) to send", appinfo.EnvName("SAFE_MODE"))
+			return Result{}, fmt.Errorf("safe mode is active (turned on by %s) and the compose editor is unavailable in CI (the CI environment variable is set): refusing to send without human review. Unset CI to review the message in the editor, or disable safe mode to send", rt.SafeModeSource())
 		}
 		if strings.TrimSpace(initialText) == "" {
-			return nil, errors.New("in CI the compose editor is skipped and the text is sent as is: pass the message text (the CI environment variable is set)")
+			return Result{}, errors.New("in CI the compose editor is skipped and the text is sent as is: pass the message text (the CI environment variable is set)")
 		}
 	}
 
@@ -207,7 +239,7 @@ func (c *composer) compose(ctx context.Context, targetInput, initialText string,
 		return dest, nil
 	})
 	if err != nil {
-		return nil, err
+		return Result{}, err
 	}
 	send := func(ctx context.Context, text string) (sentMessage, error) {
 		return c.send(ctx, dest, text, opts.NoUnfurl)
@@ -216,18 +248,21 @@ func (c *composer) compose(ctx context.Context, targetInput, initialText string,
 	if ci {
 		sent, err := send(ctx, initialText)
 		if err != nil {
-			return nil, err
+			return Result{}, err
 		}
-		out := sentPayload(sent)
-		out["editor"] = "skipped"
+		out := sentResult(sent)
+		out.Editor = "skipped"
 		return out, nil
 	}
 
 	rt.DisableTimeout()
 	sess, err := startSession(ctx, c.page(dest, initialText), send, c.timeouts)
 	if err != nil {
-		return nil, err
+		return Result{}, err
 	}
+	// where says, in the hint below, where the editor is: it must not
+	// claim that a browser shows it when none could be opened.
+	where := "is open in the browser"
 	if err := c.openBrowser(ctx, sess.url()); err != nil {
 		// The link lets whoever holds it press Send: fail closed rather
 		// than hand it to an agent.
@@ -237,42 +272,32 @@ func (c *composer) compose(ctx context.Context, targetInput, initialText string,
 			// agent runs the command under.
 			sess.interrupt()
 			sess.stop()
-			return nil, fmt.Errorf("safe mode is active and no browser could be opened for the compose editor (%w): nothing was sent, and the editor's link is never printed in safe mode, because whoever holds it can send the message. A human must run `%s message compose <target> [text]` themselves, in a graphical session on a machine with a browser", err, appinfo.Name)
+			return Result{}, fmt.Errorf("safe mode is active (turned on by %s) and no browser could be opened for the compose editor (%w): nothing was sent, and the editor's link is never printed in safe mode, because whoever holds it can send the message. A human must run `%s message compose <target> [text]` themselves, in a graphical session on a machine with a browser", rt.SafeModeSource(), err, appinfo.Name)
 		case !c.humanAtStderr():
 			// The link would go to a pipe, a file or a log.
 			sess.interrupt()
 			sess.stop()
-			return nil, fmt.Errorf("could not open a browser for the compose editor (%w), and the editor's link is not printed because stderr is not a terminal: a human must review the message. Run `%s message compose` yourself in an interactive terminal (it prints the link there), on a machine with a browser", err, appinfo.Name)
+			return Result{}, fmt.Errorf("could not open a browser for the compose editor (%w), and the editor's link is not printed because stderr is not a terminal: a human must review the message. Run `%s message compose` yourself in an interactive terminal (it prints the link there), on a machine with a browser", err, appinfo.Name)
 		}
 		rt.Hintf("Could not open a browser (%v).\nOpen this one-time link yourself, in a browser on this machine (over SSH, forward the port first):\n  %s", err, sess.url())
+		where = "is not open yet: it waits for a human to open the link above"
 	}
-	rt.Hintf("Compose editor for %s is open in the browser (%s). Waiting for a human to send or cancel there; Ctrl-C aborts.",
-		dest.label(), sess.origin())
+	rt.Hintf("Compose editor for %s %s (%s). Waiting for a human to send or cancel there; Ctrl-C aborts.",
+		dest.label(), where, sess.origin())
 
 	out, err := sess.wait(ctx)
 	if err != nil {
-		return nil, err
+		return Result{}, err
 	}
 	if out.Sent == nil {
 		if out.Reason != endCancelled {
 			rt.Hintf("Nothing was sent: %s.", out.Reason)
 		}
-		return map[string]any{"ok": true, "cancelled": true, "reason": string(out.Reason)}, nil
+		return Result{OK: true, Cancelled: true, Reason: string(out.Reason)}, nil
 	}
-	payload := sentPayload(*out.Sent)
-	payload["text"] = out.Text
-	return payload, nil
-}
-
-func sentPayload(sent sentMessage) map[string]any {
-	return map[string]any{
-		"ok":         true,
-		"sent":       true,
-		"channel_id": sent.ChannelID,
-		"ts":         sent.TS,
-		"thread_ts":  sent.ThreadTS,
-		"permalink":  sent.Permalink,
-	}
+	result := sentResult(*out.Sent)
+	result.Text = out.Text
+	return result, nil
 }
 
 // destination is where the composed message goes.
@@ -360,9 +385,9 @@ func (c *composer) send(ctx context.Context, dest destination, text string, noUn
 			TS:        jsonx.Str(resp["ts"]),
 			ThreadTS:  dest.threadTS,
 		}
-		if workspaceURL := cmp.Or(r.WorkspaceURL, dest.workspaceURL); workspaceURL != "" && sent.TS != "" {
-			sent.Permalink = slackurl.BuildMessageURL(workspaceURL, sent.ChannelID, sent.TS, dest.threadTS)
-		}
+		// As "message send" does. It cannot fail, and must not: an error
+		// here would have WithAutoRefresh post the message again.
+		sent.Permalink = messages.SentPermalink(ctx, r.Client, cmp.Or(r.WorkspaceURL, dest.workspaceURL), sent.ChannelID, sent.TS, dest.threadTS)
 		return sent, nil
 	})
 }

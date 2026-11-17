@@ -11,6 +11,7 @@ import (
 
 	"github.com/maelvls/slackcli/internal/appinfo"
 	"github.com/maelvls/slackcli/internal/jsonx"
+	"github.com/maelvls/slackcli/internal/slack/enrich"
 	"github.com/maelvls/slackcli/internal/slackapi"
 	"github.com/maelvls/slackcli/internal/slackid"
 )
@@ -31,18 +32,6 @@ func (e *NotFoundError) Error() string {
 	return fmt.Sprintf(`channel "#%s" not found: no public channel, and no private channel these credentials are a member of, has exactly that name in this workspace. `+
 		`Run "%s channel list" to see the names, pass the channel ID (C…) or a message URL instead, or select another workspace with --workspace.`,
 		e.Name, appinfo.Name)
-}
-
-// isFatal reports whether err makes further API calls pointless: the
-// command was cancelled or the credentials are dead. Fallbacks must not
-// swallow these (auth errors in particular trigger a credentials refresh).
-func isFatal(ctx context.Context, err error) bool {
-	return err != nil && (ctx.Err() != nil || slackapi.IsAuthError(err))
-}
-
-func isRateLimit(err error) bool {
-	var rl *slackapi.RateLimitError
-	return errors.As(err, &rl)
 }
 
 // OpenDM opens (or reuses) the DM with a user and returns its channel ID.
@@ -84,7 +73,7 @@ func ResolveID(ctx context.Context, client *slackapi.Client, input string) (stri
 
 	if canSearch(client, name) {
 		id, err := searchByName(ctx, client, name)
-		if isFatal(ctx, err) {
+		if enrich.MustAbort(ctx, err) {
 			return "", fmt.Errorf("resolving channel #%s: %w", name, err)
 		}
 		// Any other search failure (missing search:read scope, rate
@@ -99,7 +88,7 @@ func ResolveID(ctx context.Context, client *slackapi.Client, input string) (stri
 	if id != "" {
 		return id, nil
 	}
-	if isFatal(ctx, err) || isRateLimit(err) {
+	if enrich.MustAbortRequired(ctx, err) {
 		return "", fmt.Errorf("resolving channel #%s: %w", name, err)
 	}
 
@@ -110,15 +99,27 @@ func ResolveID(ctx context.Context, client *slackapi.Client, input string) (stri
 	if id != "" {
 		return id, nil
 	}
-	if isFatal(ctx, err) || isRateLimit(err) {
+	if enrich.MustAbortRequired(ctx, err) {
 		return "", fmt.Errorf("resolving channel #%s: %w", name, err)
 	}
-	if err != nil {
+	if slackapi.IsErrorCode(err, listingDeniedCodes...) {
 		// Typically enterprise_is_restricted (browser tokens on
 		// Enterprise Grid) or missing_scope.
 		return "", fmt.Errorf("resolving channel #%s: %w (these credentials cannot list channels: pass the channel ID (C…) or a message URL instead)", name, err)
 	}
+	if err != nil {
+		// Anything else (the network is down, Slack is failing) says
+		// nothing about what the credentials may do.
+		return "", fmt.Errorf("resolving channel #%s: %w", name, err)
+	}
 	return "", &NotFoundError{Name: name}
+}
+
+// listingDeniedCodes are the Slack errors that mean the credentials are not
+// allowed to list channels, as opposed to the listing having failed.
+var listingDeniedCodes = []string{
+	"missing_scope", "not_allowed_token_type", "enterprise_is_restricted", "team_access_not_granted",
+	"no_permission", "restricted_action", "access_denied", "user_is_restricted",
 }
 
 // canSearch reports whether the search.messages shortcut is worth trying:

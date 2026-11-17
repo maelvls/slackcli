@@ -71,8 +71,8 @@ func TestStandardTokenUsesBearer(t *testing.T) {
 	if !IsErrorCode(err, "missing_scope") {
 		t.Fatalf("err = %v", err)
 	}
-	want := "Slack API error calling conversations.list: missing_scope (needed: channels:read; provided: chat:write)"
-	if err.Error() != want {
+	want := "Slack API error calling conversations.list: missing_scope (needed: channels:read; provided: chat:write): "
+	if !strings.HasPrefix(err.Error(), want) {
 		t.Fatalf("message = %q", err.Error())
 	}
 	if IsAuthError(err) {
@@ -129,12 +129,19 @@ func TestRateLimitFailsFastByDefault(t *testing.T) {
 
 func TestTimeout(t *testing.T) {
 	t.Setenv("SLACKCLI_API_TIMEOUT_MS", "30")
+	// The handler hangs until the test is over. The request's context is
+	// not enough to release it: the server only notices that the client
+	// hung up once the handler has read the request body.
+	release := make(chan struct{})
 	c := browserClient(t, func(w http.ResponseWriter, r *http.Request) {
 		select {
 		case <-r.Context().Done():
-		case <-time.After(2 * time.Second):
+		case <-release:
 		}
 	})
+	// Registered after the server's own cleanup, so it runs before it:
+	// closing the server waits for the handler to return.
+	t.Cleanup(func() { close(release) })
 	_, err := c.API(context.Background(), "auth.test", nil)
 	if err == nil || !strings.Contains(err.Error(), "timed out after 30ms") {
 		t.Fatalf("err = %v", err)
@@ -161,6 +168,27 @@ func TestFakeHandler(t *testing.T) {
 	}
 	if _, err := c.API(context.Background(), "boom", nil); !IsAuthError(err) {
 		t.Fatalf("err = %v", err)
+	}
+}
+
+// chat.update keeps the blocks of a message unless it is given others: a
+// caller that means "no blocks" passes an empty, non-nil array, which must
+// reach Slack as "[]". A nil one is dropped like any nil parameter.
+func TestEncodeParamsSendsEmptyArrays(t *testing.T) {
+	got, err := EncodeParams(map[string]any{"blocks": []any{}, "attachments": []any(nil), "text": "", "unset": nil})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v, ok := got["blocks"]; !ok || v != "[]" {
+		t.Errorf("blocks = %q (sent = %v), want []", v, ok)
+	}
+	if v, ok := got["text"]; !ok || v != "" {
+		t.Errorf("text = %q (sent = %v), want an empty string", v, ok)
+	}
+	for _, k := range []string{"attachments", "unset"} {
+		if v, ok := got[k]; ok {
+			t.Errorf("%s was sent as %q, want it dropped", k, v)
+		}
 	}
 }
 

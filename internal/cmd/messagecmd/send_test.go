@@ -307,8 +307,8 @@ func TestSendFlagConflicts(t *testing.T) {
 		args []string
 		want string
 	}{
-		{"no text", []string{testChannel}, "<text> is required"},
-		{"blank text", []string{testChannel, "  "}, "<text> is required"},
+		{"no text", []string{testChannel}, "[text] is required unless --attach or --blocks is given"},
+		{"blank text", []string{testChannel, "  "}, "[text] is required unless --attach or --blocks is given"},
 		{"no-unfurl with attach", []string{testChannel, "https://example.com", "--attach", "./report.md", "--no-unfurl"}, "--no-unfurl cannot be combined with --attach"},
 		{"schedule with attach", []string{testChannel, "later with file", "--attach", "./report.md", "--schedule-in", "1h"}, "cannot be combined with --attach"},
 		{"blocks with attach", []string{testChannel, "x", "--attach", "./report.md", "--blocks", blocks}, "--blocks cannot be combined with --attach"},
@@ -514,7 +514,19 @@ func TestSendExplainsSlackErrors(t *testing.T) {
 	h.fixtures["chat.postMessage"] = func(map[string]any) (map[string]any, error) {
 		return nil, apiError("chat.postMessage", "not_in_channel")
 	}
-	h.mustFail("join the channel first", "send", testChannel, "hello")
+	// The explanation of not_in_channel is the one of the Slack error
+	// itself; the command adds the channel, not a second explanation.
+	err := h.mustFail("posting to "+testChannel+": Slack API error calling chat.postMessage: not_in_channel: ", "send", testChannel, "hello")
+	for _, once := range []string{"not a member", "join"} {
+		if n := strings.Count(err.Error(), once); n != 1 {
+			t.Errorf("%q appears %d times, want once: %v", once, n, err)
+		}
+	}
+
+	h.fixtures["chat.postMessage"] = func(map[string]any) (map[string]any, error) {
+		return nil, apiError("chat.postMessage", "is_archived")
+	}
+	h.mustFail("channel "+testChannel+" is archived and cannot be posted to", "send", testChannel, "hello")
 }
 
 func TestSendAppURLUsesDefaultWorkspace(t *testing.T) {

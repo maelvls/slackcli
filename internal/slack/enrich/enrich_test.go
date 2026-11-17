@@ -51,6 +51,38 @@ func TestMustAbort(t *testing.T) {
 	}
 }
 
+// A required lookup aborts on what aborts an optional one, and on a rate
+// limit too: "not found" must not be concluded from a call Slack refused.
+func TestMustAbortRequired(t *testing.T) {
+	ctx := context.Background()
+	cancelled, cancel := context.WithCancel(ctx)
+	cancel()
+
+	for name, err := range map[string]error{
+		"dead credentials":   authError(),
+		"wrapped auth error": fmt.Errorf("wrapped: %w", authError()),
+		"rate limit":         rateLimit("conversations.replies"),
+		"wrapped rate limit": fmt.Errorf("wrapped: %w", rateLimit("conversations.replies")),
+	} {
+		if !MustAbortRequired(ctx, err) {
+			t.Errorf("%s does not abort a required lookup", name)
+		}
+	}
+	if !MustAbortRequired(cancelled, errors.New("anything")) {
+		t.Error("an error under a cancelled context does not abort")
+	}
+	// Everything else is "not found this way": the next lookup is tried.
+	notFound := &slackapi.APIError{Method: "conversations.replies", Code: "thread_not_found"}
+	for _, err := range []error{nil, notFound, errors.New("connection reset"), context.DeadlineExceeded} {
+		if MustAbortRequired(ctx, err) {
+			t.Errorf("MustAbortRequired(%v) = true", err)
+		}
+	}
+	if MustAbortRequired(cancelled, nil) {
+		t.Error("no error, yet abort")
+	}
+}
+
 func TestGate(t *testing.T) {
 	var g Gate
 	if g.Closed() {
@@ -113,5 +145,29 @@ func TestWarnings(t *testing.T) {
 
 	if hint := Hint(); !strings.Contains(hint, appinfo.EnvName("RATE_LIMIT_MAX_WAIT_MS")) {
 		t.Errorf("hint = %q", hint)
+	}
+}
+
+// A warning is "<what is missing> (<Cause>): <Hint>". The rate limit error
+// and the hint both say which variable to set: it must be said once.
+func TestCauseLeavesTheAdviceToHint(t *testing.T) {
+	env := appinfo.EnvName("RATE_LIMIT_MAX_WAIT_MS")
+	for _, err := range []error{rateLimit("users.info"), fmt.Errorf("looking up U1: %w", rateLimit("users.info"))} {
+		if !strings.Contains(err.Error(), env) {
+			t.Fatalf("the error itself no longer names %s: the test proves nothing: %v", env, err)
+		}
+		cause := Cause(err)
+		if cause != "Slack API call users.info was rate limited; retry after 1m0s" {
+			t.Errorf("Cause(%v) = %q", err, cause)
+		}
+		if warning := fmt.Sprintf("3 of 9 users were not resolved (%s): %s", cause, Hint()); strings.Count(warning, env) != 1 {
+			t.Errorf("the warning names %s %d times, want once: %q", env, strings.Count(warning, env), warning)
+		}
+	}
+	if got := Cause(errors.New("boom")); got != "boom" {
+		t.Errorf("Cause of another error = %q, want it as it is", got)
+	}
+	if got := Cause(nil); got != "" {
+		t.Errorf("Cause(nil) = %q", got)
 	}
 }

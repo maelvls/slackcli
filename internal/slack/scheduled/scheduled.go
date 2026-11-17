@@ -7,6 +7,7 @@ import (
 	"context"
 	"fmt"
 	"regexp"
+	"strconv"
 	"strings"
 
 	"github.com/maelvls/slackcli/internal/jsonx"
@@ -28,13 +29,33 @@ type ListOptions struct {
 // ListResult is one page of scheduled messages, in the shape the CLI
 // prints.
 type ListResult struct {
-	OK bool `json:"ok"`
-	// ScheduledMessages are Slack's raw entries (id, channel_id, post_at,
-	// date_created, text).
-	ScheduledMessages []map[string]any `json:"scheduled_messages"`
+	OK                bool      `json:"ok"`
+	ScheduledMessages []Message `json:"scheduled_messages"`
 	// NextCursor is set when there are more pages: pass it as
 	// ListOptions.Cursor.
 	NextCursor string `json:"next_cursor"`
+}
+
+// Message is a pending scheduled message.
+type Message struct {
+	// ID and ChannelID are what Cancel needs.
+	ID        string `json:"id"`
+	ChannelID string `json:"channel_id"`
+	// PostAt and DateCreated are Unix times in seconds; 0, which is not
+	// printed, when Slack did not give them.
+	PostAt      int64  `json:"post_at,omitempty"`
+	DateCreated int64  `json:"date_created,omitempty"`
+	Text        string `json:"text"`
+}
+
+// UnixSeconds reads a Unix time that Slack sends as a number or as a
+// string of digits, such as post_at (0 when v is neither).
+func UnixSeconds(v any) int64 {
+	if n, ok := jsonx.Int64(v); ok {
+		return n
+	}
+	n, _ := strconv.ParseInt(strings.TrimSpace(jsonx.Str(v)), 10, 64)
+	return n
 }
 
 var unixBoundRe = regexp.MustCompile(`^\d+(\.\d+)?$`)
@@ -67,11 +88,17 @@ func List(ctx context.Context, client *slackapi.Client, opts ListOptions) (ListR
 	if err != nil {
 		return ListResult{}, fmt.Errorf("listing scheduled messages: %w", err)
 	}
-	return ListResult{
-		OK:                true,
-		ScheduledMessages: jsonx.Maps(resp["scheduled_messages"]),
-		NextCursor:        jsonx.GetStr(resp, "response_metadata", "next_cursor"),
-	}, nil
+	result := ListResult{OK: true, NextCursor: jsonx.GetStr(resp, "response_metadata", "next_cursor")}
+	for _, m := range jsonx.Maps(resp["scheduled_messages"]) {
+		result.ScheduledMessages = append(result.ScheduledMessages, Message{
+			ID:          jsonx.Str(m["id"]),
+			ChannelID:   jsonx.Str(m["channel_id"]),
+			PostAt:      UnixSeconds(m["post_at"]),
+			DateCreated: UnixSeconds(m["date_created"]),
+			Text:        jsonx.Str(m["text"]),
+		})
+	}
+	return result, nil
 }
 
 // Cancel deletes a pending scheduled message

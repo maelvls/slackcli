@@ -72,9 +72,10 @@ store) must be reinstalled the way it was installed; %[1]s itself is only
 distributed through install.sh, release archives and "go install".
 
 Prints JSON with "status": "up_to_date", "update_available" (--check only),
-"updated", or "development_build" (--check on a build without a version).
-With --check, "update_command" is the command that updates this installation,
-or "update_hint" says what to do when there is no such command.
+"updated", or "development_build" (--check on a build without a version,
+which has no release to compare with: GitHub is not asked and "latest" is
+absent). With --check, "update_command" is the command that updates this
+installation, or "update_hint" says what to do when there is no such command.
 
 %[1]s also checks for a new release in the background, at most once a
 day and only when stderr is a terminal (never under CI). Disable that with
@@ -92,6 +93,19 @@ day and only when stderr is a terminal (never under CI). Disable that with
 func run(ctx context.Context, rt *clictx.Context, u *update.Updater, checkOnly bool) error {
 	method := u.InstallMethod()
 
+	// A build without a version cannot be compared with a release; saying
+	// "up to date" would be a guess. Nothing GitHub answers changes that,
+	// so it is not asked: the answer is the same offline.
+	if current := u.CurrentVersion(); current == update.DevVersion {
+		if !checkOnly {
+			return fmt.Errorf("this %s is a development build without a version, so it cannot update itself; to install the latest release, %s",
+				appinfo.Name, u.UpdateAdvice(method))
+		}
+		result := checkResult{Current: current, InstallMethod: method, Status: "development_build"}
+		result.setAdvice(u, method)
+		return rt.Print(result)
+	}
+
 	checkCtx, cancel := context.WithTimeout(ctx, checkTimeout)
 	st, err := u.Check(checkCtx)
 	cancel()
@@ -103,18 +117,6 @@ func run(ctx context.Context, rt *clictx.Context, u *update.Updater, checkOnly b
 		Latest:          st.Latest,
 		UpdateAvailable: st.UpdateAvailable,
 		InstallMethod:   method,
-	}
-
-	// A build without a version cannot be compared with a release; saying
-	// "up to date" would be a guess.
-	if st.Current == update.DevVersion {
-		if !checkOnly {
-			return fmt.Errorf("this %s is a development build without a version, so it cannot update itself; to install the latest release, %s",
-				appinfo.Name, u.UpdateAdvice(method))
-		}
-		result.setAdvice(u, method)
-		result.Status = "development_build"
-		return rt.Print(result)
 	}
 
 	if !st.UpdateAvailable {

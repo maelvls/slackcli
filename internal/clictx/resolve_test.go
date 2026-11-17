@@ -26,12 +26,12 @@ func (k *lockableKeychain) Get(service, account string) (string, error) {
 	return k.items[service+"|"+account], nil
 }
 
-func (k *lockableKeychain) Set(service, account, value string) bool {
+func (k *lockableKeychain) Set(service, account, value string) error {
 	if k.locked != nil {
-		return false
+		return k.locked
 	}
 	k.items[service+"|"+account] = value
-	return true
+	return nil
 }
 
 func (k *lockableKeychain) Delete(service, account string) { delete(k.items, service+"|"+account) }
@@ -436,11 +436,38 @@ func TestEnvCredentialsAndWorkspaceSelection(t *testing.T) {
 		t.Errorf("got %+v, %v", r, err)
 	}
 
-	// A standard token goes to slack.com whatever the workspace: a bad
-	// SLACK_WORKSPACE_URL is ignored rather than used.
+	// A standard token goes to slack.com whatever the workspace, and works
+	// without one. A value that designates no workspace is refused all the
+	// same, rather than silently ignored, wherever it comes from.
 	t.Setenv("SLACK_TOKEN", "xoxb-env")
-	t.Setenv("SLACK_WORKSPACE_URL", "http://attacker.example")
+	for _, value := range []string{"http://attacker.example", "https://evil.example.com", "nonsense"} {
+		t.Setenv("SLACK_WORKSPACE_URL", value)
+		for _, selector := range []string{"", value} { // as given by EffectiveWorkspace
+			_, err := c.Client(context.Background(), selector)
+			if err == nil || !strings.Contains(err.Error(), "SLACK_WORKSPACE_URL must be an https Slack workspace URL") || !strings.Contains(err.Error(), `(got "`+value+`")`) {
+				t.Errorf("SLACK_WORKSPACE_URL=%q, selector %q: err = %v", value, selector, err)
+			}
+		}
+		t.Setenv("SLACK_WORKSPACE_URL", "")
+		_, err := c.Client(context.Background(), value)
+		if err == nil || !strings.Contains(err.Error(), "--workspace must be an https Slack workspace URL") || !strings.Contains(err.Error(), "leave it out") {
+			t.Errorf("--workspace %q: err = %v", value, err)
+		}
+	}
 	if r, err := c.Client(context.Background(), ""); err != nil || r.WorkspaceURL != "" {
+		t.Errorf("no workspace: got %+v, %v", r, err)
+	}
+	// A URL and a substring of a stored workspace give the same workspace.
+	mustUpsert(t, c, browser("https://acme.slack.com", "xoxc-stored"))
+	for _, selector := range []string{"https://acme.slack.com", "acme"} {
+		r, err := c.Client(context.Background(), selector)
+		if err != nil || r.WorkspaceURL != "https://acme.slack.com" || r.Auth.Token != "xoxb-env" {
+			t.Errorf("selector %q: got %+v, %v", selector, r, err)
+		}
+	}
+	// --workspace wins over SLACK_WORKSPACE_URL.
+	t.Setenv("SLACK_WORKSPACE_URL", "https://other.slack.com")
+	if r, err := c.Client(context.Background(), "acme"); err != nil || r.WorkspaceURL != "https://acme.slack.com" {
 		t.Errorf("got %+v, %v", r, err)
 	}
 }

@@ -10,6 +10,7 @@ import (
 
 	"github.com/maelvls/slackcli/internal/appinfo"
 	"github.com/maelvls/slackcli/internal/jsonx"
+	"github.com/maelvls/slackcli/internal/slack/enrich"
 	"github.com/maelvls/slackcli/internal/slackapi"
 	"github.com/maelvls/slackcli/internal/slackid"
 )
@@ -179,7 +180,7 @@ func lookup(ctx context.Context, client *slackapi.Client, inputs []string) ([]fo
 				// No active member has that address. A deactivated one
 				// may: the directory is the only place to find them.
 				w.deactivated = true
-			case isFatal(ctx, err):
+			case enrich.MustAbortRequired(ctx, err):
 				return nil, fmt.Errorf("looking up user %s: %w", trimmed, err)
 			}
 			// users.lookupByEmail unavailable (missing users:read.email
@@ -353,23 +354,38 @@ func scanError(err error, wants []*want) error {
 	var missing []string
 	onlyEmails := true
 	for _, w := range wants {
-		if w.active == nil {
-			missing = append(missing, strconv.Quote(w.input))
-			onlyEmails = onlyEmails && w.deactivated
+		// Settled, as in scanDirectory: an active match, or the deactivated
+		// member an email no active member has was looked for.
+		if w.active != nil || w.deactivated && w.inactive != nil {
+			continue
 		}
+		missing = append(missing, strconv.Quote(w.input))
+		onlyEmails = onlyEmails && w.deactivated
 	}
 	if onlyEmails && len(missing) > 0 {
-		return fmt.Errorf("could not resolve user %s: no active member of this workspace has that email address (users.lookupByEmail), "+
+		return &scanLimitError{err: err, msg: fmt.Sprintf("could not resolve user %s: no active member of this workspace has that email address (users.lookupByEmail), "+
 			"and looking for a deactivated one takes a scan of the user directory, which this workspace is too large for (users.list was rate limited). "+
 			"Pass the user ID (U…) instead. "+
-			"Setting %s to a large value makes the scan wait and carry on, which can take very long: %w",
-			strings.Join(missing, ", "), appinfo.EnvName("RATE_LIMIT_MAX_WAIT_MS"), err)
+			"Setting %s to a large value makes the scan wait and carry on, which can take very long (%s)",
+			strings.Join(missing, ", "), appinfo.EnvName("RATE_LIMIT_MAX_WAIT_MS"), rl.Summary())}
 	}
-	return fmt.Errorf("could not resolve user %s: this workspace is too large to scan its user directory (users.list was rate limited). "+
+	return &scanLimitError{err: err, msg: fmt.Sprintf("could not resolve user %s: this workspace is too large to scan its user directory (users.list was rate limited). "+
 		"Pass the user ID (U…) or the email address instead: a handle is only found without a scan when it is the exact @handle of somebody who posted a message you can see. "+
-		"Setting %s to a large value makes the scan wait and carry on, which can take very long: %w",
-		strings.Join(missing, ", "), appinfo.EnvName("RATE_LIMIT_MAX_WAIT_MS"), err)
+		"Setting %s to a large value makes the scan wait and carry on, which can take very long (%s)",
+		strings.Join(missing, ", "), appinfo.EnvName("RATE_LIMIT_MAX_WAIT_MS"), rl.Summary())}
 }
+
+// scanLimitError is the explanation of a rate-limited directory scan. It
+// wraps the rate limit (errors.As still finds the *slackapi.RateLimitError)
+// without repeating its message, which gives the same advice about the
+// environment variable as the explanation does.
+type scanLimitError struct {
+	msg string
+	err error
+}
+
+func (e *scanLimitError) Error() string { return e.msg }
+func (e *scanLimitError) Unwrap() error { return e.err }
 
 func (w *want) consider(m map[string]any) {
 	profile := jsonx.Map(m["profile"])

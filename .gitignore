@@ -21,17 +21,3 @@ go.work.sum
 
 # claude code agent worktrees + local session state
 .claude/
-
-# orca/git worktrees checked out alongside the repo
-feat-*
-fix-*
-chore-*
-
-# design docs
-design-docs/
-
-# playwright-cli artifacts
-.playwright-cli/
-
-# context artifacts
-.context/

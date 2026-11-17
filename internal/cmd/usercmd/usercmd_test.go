@@ -196,6 +196,14 @@ func TestListRejectsGarbageLimit(t *testing.T) {
 			t.Errorf("--limit %s: printed %v, made calls %+v", limit, out, h.calls)
 		}
 	}
+
+	// The wording is the one every command shares (cmdutil.CheckLimit),
+	// and it says how to get the rest.
+	_, err := newHarness(t).run("list", "--limit", "1001")
+	const want = "invalid --limit value 1001: must be between 1 and 1000 (use --cursor with next_cursor to get more)"
+	if err == nil || err.Error() != want {
+		t.Errorf("--limit 1001: err = %v\nwant %s", err, want)
+	}
 }
 
 func TestGet(t *testing.T) {

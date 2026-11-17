@@ -5,7 +5,6 @@ package search
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -316,18 +315,6 @@ func (s *searcher) warnf(format string, args ...any) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.warnings = append(s.warnings, fmt.Sprintf(format, args...))
-}
-
-// isFatal reports whether err must abort the search rather than cost one
-// result: the command was cancelled, or the credentials are dead (the
-// caller refreshes them and retries).
-func isFatal(ctx context.Context, err error) bool {
-	return err != nil && (ctx.Err() != nil || slackapi.IsAuthError(err))
-}
-
-func isRateLimit(err error) bool {
-	var rl *slackapi.RateLimitError
-	return errors.As(err, &rl)
 }
 
 // forEach calls fn(i) for i in [0, n) on at most workers goroutines and

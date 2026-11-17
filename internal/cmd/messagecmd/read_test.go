@@ -251,16 +251,15 @@ func TestGetIncludeReactionsAndResolveUsers(t *testing.T) {
 	}
 }
 
-func TestGetTruncatedURLHint(t *testing.T) {
+// A message URL with thread_ts and no cid is complete: no warning.
+func TestGetURLWithoutCID(t *testing.T) {
 	h := newHarness(t)
 	h.history(map[string]any{"ts": testTS, "text": "x"})
-	h.mustRun("get", testURL+"?thread_ts=1770160000.000001")
-	if !strings.Contains(h.stderr.String(), "URL may have been truncated by shell") {
-		t.Errorf("stderr = %q", h.stderr.String())
-	}
-	h.mustRun("get", testURL)
-	if h.stderr.Len() != 0 {
-		t.Errorf("stderr = %q", h.stderr.String())
+	for _, url := range []string{testURL + "?thread_ts=1770160000.000001", testURL} {
+		h.mustRun("get", url)
+		if h.stderr.Len() != 0 {
+			t.Errorf("%s: stderr = %q", url, h.stderr.String())
+		}
 	}
 }
 
@@ -304,10 +303,12 @@ func threadFixture(h *harness) {
 	)
 }
 
-const wantThread = `{"messages": [
-	{"ts": "1770160000.000001", "author": {"user_id": "U05BRPTKL6A"}, "content": "root"},
-	{"ts": "1770160500.000100", "author": {"user_id": "U0AAAAAAAAA"}, "content": "first"},
-	{"ts": "1770160600.000200", "author": {"user_id": "U05BRPTKL6A"}, "content": "second"}
+// A thread is printed in the shape of channel history: channel_id at the
+// top, and on every message its channel_id and thread_ts.
+const wantThread = `{"channel_id": "C12345678", "messages": [
+	{"channel_id": "C12345678", "ts": "1770160000.000001", "thread_ts": "1770160000.000001", "author": {"user_id": "U05BRPTKL6A"}, "content": "root"},
+	{"channel_id": "C12345678", "ts": "1770160500.000100", "thread_ts": "1770160000.000001", "author": {"user_id": "U0AAAAAAAAA"}, "content": "first"},
+	{"channel_id": "C12345678", "ts": "1770160600.000200", "thread_ts": "1770160000.000001", "author": {"user_id": "U05BRPTKL6A"}, "content": "second"}
 ]}`
 
 func TestListThread(t *testing.T) {
@@ -326,7 +327,6 @@ func TestListThread(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			h := newHarness(t)
 			threadFixture(h)
-			// channel_id and thread_ts are not repeated on every message.
 			wantJSON(t, h.mustRun(append([]string{"list"}, tt.args...)...), wantThread)
 			calls := h.callsTo("conversations.replies")
 			// Asked about a reply, FetchThread asks again about the root

@@ -30,9 +30,9 @@ func (k fakeKeychain) Get(service, account string) (string, error) {
 	}
 	return k[service+"|"+account], nil
 }
-func (k fakeKeychain) Set(service, account, value string) bool {
+func (k fakeKeychain) Set(service, account, value string) error {
 	k[service+"|"+account] = value
-	return true
+	return nil
 }
 func (k fakeKeychain) Delete(service, account string) { delete(k, service+"|"+account) }
 
@@ -189,9 +189,9 @@ func TestWhoami(t *testing.T) {
 		t.Errorf("unexpected header: %+v", got)
 	}
 	want := []whoamiWorkspace{
-		{WorkspaceURL: "https://acme.slack.com", WorkspaceName: "Acme", AuthType: "browser", Token: "xoxc-a…cret", CookieD: "xoxd-c…ghij", Secrets: "ok"},
+		{WorkspaceURL: "https://acme.slack.com", WorkspaceName: "Acme", AuthType: "browser", Token: "xoxc-a…cret", CookieD: "xoxd-c…ghij", Secrets: "ok", SecretsStorage: "keychain"},
 		{WorkspaceURL: "https://lost.slack.com", WorkspaceName: "Lost", AuthType: "browser", Secrets: "missing"},
-		{WorkspaceURL: "https://bot.slack.com", AuthType: "standard", Token: "xoxb-b…cret", Default: true, Secrets: "ok"},
+		{WorkspaceURL: "https://bot.slack.com", AuthType: "standard", Token: "xoxb-b…cret", Default: true, Secrets: "ok", SecretsStorage: "keychain"},
 	}
 	if len(got.Workspaces) != len(want) {
 		t.Fatalf("got %d workspaces:\n%s", len(got.Workspaces), out)
@@ -211,19 +211,43 @@ func TestWhoami(t *testing.T) {
 
 func TestWhoamiEmptyAndEnvironment(t *testing.T) {
 	h := newHarness(t, nil)
-	got := decodeJSON[whoamiOutput](t, h.mustRun("", "whoami"))
-	if got.Version != 1 || len(got.Workspaces) != 0 || got.Environment != nil {
-		t.Errorf("empty store: %+v", got)
+	// Nothing configured: "workspaces" is there, empty, and stderr says
+	// how to add credentials.
+	out := h.mustRun("", "whoami")
+	if want := "{\n  \"version\": 1,\n  \"workspaces\": []\n}\n"; out != want {
+		t.Errorf("empty store: output %q, want %q", out, want)
+	}
+	for _, want := range []string{"No Slack credentials are configured", "slackcli auth import-desktop", "slackcli auth add", "SLACK_TOKEN"} {
+		if !strings.Contains(h.stderr.String(), want) {
+			t.Errorf("empty store: stderr %q does not contain %q", h.stderr, want)
+		}
+	}
+
+	// A SLACK_TOKEN that is not a token is reported as such, and nothing
+	// of it is shown.
+	t.Setenv("SLACK_TOKEN", "garbage-0123456789-secret")
+	out = h.mustRun("", "whoami")
+	env := decodeJSON[whoamiOutput](t, out).Environment
+	if env == nil || env.AuthType != "" || env.Token != "" || !strings.Contains(env.Error, "SLACK_TOKEN does not look like a Slack token") || !strings.Contains(env.Note, "cannot be used") {
+		t.Errorf("environment = %+v", env)
+	}
+	if strings.Contains(out, "garbage") || strings.Contains(out, "0123456789") || h.stderr.Len() != 0 {
+		t.Errorf("output leaks the value, or a hint was printed:\n%s%s", out, h.stderr)
+	}
+	t.Setenv("SLACK_TOKEN", "xoxc-env-0123456789-secret")
+	t.Setenv("SLACK_COOKIE_D", "notxoxd-0123456789")
+	if env := decodeJSON[whoamiOutput](t, h.mustRun("", "whoami")).Environment; env == nil || env.AuthType != "" || !strings.Contains(env.Error, "SLACK_COOKIE_D must be") {
+		t.Errorf("environment = %+v", env)
 	}
 
 	t.Setenv("SLACK_TOKEN", "xoxc-env-0123456789-secret")
 	t.Setenv("SLACK_COOKIE_D", "d=xoxd-env-0123456789-secret")
 	t.Setenv("SLACK_WORKSPACE_URL", "https://env.slack.com")
-	out := h.mustRun("", "whoami")
+	out = h.mustRun("", "whoami")
 	if strings.Contains(out, "0123456789") {
 		t.Errorf("output leaks a secret:\n%s", out)
 	}
-	env := decodeJSON[whoamiOutput](t, out).Environment
+	env = decodeJSON[whoamiOutput](t, out).Environment
 	if env == nil || env.AuthType != "browser" || env.Token != "xoxc-e…cret" || env.CookieD != "xoxd-e…cret" || env.WorkspaceURL != "https://env.slack.com" {
 		t.Errorf("environment = %+v", env)
 	}
@@ -582,7 +606,8 @@ func TestParseCurl(t *testing.T) {
 func TestAdd(t *testing.T) {
 	h := newHarness(t, nil)
 
-	if out := h.mustRun("", "add", "--workspace-url", "bot.slack.com", "--token", "xoxb-1"); out != "Saved standard token.\n" {
+	// The output names the workspace and says which one is the default.
+	if out := h.mustRun("", "add", "--workspace-url", "bot.slack.com", "--token", "xoxb-1"); out != "Saved standard token for https://bot.slack.com, which is the default workspace.\n" {
 		t.Errorf("output %q", out)
 	}
 	if !strings.Contains(h.stderr.String(), "--from-env") {
@@ -593,7 +618,7 @@ func TestAdd(t *testing.T) {
 	}
 
 	out := h.mustRun("", "add", "--workspace-url", "https://acme.slack.com/client/T1", "--xoxc", "xoxc-1", "--xoxd", "d=xoxd-abc%2Bdef")
-	if out != "Saved browser tokens.\n" {
+	if out != "Saved browser tokens for https://acme.slack.com; the default workspace is still https://bot.slack.com.\n" {
 		t.Errorf("output %q", out)
 	}
 	// The cookie is stored decoded: the client encodes it when sending.
@@ -617,7 +642,10 @@ func TestAdd(t *testing.T) {
 		{[]string{"add", "--workspace-url", "https://x.slack.com", "--token", "xoxb-1", "--xoxc", "xoxc-1", "--xoxd", "xoxd-1"}, "not all of them"},
 		{[]string{"add", "--workspace-url", "https://x.slack.com", "--token", "xoxc-1"}, "pass it with --xoxc"},
 		{[]string{"add", "--workspace-url", "https://x.slack.com", "--xoxc", "xoxd-1", "--xoxd", "xoxc-1"}, "starting with xoxc-"},
-		{[]string{"add", "--workspace-url", "https://x.slack.com", "--xoxc", "xoxc-1", "--xoxd", "nope"}, "starting with xoxd-"},
+		{[]string{"add", "--workspace-url", "https://x.slack.com", "--xoxc", "xoxc-1", "--xoxd", "nope"}, `--xoxd must be the value of the browser's "d" cookie, which starts with xoxd-`},
+		// A value that is not a Slack token is not saved.
+		{[]string{"add", "--workspace-url", "https://x.slack.com", "--token", "garbage"}, "--token does not look like a Slack token"},
+		{[]string{"add", "--workspace-url", "https://x.slack.com", "--token", "xoxd-1"}, `--token holds a "d" cookie (xoxd-), not a token`},
 		{[]string{"add", "--workspace-url", "https://x.slack.com", "--from-env"}, "SLACK_TOKEN is not set"},
 		{[]string{"add", "--workspace-url", "https://x.slack.com", "--from-env", "--token", "xoxb-1"}, "cannot be combined"},
 		{[]string{"add", "--workspace-url", "https://x.slack.com", "extra"}, "unknown command"},
@@ -647,11 +675,61 @@ func TestAddFromEnv(t *testing.T) {
 		t.Errorf("err = %v, want SLACK_COOKIE_D to be required", err)
 	}
 	t.Setenv("SLACK_COOKIE_D", "xoxd-env%2Bx")
-	if out := h.mustRun("", "add", "--workspace-url", "https://acme.slack.com", "--from-env"); out != "Saved browser tokens.\n" {
+	if out := h.mustRun("", "add", "--workspace-url", "https://acme.slack.com", "--from-env"); out != "Saved browser tokens for https://acme.slack.com; the default workspace is still https://bot.slack.com.\n" {
 		t.Errorf("output %q", out)
 	}
 	if _, a := h.stored("https://acme.slack.com"); a.XoxcToken != "xoxc-env" || a.XoxdCookie != "xoxd-env+x" {
 		t.Errorf("stored %+v", a)
+	}
+
+	// What the environment holds is checked like the flags, and named.
+	for _, tc := range []struct{ token, cookie, want string }{
+		{"garbage-secret", "", "--from-env: SLACK_TOKEN does not look like a Slack token"},
+		{"xoxc-secret", "notxoxd-secret", "--from-env: SLACK_COOKIE_D must be the value of the browser's"},
+	} {
+		t.Setenv("SLACK_TOKEN", tc.token)
+		t.Setenv("SLACK_COOKIE_D", tc.cookie)
+		_, err := h.run("", "add", "--workspace-url", "https://x.slack.com", "--from-env")
+		if err == nil || !strings.Contains(err.Error(), tc.want) || strings.Contains(err.Error(), "secret") {
+			t.Errorf("SLACK_TOKEN=%s: err = %v, want %q", tc.token, err, tc.want)
+		}
+	}
+	if n := h.workspaceCount(); n != 2 {
+		t.Errorf("%d workspaces stored, want 2", n)
+	}
+}
+
+// With several workspaces and no default, "auth add" says so.
+func TestAddSaysWhenThereIsNoDefault(t *testing.T) {
+	h := newHarness(t, nil)
+	// Several workspaces added at once leave the store without a default.
+	if err := h.rt.Store.Upsert(browserWorkspace("https://acme.slack.com", "Acme", "xoxc-a"), browserWorkspace("https://zeta.slack.com", "Zeta", "xoxc-z")); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("SLACK_TOKEN", "xoxb-1")
+	out := h.mustRun("", "add", "--workspace-url", "https://bot.slack.com", "--from-env")
+	if want := `Saved standard token for https://bot.slack.com; no default workspace is set: choose one with "slackcli auth set-default <workspace>".` + "\n"; out != want {
+		t.Errorf("output %q, want %q", out, want)
+	}
+}
+
+// An extractor's error starts with the name of its source, which the
+// command says itself: it is not repeated.
+func TestImportDoesNotRepeatTheSource(t *testing.T) {
+	h := newHarness(t, nil)
+	h.rt.Desktop = func(context.Context) (*authextract.Extracted, error) {
+		return nil, fmt.Errorf("Slack Desktop: no Slack data at /nowhere: %w", authextract.ErrNotFound)
+	}
+	_, err := h.run("", "import-desktop")
+	if err == nil || !errors.Is(err, authextract.ErrNotFound) ||
+		!strings.HasPrefix(err.Error(), "could not import from Slack Desktop: no Slack data at /nowhere: ") || !strings.Contains(err.Error(), "Install Slack Desktop") {
+		t.Errorf("err = %v", err)
+	}
+	h.rt.Firefox = func(context.Context) (*authextract.Extracted, error) {
+		return nil, errors.New("Firefox: profile locked")
+	}
+	if _, err = h.run("", "import-firefox"); err == nil || err.Error() != "could not import from Firefox: profile locked" {
+		t.Errorf("err = %v", err)
 	}
 }
 

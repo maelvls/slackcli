@@ -26,7 +26,11 @@ func TestEdit(t *testing.T) {
 			got := h.mustRun(append([]string{"edit"}, tt.args...)...)
 			wantJSON(t, got, `{"ok": true}`)
 			calls := h.callsTo("chat.update")
-			want := map[string]any{"channel": testChannel, "ts": testTS, "text": tt.wantText}
+			// Without blocks of its own, the edit sends an empty, non-nil
+			// array (DeepEqual tells it from a nil one, which would not be
+			// sent): Slack would otherwise keep the old blocks of the
+			// message, which are what it displays.
+			want := map[string]any{"channel": testChannel, "ts": testTS, "text": tt.wantText, "blocks": []any{}}
 			if len(calls) != 1 || !reflect.DeepEqual(calls[0].params, want) {
 				t.Errorf("chat.update calls = %v\nwant params %#v", calls, want)
 			}

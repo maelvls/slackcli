@@ -14,12 +14,14 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/spf13/cobra"
 
 	"github.com/maelvls/slackcli/internal/auth"
 	"github.com/maelvls/slackcli/internal/authextract"
 	"github.com/maelvls/slackcli/internal/clictx"
+	"github.com/maelvls/slackcli/internal/slack/enrich"
 	"github.com/maelvls/slackcli/internal/slackapi"
 )
 
@@ -354,19 +356,29 @@ func TestCreateForMessageURLRepliesInItsThread(t *testing.T) {
 	h.wantDestinations(h.only("drafts.create"),
 		map[string]any{"channel_id": "C11111111", "thread_ts": "1700000000.000001", "broadcast": true})
 
-	t.Run("--thread-ts overrides the thread of the URL", func(t *testing.T) {
+	// --thread-ts may repeat the thread of the URL, not replace it.
+	t.Run("--thread-ts repeating the thread of the URL", func(t *testing.T) {
 		h := newHarness(t)
-		h.mustRun("create", url, "hello", "--thread-ts", otherThreadTS)
+		h.mustRun("create", url, "hello", "--thread-ts", "1700000000.000001")
 		h.wantDestinations(h.only("drafts.create"),
-			map[string]any{"channel_id": "C11111111", "thread_ts": otherThreadTS, "broadcast": false})
-		h.wantNoCalls("conversations.history")
+			map[string]any{"channel_id": "C11111111", "thread_ts": "1700000000.000001", "broadcast": false})
+	})
+	t.Run("--thread-ts contradicting the thread of the URL", func(t *testing.T) {
+		h := newHarness(t)
+		h.mustFail("--thread-ts "+otherThreadTS+" contradicts the message URL, whose thread is 1700000000.000001", "create", url, "hello", "--thread-ts", otherThreadTS)
+		h.wantNoCalls("drafts.create")
+
+		h = newHarness(t)
+		h.drafts = []any{draft(nil)}
+		h.mustFail("contradicts the message URL", "update", "Dr123", "hello", "--channel", url, "--thread-ts", otherThreadTS)
+		h.wantNoCalls("drafts.update")
 	})
 
-	t.Run("warns about a URL the shell truncated", func(t *testing.T) {
+	t.Run("a URL with thread_ts and no cid is complete", func(t *testing.T) {
 		h := newHarness(t)
 		h.mustRun("create", url+"?thread_ts=1700000000.000001", "hello")
-		if !strings.Contains(h.stderr.String(), "truncated") {
-			t.Errorf("stderr = %q, want a truncation hint", h.stderr.String())
+		if h.stderr.Len() != 0 {
+			t.Errorf("stderr = %q, want nothing", h.stderr.String())
 		}
 	})
 }
@@ -728,7 +740,7 @@ func TestOldEditorUsagePointsToCompose(t *testing.T) {
 	if err == nil {
 		t.Fatal("draft #general hi succeeded")
 	}
-	for _, want := range []string{"not a 'message draft' subcommand", `message compose "#general"`} {
+	for _, want := range []string{`unknown command "#general" for "draft"`, "its commands are list, create, update and delete", `message compose "#general" [text]`} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("err = %q, want it to contain %q", err, want)
 		}
@@ -918,4 +930,40 @@ func TestFailedDraftDeletesItsUploads(t *testing.T) {
 			t.Errorf("stderr = %q, want a warning naming the orphaned file", h.stderr.String())
 		}
 	})
+}
+
+// The channel names of a list are an enrichment: a rate limit costs the
+// names and gives a warning, but credentials that died fail the command
+// instead of being swallowed.
+func TestListChannelNameLookupFailures(t *testing.T) {
+	h := newHarness(t)
+	h.drafts = []any{draft(nil)}
+	h.failWith = map[string]string{"conversations.info": "invalid_auth"}
+	h.mustFail("looking up the channels of the drafts", "list")
+
+	h = newHarness(t)
+	h.drafts = []any{draft(nil)}
+	h.failWith = map[string]string{"conversations.info": "channel_not_found"}
+	wantJSON(t, h.mustRun("list"), `{"ok": true, "count": 1, "drafts": [
+		{"id": "Dr123", "last_updated_ts": "1700000000.5", "destinations": [{"channel_id": "C11111111"}]}]}`)
+
+	h = newHarness(t)
+	h.rt.ClientOptions = []slackapi.Option{slackapi.WithHandler(func(_ context.Context, method string, _ map[string]any) (map[string]any, error) {
+		if method == "conversations.info" {
+			return nil, &slackapi.RateLimitError{Method: method, RetryAfter: time.Minute}
+		}
+		return map[string]any{"ok": true, "drafts": []any{draft(nil)}}, nil
+	})}
+	cmd := New(h.rt)
+	cmd.SilenceUsage, cmd.SilenceErrors = true, true
+	cmd.SetArgs([]string{"list"})
+	ctx, warnings := enrich.Collect(context.Background())
+	if err := cmd.ExecuteContext(ctx); err != nil {
+		t.Fatalf("a rate-limited name lookup failed the list: %v", err)
+	}
+	wantJSON(t, h.stdout.String(), `{"ok": true, "count": 1, "drafts": [
+		{"id": "Dr123", "last_updated_ts": "1700000000.5", "destinations": [{"channel_id": "C11111111"}]}]}`)
+	if got := warnings.List(); len(got) != 1 || !strings.Contains(got[0], "the names of 1 of 1 channels were not looked up") {
+		t.Errorf("warnings = %q", got)
+	}
 }

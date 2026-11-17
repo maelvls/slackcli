@@ -20,7 +20,7 @@ const (
 	maxBlocks = 50
 )
 
-const blocksUsage = `Path to a JSON file holding a Block Kit blocks array (at most 50 blocks), or "-" to read it from stdin. The blocks replace the automatic rich-text conversion of <text>, which is still sent as the notification/fallback text`
+const blocksUsage = `Path to a JSON file holding a Block Kit blocks array (at most 50 blocks), or "-" to read it from stdin. The blocks replace the automatic rich-text conversion of the text argument, which is still sent as the notification/fallback text`
 
 // loadBlocks reads the Block Kit array given to --blocks: a file path, or
 // "-" for stdin.

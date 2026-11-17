@@ -10,7 +10,7 @@ make test    # go test ./...   (narrow with PKGS=./internal/slack/search/...)
 make lint    # go vet + gofmt check; `make fmt` fixes formatting
 ```
 
-CI also runs `go test -race ./...`, `go mod tidy -diff`, a cross-compile of every release target and `shellcheck install.sh`.
+CI also runs `go test -race ./...`, `go mod tidy -diff`, `shellcheck` on `install.sh` and `scripts/install-skill.sh`, `goreleaser check`, and a snapshot release (`make snapshot`, which cross-compiles every release target) whose archives `.github/scripts/checkdist` verifies against the release naming contract.
 
 Never test against real Slack: do not run the built binary against a workspace, read `~/.config/slackcli`, or write to the keychain. Use fakes and `t.TempDir()`. Running `--help` is always safe.
 
@@ -19,18 +19,23 @@ Never test against real Slack: do not run the built binary against a workspace, 
 | Path | Role |
 | --- | --- |
 | `cmd/slackcli` | `main`: calls `root.Run` |
-| `internal/appinfo` | The tool's identity: `Name`, `EnvPrefix`, `Repo`, `Version`, `Env`/`EnvName`/`EnvBool`/`EnvDurationMS`, `ConfigDir`, `CacheDir`, `DownloadsDir` |
-| `internal/slackapi` | Slack Web API client (`API`, `APIMultipart`, `Authorize`), `*APIError`, `IsErrorCode`, `IsAuthError`, `*RateLimitError`, `NewFake` |
-| `internal/auth` | Credentials store (`credentials.json` + macOS keychain), workspace selection, legacy migration |
+| `internal/appinfo` | The tool's identity: `Name`, `EnvPrefix`, `Repo`, `Version`, `Env`/`EnvName`/`EnvSource`/`EnvBool`, durations (`EnvDurationMS`, `CheckEnvDurationMS`, `ParseDurationMS`), `SafeModeEnvNames`, `ConfigDir`, `CacheDir`, `DownloadsDir` |
+| `internal/slackapi` | Slack Web API client (`API`, `APIMultipart`, `Authorize`; API calls never follow redirects), `*APIError`, `IsErrorCode`, `IsAuthError`, `*RateLimitError` (`Summary`), `NewFake`; `IsWorkspaceHost`, `IsSlackHost` and `WorkspaceOrigin` are the only host predicates |
+| `internal/auth` | Credentials store (`credentials.json` + macOS keychain, `SecretsStorage`), workspace selection, legacy migration |
 | `internal/authextract` | Credential extraction from Slack Desktop, Chrome, Brave, Firefox |
-| `internal/clictx` | Runtime shared by commands: `*Context` (`Client`, `EffectiveWorkspace`, `Print`, `Hintf`, `SafeMode`, `DisableTimeout`), `WithAutoRefresh`, `AddWorkspaceFlag`, `NoTimeout` |
-| `internal/cmd/root` | Command tree, `Run`, command-timeout watchdog, exit codes |
+| `internal/clictx` | Runtime shared by commands: `*Context` (`Client`, `EffectiveWorkspace`, `Print`, `Hintf`, `SafeMode`, `SafeModeSource`, `DisableTimeout`), `WithAutoRefresh`, `AddWorkspaceFlag`, `NoTimeout`; environment credentials (`EnvAuth`, `CheckToken`, `CheckCookieD`); safe-mode lists (`SafeModeHelp`, `ChangesSlack`) |
+| `internal/cmd/root` | Command tree, `Run`, command-timeout watchdog, exit codes, wording of usage errors |
 | `internal/cmd/<name>cmd` | One package per command, exporting `New(rt *clictx.Context) *cobra.Command` |
-| `internal/slack/<domain>` | Slack logic without CLI concerns (`messages`, `search`, `channels`, `users`, `files`, `upload`, `canvas`, `drafts`, `later`, `unreads`, `scheduled`, `workflows`, `slacktext`, `slackurl`, `enrich` (the rule for optional lookups: degrade on rate limits), ...) |
+| `internal/cmd/cmdutil` | What commands share: `<target>`/`--workspace`/`--ts` parsing and resolution (`ParseTarget`, `ParseChannel`, `ParseMessageTarget`, `WithTarget`, `Workspace`, `AddTargetWorkspaceFlag`), flag validation (`ParseTS`, `CheckLimit`, `CheckOptionalLimit`, `CheckMaxChars`), `AllowDashText`, `PrintList` (empty lists printed as `[]`), `*UsageError` |
+| `internal/slack/<domain>` | Slack logic without CLI concerns (`messages`, `search`, `channels`, `users`, `files`, `upload`, `canvas`, `drafts`, `later`, `unreads`, `scheduled`, `workflows`, `slacktext`, `slackurl`, `enrich` (the rule for optional lookups: degrade on rate limits; word the warning with `Cause` and `Hint`), ...) |
 | `internal/output` | Pruned, key-order-preserving, 2-space JSON |
-| `internal/jsonx` | Accessors for loosely-typed JSON (`Map`, `Slice`, `Str`, `Int`, `Bool`, ...) |
+| `internal/jsonx` | Accessors for loosely-typed JSON (`Map`, `Slice`, `Str`, `Int`, `Int64`, `Bool`, ...); `Int`/`Int64` saturate, so do not convert a `Num` float to an integer yourself |
 | `internal/slackid` | Recognises channel and user IDs |
+| `internal/leveldb` | Read-only reader of Chromium LevelDB directories (`Scan`) that takes no lock, used by `authextract` |
 | `internal/update` | Self-update and the background update notice |
+| `internal/testenv` | Tests only: `Isolate(t)` points the home, config and cache directories at a temporary directory on every OS |
+| `internal/update/updatetest` | Test fakes for the updater: a fake GitHub (`NewServer`), `TarGz`, `Zip`, `Checksums` |
+| `.github/scripts/checkdist` | CI only: checks the archives of a snapshot release against the names in `internal/update` |
 
 ## Conventions
 
@@ -40,12 +45,13 @@ Never test against real Slack: do not run the built binary against a workspace, 
 - **Never string-match Slack errors**: a Slack `ok:false` is an `*slackapi.APIError`; test it with `slackapi.IsErrorCode(err, "channel_not_found")`.
 - **Clients come from `rt.Client(ctx, workspace)` inside `clictx.WithAutoRefresh`**, so that expired credentials are re-imported and the work retried once.
 - **Credentials only go to Slack hosts**: use `client.Authorize(req)` only for requests to Slack-owned hosts; never follow a URL from a payload with credentials attached. Keep secrets off argv and out of logs and errors.
-- **Commands**: use `RunE`, `cmd.Context()` and cobra arg validators. Do not set `PersistentPreRun*`, `SilenceUsage` or `SilenceErrors` (the root does). Validate numeric and enum flags and refuse bad values rather than clamping silently. Mark commands that wait on a human with `clictx.NoTimeout`.
+- **Commands**: use `RunE`, `cmd.Context()` and cobra arg validators. Do not set `PersistentPreRun*`, `SilenceUsage` or `SilenceErrors` (the root does). Validate numeric and enum flags and refuse bad values rather than clamping silently. Mark commands that wait on a human with `clictx.NoTimeout`. A group of commands needs no `RunE`: the root gives it one that prints its help and rejects unknown subcommands.
+- **Usage errors are `*cmdutil.UsageError`**: wrong arguments and bad flags reach the root as one (cobra's validators and flag errors are wrapped for you), and the root rewords it and points at the `--help` of the command that failed. Do not word arity or flag errors yourself.
 - **Safe mode**: a new command that posts, edits or deletes content must check `rt.SafeMode()` and refuse (or hand over to the compose editor). Say in its help whether safe mode covers it.
 - **Help text is a contract**: `Short`/`Long` and flag usage must state the arguments, the JSON printed and the side effects. Command names, flags, defaults and JSON field names are a public surface: do not change them casually.
 - **Output types**: structs with `json:"snake_case"` tags; field order is output order. `output` prunes null/blank/empty values but keeps `false` and `0`.
 - **I/O functions take `ctx context.Context` first.** No global mutable state except mutex-guarded caches; make clocks, sleeps and directories injectable for tests.
-- **Tests**: standard `testing` only (no assertion libraries). Fake the API with `slackapi.NewFake(handler)`, raw HTTP with `net/http/httptest`; use `t.TempDir()` and `t.Setenv()`. Add a test for every bug fixed.
+- **Tests**: standard `testing` only (no assertion libraries). Fake the API with `slackapi.NewFake(handler)`, raw HTTP with `net/http/httptest`; use `t.TempDir()` and `t.Setenv()`. A test that reads the home, config or cache directory must call `testenv.Isolate(t)`. Tests must pass on Windows: no bare permission-bit assertions, and `filepath` in path assertions. Add a test for every bug fixed.
 - **Dependencies**: prefer the standard library; do not add a module without a strong reason. Builds are `CGO_ENABLED=0`.
 - **Style**: idiomatic Go, small files grouped by concern, doc comments on exported identifiers, comments that explain why, no dead code or speculative abstractions.
 

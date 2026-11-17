@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/maelvls/slackcli/internal/appinfo"
 	"github.com/maelvls/slackcli/internal/slack/enrich"
 	"github.com/maelvls/slackcli/internal/slackapi"
 )
@@ -206,6 +207,11 @@ func TestListViaCountsDegradesWhenRateLimited(t *testing.T) {
 	}
 	if len(page.Warnings) != 1 || !strings.Contains(page.Warnings[0], "40 of 40 conversations") || !strings.Contains(page.Warnings[0], "rate limited") {
 		t.Errorf("warnings = %q", page.Warnings)
+	}
+	// The error and the hint of the warning both know which variable to
+	// set: it is named once.
+	if n := strings.Count(page.Warnings[0], appinfo.EnvName("RATE_LIMIT_MAX_WAIT_MS")); n != 1 {
+		t.Errorf("the warning names the variable %d times, want once: %q", n, page.Warnings[0])
 	}
 
 	rec = countsRecorder(map[string]any{"channels": entries}, func(string) (map[string]any, error) { return apiError("token_expired"), nil })
@@ -639,12 +645,40 @@ func TestResolveIDErrors(t *testing.T) {
 	t.Run("listing forbidden", func(t *testing.T) {
 		rec := workspace{joinedErr: "enterprise_is_restricted", publicErr: "enterprise_is_restricted"}.recorder()
 		_, err := ResolveID(ctx, rec.client(), "general")
-		if !slackapi.IsErrorCode(err, "enterprise_is_restricted") || !strings.Contains(err.Error(), "channel ID") {
+		if !slackapi.IsErrorCode(err, "enterprise_is_restricted") || !strings.Contains(err.Error(), "these credentials cannot list channels: pass the channel ID") {
 			t.Errorf("err = %v, want enterprise_is_restricted with a hint", err)
 		}
 		var nf *NotFoundError
 		if errors.As(err, &nf) {
 			t.Error("a listing failure must not be reported as channel-not-found")
+		}
+	})
+
+	// A failure that says nothing about permissions (the network is
+	// down, Slack is failing) must not be reported as one.
+	t.Run("a failed listing is not a permission problem", func(t *testing.T) {
+		for name, fail := range map[string]func() (map[string]any, error){
+			"network":     func() (map[string]any, error) { return nil, errors.New("dial tcp 127.0.0.1:443: connection refused") },
+			"slack error": func() (map[string]any, error) { return apiError("fatal_error"), nil },
+		} {
+			rec := &recorder{serve: func(method string, _ map[string]any) (map[string]any, error) {
+				if method == "search.messages" {
+					return map[string]any{}, nil
+				}
+				return fail()
+			}}
+			_, err := ResolveID(ctx, rec.client(), "general")
+			if err == nil || !strings.HasPrefix(err.Error(), "resolving channel #general: ") {
+				t.Errorf("%s: err = %v, want the failure of the listing", name, err)
+				continue
+			}
+			if strings.Contains(err.Error(), "cannot list channels") {
+				t.Errorf("%s: err = %v, must not blame the credentials", name, err)
+			}
+			var nf *NotFoundError
+			if errors.As(err, &nf) {
+				t.Errorf("%s: a listing failure must not be reported as channel-not-found", name)
+			}
 		}
 	})
 

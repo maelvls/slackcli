@@ -61,6 +61,12 @@ Refused in safe mode (--safe-mode or %s=1).`, messageTargetLong, appinfo.EnvName
 				params["blocks"] = blocks
 			} else if blocks := slacktext.TextToRichTextBlocks(text); blocks != nil {
 				params["blocks"] = blocks
+			} else {
+				// chat.update keeps the blocks of the message when none
+				// are sent, and Slack shows blocks rather than text: the
+				// edit would leave what is displayed unchanged. An
+				// explicit empty array removes them.
+				params["blocks"] = []any{}
 			}
 
 			_, err = cmdutil.WithTarget(ctx, c.rt, target, func(loc cmdutil.Located) (struct{}, error) {
@@ -143,13 +149,15 @@ Reactions are not covered by safe mode: they are applied immediately.`,
 		RunE: func(cmd *cobra.Command, _ []string) error { return cmd.Help() },
 	}
 	cmd.AddCommand(
-		c.newReactAction("add", "reactions.add", "Add a reaction to a message", "Emoji to react with (:rocket:, rocket, or 🚀)"),
-		c.newReactAction("remove", "reactions.remove", "Remove your reaction from a message", "Emoji to remove (:rocket:, rocket, or 🚀)"),
+		c.newReactAction("add", "reactions.add", "Add a reaction to a message", "to react with"),
+		c.newReactAction("remove", "reactions.remove", "Remove your reaction from a message", "to remove"),
 	)
 	return cmd
 }
 
-func (c *command) newReactAction(action, method, short, emojiHelp string) *cobra.Command {
+// newReactAction returns "react add" or "react remove"; emojiUse says what
+// the emoji is for ("to react with").
+func (c *command) newReactAction(action, method, short, emojiUse string) *cobra.Command {
 	var workspace, tsFlag string
 	cmd := &cobra.Command{
 		Use:   action + " <target> <emoji>",
@@ -158,10 +166,11 @@ func (c *command) newReactAction(action, method, short, emojiHelp string) *cobra
 
 %s
 
-<emoji>: %s; custom workspace emoji by name. Write the "-1"
-emoji as :-1: (a bare -1 is read as a flag).
+<emoji> is the emoji %s, as :rocket:, rocket or 🚀; a custom workspace
+emoji goes by its name. Write the "-1" emoji as :-1: (a bare -1 is read as
+a flag).
 
-Prints {"ok": true}. Not covered by safe mode.`, short, messageTargetLong, emojiHelp),
+Prints {"ok": true}. Not covered by safe mode.`, short, messageTargetLong, emojiUse),
 		Args: cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := cmd.Context()

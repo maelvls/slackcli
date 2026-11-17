@@ -11,6 +11,7 @@ import (
 	"github.com/maelvls/slackcli/internal/jsonx"
 	"github.com/maelvls/slackcli/internal/slack/channels"
 	"github.com/maelvls/slackcli/internal/slack/enrich"
+	"github.com/maelvls/slackcli/internal/slack/messages"
 	"github.com/maelvls/slackcli/internal/slack/slacktext"
 	"github.com/maelvls/slackcli/internal/slackapi"
 )
@@ -273,8 +274,8 @@ func parseCounts(counts map[string]any) *Counts {
 }
 
 func unixSeconds(v any) int64 {
-	n, _ := jsonx.Num(v)
-	return max(int64(n), 0)
+	n, _ := jsonx.Int64(v)
+	return max(n, 0)
 }
 
 // hydrate turns raw saved items into Items, resolving each channel name
@@ -362,12 +363,12 @@ func hydrate(ctx context.Context, client *slackapi.Client, raw []map[string]any,
 	if n, err := messagesLimited.Skipped(); n > 0 {
 		warnings = append(warnings, fmt.Sprintf(
 			`%d of %d saved messages were not fetched (%v): they are listed with "message_error": %q; %s`,
-			n, len(items), err, enrich.RateLimitedCode, enrich.Hint()))
+			n, len(items), enrich.Cause(err), enrich.RateLimitedCode, enrich.Hint()))
 	}
 	if n, err := namesLimited.Skipped(); n > 0 {
 		warnings = append(warnings, fmt.Sprintf(
 			"the names of %d of %d channels were not looked up (%v): their items come with the channel ID only; %s",
-			n, len(channelIDs), err, enrich.Hint()))
+			n, len(channelIDs), enrich.Cause(err), enrich.Hint()))
 	}
 	for i := range items {
 		if name := names[items[i].ChannelID]; name != nil {
@@ -396,29 +397,20 @@ func fetchMessage(ctx context.Context, client *slackapi.Client, channelID, ts st
 	if err != nil {
 		return nil, err
 	}
-	if m := findTS(resp, ts); m != nil {
+	if m := messages.FindTS(resp, ts); m != nil {
 		return m, nil
 	}
 	// conversations.replies accepts the ts of any message of a thread and
 	// returns that message first.
 	resp, err = client.API(ctx, "conversations.replies", map[string]any{"channel": channelID, "ts": ts, "limit": 1})
 	// Any other failure (thread_not_found …) means there is no such reply.
-	if enrich.MustAbort(ctx, err) || enrich.IsRateLimit(err) {
+	if enrich.MustAbortRequired(ctx, err) {
 		return nil, err
 	}
-	if m := findTS(resp, ts); m != nil {
+	if m := messages.FindTS(resp, ts); m != nil {
 		return m, nil
 	}
 	return nil, errMessageNotFound
-}
-
-func findTS(resp map[string]any, ts string) map[string]any {
-	for _, m := range jsonx.Maps(resp["messages"]) {
-		if jsonx.Str(m["ts"]) == ts {
-			return m
-		}
-	}
-	return nil
 }
 
 func toMessage(msg map[string]any, maxBodyChars int) *Message {

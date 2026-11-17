@@ -3,11 +3,13 @@ package search
 import (
 	"errors"
 	"fmt"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/maelvls/slackcli/internal/slack/enrich"
 	"github.com/maelvls/slackcli/internal/slack/users"
 	"github.com/maelvls/slackcli/internal/slackapi"
 )
@@ -100,7 +102,7 @@ func TestSearchMessagesContentTypeFilterKeepsPaging(t *testing.T) {
 		t.Errorf("count = %v, want full pages when filtering", got)
 	}
 	file := res.Messages[0].Files[0]
-	if file.Name != "F1-name" || file.Mimetype != "image/png" || !strings.HasSuffix(file.Path, "/F1.png") || file.Error != "" {
+	if file.Name != "F1-name" || file.Mimetype != "image/png" || filepath.Base(file.Path) != "F1.png" || file.Error != "" {
 		t.Errorf("file = %+v", file)
 	}
 	// Text messages are filtered out before anything is downloaded.
@@ -227,7 +229,7 @@ func TestSearchMessagesRateLimitedMidWayReturnsWhatItHas(t *testing.T) {
 	f.on("search.messages", func(map[string]any) (map[string]any, error) {
 		return nil, &slackapi.RateLimitError{Method: "search.messages"}
 	})
-	if _, err := Search(t.Context(), f.client(), opts); !isRateLimit(err) {
+	if _, err := Search(t.Context(), f.client(), opts); !enrich.IsRateLimit(err) {
 		t.Errorf("err = %v, want the rate limit error", err)
 	}
 }
@@ -481,10 +483,10 @@ func TestMessageDownloads(t *testing.T) {
 		t.Errorf("downloads = %v, want F1 once and F2 (credentials never go to docs.google.com)", f.gets)
 	}
 	one, two, three, four := res.Messages[0].Files[0], res.Messages[1].Files[0], res.Messages[2].Files[0], res.Messages[3].Files[0]
-	if !strings.HasSuffix(one.Path, "/F1.txt") || one.Path != two.Path || one.Error != "" {
+	if filepath.Base(one.Path) != "F1.txt" || one.Path != two.Path || one.Error != "" {
 		t.Errorf("shared file = %+v / %+v", one, two)
 	}
-	if three.Error != "Failed to download file (404)" || !strings.HasSuffix(three.Path, "/F2.download-error.txt") || three.Mimetype != "image/png" {
+	if three.Error != "Failed to download file (404)" || filepath.Base(three.Path) != "F2.download-error.txt" || three.Mimetype != "image/png" {
 		t.Errorf("failed file = %+v", three)
 	}
 	if !strings.Contains(four.Error, "Refusing to send Slack credentials") {

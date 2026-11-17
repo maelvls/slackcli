@@ -14,7 +14,7 @@ slackcli is a Go rewrite of [stablyai/agent-slack](https://github.com/stablyai/a
 curl -fsSL https://raw.githubusercontent.com/maelvls/slackcli/main/install.sh | sh
 ```
 
-The script downloads the release archive for your machine, verifies its SHA-256 against the release's `checksums.txt` (this cannot be skipped) and installs the binary into `~/.local/bin`. Set `PREFIX` to install into `$PREFIX/bin`, `SLACKCLI_INSTALL_DIR` to choose the directory, and `SLACKCLI_VERSION=v1.2.3` to pin a release.
+The script downloads the release archive for your machine, verifies its SHA-256 against the release's `checksums.txt` (this cannot be skipped) and installs the binary into `~/.local/bin`. Set `PREFIX` to install into `$PREFIX/bin`, `SLACKCLI_INSTALL_DIR` to choose the directory, `SLACKCLI_VERSION=v1.2.3` to pin a release, and `SLACKCLI_REPO=owner/name` to download from another GitHub repository (a fork).
 
 Alternatives:
 
@@ -75,6 +75,8 @@ Save a token without putting it on the command line:
 SLACK_TOKEN=xoxb-... slackcli auth add --workspace-url https://acme.slack.com --from-env
 ```
 
+`auth add` prints what was saved, for which workspace, and which workspace is now the default. It refuses a value that is not a Slack token (or cookie), and a `--workspace-url` that is not an https Slack workspace URL.
+
 Or use environment variables only:
 
 ```bash
@@ -82,6 +84,8 @@ export SLACK_TOKEN="xoxc-..."                        # browser token
 export SLACK_COOKIE_D="xoxd-..."                     # the browser's "d" cookie
 export SLACK_WORKSPACE_URL="https://acme.slack.com"  # required with a browser token unless the target is a Slack URL
 ```
+
+Credentials are only sent over https to Slack hosts (`*.slack.com`, `*.slack-gov.com`), and API calls never follow redirects. See [Environment variables](#environment-variables) for the values these variables accept.
 
 ### Browser tokens and standard tokens
 
@@ -122,7 +126,7 @@ slackcli
 └── update  [--check]
 ```
 
-Global flag: `--safe-mode`. Most commands take `--workspace`.
+Global flag: `--safe-mode`. Most commands take `--workspace`. `slackcli --version` (`-V` or `-v`) prints the version. `slackcli completion bash|zsh|fish|powershell` prints a shell completion script (the command is not listed in the help).
 
 ## Targets
 
@@ -138,6 +142,8 @@ slackcli message list "#general" --thread-ts 1770165109.000001
 ```
 
 With several workspaces configured, a channel name is ambiguous: pass `--workspace <url-or-unique-substring>`, set `SLACK_WORKSPACE_URL`, or run `slackcli auth set-default`. A Slack URL target names its own workspace.
+
+A flag that repeats what a URL target already says (`--workspace`, `--ts`, `--thread-ts`) is accepted; one that contradicts it is an error. The exception is `channel mark`, where `--ts` overrides the timestamp of the URL.
 
 ## Examples
 
@@ -191,7 +197,7 @@ slackcli message scheduled list
 slackcli message scheduled cancel Q1234ABCD --channel C0123ABCDEF
 ```
 
-Text is Slack mrkdwn; bullet and numbered lists are sent as real Slack lists, and text may start with `- `.
+Text is Slack mrkdwn; bullet and numbered lists are sent as real Slack lists. Text of several words may start with a dash (`- item`, `-1 for me`); a single word that looks like a flag (`-1`, `--force`) must come after `--`, as in `slackcli message send "#general" -- "-1"`. This holds for `message send`, `edit`, `compose` and `draft create/update`.
 
 ### Compose and drafts
 
@@ -204,7 +210,7 @@ slackcli message draft create "#general" "Here's my update" --attach ./q3.png
 slackcli message draft list
 ```
 
-`message compose` waits for the human (no timeout) and prints what was sent (`ts`, `permalink`, `text`) or `{ok, cancelled, reason}`. The editor only works from a real browser session: when no browser can be opened, the command prints a one-time link only if stderr is an interactive terminal, and fails otherwise; in safe mode it always fails and never prints the link. With a message URL target, `--thread-ts` is redundant: it may repeat the thread of that message but not name another one (`message send` applies the same rule). When the `CI` environment variable is set, the editor is skipped and the supplied text is sent immediately (except in safe mode, where the command fails).
+`message compose` waits for the human (no timeout) and prints what was sent (`ts`, `permalink`, `text`) or `{ok, cancelled, reason}`. The editor only works from a real browser session: when no browser can be opened, the command prints a one-time link only if stderr is an interactive terminal, and fails otherwise; in safe mode it always fails and never prints the link. With a message URL target, `--thread-ts` is redundant: it may repeat the thread of that message but not name another one (`message send` and `message draft create/update` apply the same rule). When the `CI` environment variable is set, the editor is skipped and the supplied text is sent immediately (except in safe mode, where the command fails).
 
 ### Channels and users
 
@@ -254,10 +260,12 @@ Refused in safe mode: `message edit`, `message delete`, `message scheduled cance
 
 Not covered by safe mode: `message react`, `message draft *`, `channel mark`, `later *` and `user dm-open` (the asterisk stands for every subcommand). These only change your own state (a reaction, an unposted draft, a read marker, the saved-for-later list, an open DM) and still take effect immediately.
 
+Safe mode fails closed: the flag and the environment can each turn it on, and neither can turn it off for the other (`--safe-mode=false` does not undo `SLACKCLI_SAFE_MODE=1`). A refusal names what turned safe mode on.
+
 ## Output conventions
 
 - Results are JSON on stdout, indented with two spaces, with `null`, blank strings, empty arrays and empty objects removed. Hints and warnings go to stderr.
-- The collection a list command is about is the exception: it is always present, `[]` when empty (`messages`, `files`, `channels`, `users`, `items`, `workflows`, `drafts`, `scheduled_messages`).
+- The collection a list command is about is the exception: it is always present, `[]` when empty (`messages`, `files`, `channels`, `users`, `items`, `workflows`, `drafts`, `scheduled_messages`, and `workspaces` of `auth whoami`).
 - Some `auth` commands (`add`, `set-default`, `remove`, `import-chrome`, `import-brave`, `import-firefox`, `parse-curl`) print a line of text instead.
 - Messages are compact: `channel_id`, `ts`, `thread_ts`, `author` (`user_id` or `bot_id`), `content` (Markdown), `files`, `reactions`. User IDs are kept as is; `--resolve-users` adds their profiles under `referenced_users`.
 - Long content is cut at `--max-body-chars` / `--max-content-chars`; lists are paged with `--limit` and `--cursor` (`next_cursor` in the output).
@@ -267,18 +275,22 @@ Not covered by safe mode: `message react`, `message draft *`, `channel mark`, `l
 
 | Variable | Effect |
 | --- | --- |
-| `SLACK_TOKEN` | Token used instead of the saved workspaces (`xoxb-`, `xoxp-`, or `xoxc-`). |
-| `SLACK_COOKIE_D` | The browser `d` cookie (`xoxd-...`), required when `SLACK_TOKEN` is an `xoxc-` token. `SLACK_COOKIE` is read as a fallback. |
-| `SLACK_WORKSPACE_URL` | Default for `--workspace`. |
+| `SLACK_TOKEN` | Token used instead of the saved workspaces. It must be a Slack token: a browser token (`xoxc-`) or a standard one (`xoxb-`, `xoxp-`; also `xoxa-`, `xoxs-`, `xoxe.`, `xapp-`). Any other value is refused. |
+| `SLACK_COOKIE_D` | The browser `d` cookie, required when `SLACK_TOKEN` is an `xoxc-` token. It must be an `xoxd-` value (`d=xoxd-...` and the percent-encoded form are accepted). `SLACK_COOKIE` is read as a fallback. |
+| `SLACK_WORKSPACE_URL` | Default for `--workspace`: a workspace URL, or a unique substring of the URL or name of a saved workspace. With `SLACK_TOKEN`, this variable or `--workspace` must be an https Slack workspace URL or designate a saved workspace, otherwise the command fails. |
 | `SLACKCLI_SAFE_MODE` | Any value other than empty, `0`, `false`, `no` or `off` turns safe mode on (it fails closed: an unrecognised value means on). |
-| `SLACKCLI_COMMAND_TIMEOUT_MS` | Time limit of a whole command (default 30000). Does not apply to `message compose`, `update`, or the commands that upload files (`message send --attach`, `message draft create`, `message draft update`). |
-| `SLACKCLI_API_TIMEOUT_MS` | Time limit of one Slack API request (default 20000). |
-| `SLACKCLI_RATE_LIMIT_MAX_WAIT_MS` | How long to wait and retry when Slack rate-limits a request (default 0: fail at once). |
-| `SLACKCLI_KEYCHAIN_TIMEOUT_MS` | Time limit of a macOS keychain call (default 3000). |
-| `SLACKCLI_NO_UPDATE_CHECK` | `1` disables the background update notice. |
+| `SLACKCLI_COMMAND_TIMEOUT_MS` | Time limit of a whole command: a positive number of milliseconds (default 30000). Does not apply to `message compose`, `update`, or the commands that upload files (`message send --attach`, `message draft create`, `message draft update`). |
+| `SLACKCLI_API_TIMEOUT_MS` | Time limit of one Slack API request: a positive number of milliseconds (default 20000). The older `SLACK_API_TIMEOUT_MS` is read as a fallback. |
+| `SLACKCLI_RATE_LIMIT_MAX_WAIT_MS` | How long to wait and retry when Slack rate-limits a request: a number of milliseconds, 0 or more (default 0: fail at once). |
+| `SLACKCLI_KEYCHAIN_TIMEOUT_MS` | Time limit of a macOS keychain call: a positive number of milliseconds (default 3000). |
+| `SLACKCLI_NO_UPDATE_CHECK` | `1`, `true`, `yes` or `on` disables the background update notice. |
 | `CI` | When set (other than `0`/`false`): no update notice, and `message compose` skips the editor. |
+| `DISPLAY`, `WAYLAND_DISPLAY` | On Linux, `message compose` opens a browser only when one of them is set: without a graphical session there is no browser to open. |
+| `HTTPS_PROXY`, `NO_PROXY` | Honoured for every HTTP request, as by any Go program. |
 | `XDG_CONFIG_HOME` | Moves the configuration directory (absolute path). |
-| `SLACKCLI_INSTALL_DIR`, `SLACKCLI_VERSION`, `PREFIX` | Read by `install.sh` only. |
+| `SLACKCLI_INSTALL_DIR`, `SLACKCLI_VERSION`, `SLACKCLI_REPO`, `PREFIX` | Read by `install.sh` only. |
+
+A `SLACKCLI_*_MS` variable with a value it does not accept (not a number, negative, or `0` where a positive number is required) prints one warning on stderr, and the default applies. No value means "no time limit": `0` is not accepted as a timeout.
 
 For the legacy prefix of the `SLACKCLI_*` variables, see [Migrating from agent-slack](#migrating-from-agent-slack).
 
@@ -287,7 +299,8 @@ For the legacy prefix of the `SLACKCLI_*` variables, see [Migrating from agent-s
 | What | Where |
 | --- | --- |
 | Credentials | `$XDG_CONFIG_HOME/slackcli/credentials.json`, else `~/.config/slackcli/credentials.json` (mode 0600), on every OS |
-| Secrets on macOS | Login keychain, service `slackcli`; the credentials file then holds placeholders. On Linux and Windows the secrets stay in the credentials file. |
+| Secrets on macOS | Login keychain, service `slackcli`; the credentials file then holds placeholders. A secret the keychain refuses (locked, prompt not answered) stays in the credentials file, with a warning; the next save that reaches the keychain moves it there; `auth whoami` reports where they are in `secrets_storage` (`keychain` or `file`). On Linux and Windows the secrets stay in the credentials file. |
+| Lock file | `credentials.json.lock` next to the credentials file (briefly also `credentials.json.lock.takeover`), while a command saves credentials. One left behind by a dead process is removed automatically. |
 | Cache (user cache, update-check state) | The OS user cache directory + `/slackcli`: `~/Library/Caches/slackcli` on macOS, `$XDG_CACHE_HOME/slackcli` or `~/.cache/slackcli` on Linux, `%LocalAppData%\slackcli` on Windows |
 | Downloads (attachments, canvases) | `downloads/` inside the cache directory |
 
@@ -296,9 +309,13 @@ For the legacy prefix of the `SLACKCLI_*` variables, see [Migrating from agent-s
 | Code | Meaning |
 | --- | --- |
 | 0 | Success |
-| 1 | Error (the message is on stderr) |
+| 1 | Error (the message is on stderr), usage errors included |
 | 124 | The command exceeded `SLACKCLI_COMMAND_TIMEOUT_MS` |
 | 130 | Interrupted (Ctrl-C or SIGTERM) |
+
+- A usage error (wrong arguments, a bad flag, an unknown command or subcommand, `slackcli help <unknown>`, an argument after `--version`) ends with `Run "slackcli <command> --help" for usage.`
+- After a timeout, or an interrupt of a command that writes, the message warns that the change may still have gone through: check before retrying.
+- A Slack error is printed as `Slack API error calling <method>: <code>`. For the common codes (`invalid_auth`, `not_authed`, `token_revoked`, `token_expired`, `account_inactive`, `missing_scope`, `not_in_channel`, `channel_not_found`, `ratelimited`) the message goes on to say what to do.
 
 ## Self-update
 
@@ -307,14 +324,14 @@ slackcli update --check   # only report
 slackcli update           # download, verify the checksum, replace the binary
 ```
 
-Only release binaries (installed with `install.sh` or downloaded by hand) replace themselves; for other installations the command fails and prints the command to run instead. slackcli also checks for a new release in the background, at most once every 24 hours, only when stderr is a terminal and never when `CI` is set; `SLACKCLI_NO_UPDATE_CHECK=1` disables it.
+Only release binaries (installed with `install.sh` or downloaded by hand) replace themselves; for other installations the command fails and prints the command to run instead. On a build without a version (built from source), `update --check` reports `"status": "development_build"` without asking GitHub. slackcli also checks for a new release in the background, at most once every 24 hours, only when stderr is a terminal and never when `CI` is set; `SLACKCLI_NO_UPDATE_CHECK=1` disables it.
 
 ## Migrating from agent-slack
 
 Automatic:
 
-- **Credentials**: on the first run, when `~/.config/slackcli/credentials.json` does not exist, the workspaces in `~/.config/agent-slack/credentials.json` (and the `agent-slack` keychain service on macOS) are copied over. The old files are left untouched.
-- **Environment variables**: `AGENT_SLACK_*` variables are still read when the `SLACKCLI_*` one is unset.
+- **Credentials**: the workspaces in `~/.config/agent-slack/credentials.json` (and the `agent-slack` keychain service on macOS) that slackcli does not have yet are copied over, once. The credentials file records that it was done (`legacy_migrated`); when it cannot be done (keychain locked, directory not writable), a warning is printed and the next run tries again. The old files are left untouched.
+- **Environment variables**: `AGENT_SLACK_*` variables are still read when the `SLACKCLI_*` one is unset. Safe mode is the exception: `SLACKCLI_SAFE_MODE` and `AGENT_SLACK_SAFE_MODE` each turn it on, and neither can turn it off for the other.
 
 Changed:
 
@@ -329,7 +346,7 @@ Changed:
 - `search --channel` is repeatable or comma-separated (not space-separated); `--after`/`--before` are exclusive; `--no-download` is new; `more_messages`/`more_files` say how to continue. `search files` keeps files whose download failed, with an `error`.
 - `message compose` accepts user-ID targets, prints `ts`, `permalink` and the `text` that was sent, and fails rather than print its link when no browser can be opened and stderr is not a terminal.
 - `channel invite` reports `failed` targets and exits non-zero on partial failure.
-- `auth whoami` shows `default` and `secrets` per workspace; `auth add --from-env` is new.
+- `auth whoami` shows `default`, `secrets` and `secrets_storage` per workspace; `auth add --from-env` is new.
 - `canvas get` reports `truncated`/`total_chars`; `canvas create/edit --file -` reads stdin; channel-canvas URLs are accepted.
 - `workflow preview/get/run` accept shortcut URLs.
 - `later list --cursor` pages; `later` write commands print `{ok, action, channel_id, ts}`; `unreads` adds `messages_truncated` and `messages_error`.

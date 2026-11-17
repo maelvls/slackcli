@@ -11,7 +11,7 @@ VERSION ?= dev
 PKGS    ?= ./...
 
 GOFLAGS_BUILD := -trimpath -ldflags "-s -w -X $(MODULE)/internal/appinfo.Version=$(VERSION)"
-GO_DIRS       := cmd internal
+GO_DIRS       := cmd internal .github
 
 .PHONY: all build install test lint lint-extra fmt snapshot clean
 

@@ -166,7 +166,7 @@ func uploadAll(ctx context.Context, client *slackapi.Client, paths []string, com
 	completeParams["files"] = refs
 	resp, err := client.API(ctx, "files.completeUploadExternal", completeParams)
 	if err != nil {
-		return nil, fmt.Errorf("finalising upload of %s: %w", describe(files), err)
+		return nil, fmt.Errorf("finalising upload of %s: %s%w", describe(files), unconfirmed(err, completeParams), err)
 	}
 
 	// The completion response is authoritative for the final IDs, but only
@@ -180,6 +180,24 @@ func uploadAll(ctx context.Context, client *slackapi.Client, paths []string, com
 		}
 	}
 	return files, nil
+}
+
+// unconfirmed is what to say before the error of a
+// files.completeUploadExternal call whose outcome is unknown ("" when it
+// is known). When Slack refuses the call (an API error, a rate limit)
+// nothing was done. When no answer came back (a timeout, a dropped
+// connection, a cancelled command), Slack may have processed the request
+// all the same: the files are then shared, and a retry shares them again.
+func unconfirmed(err error, completeParams map[string]any) string {
+	var rl *slackapi.RateLimitError
+	if slackapi.ErrorCode(err) != "" || errors.As(err, &rl) {
+		return ""
+	}
+	if channel, _ := completeParams["channel_id"].(string); channel != "" {
+		return fmt.Sprintf("Slack did not confirm it, so the upload may have gone through and the message may already be in %[1]s: "+
+			"check with `%[2]s message list %[1]s --limit 5` before retrying, since a retry would post the files a second time: ", channel, appinfo.Name)
+	}
+	return "Slack did not confirm it, so the upload may have gone through and the files may exist in Slack, attached to nothing: "
 }
 
 type localFile struct {
@@ -286,7 +304,15 @@ func postBytes(ctx context.Context, client *slackapi.Client, uploadURL string, b
 	req.Header.Set("Content-Type", "application/octet-stream")
 	req.Header.Set("User-Agent", appinfo.UserAgent())
 
-	resp, err := client.HTTPClient().Do(req)
+	// A copy of the client that follows no redirect. The pre-signed URL is
+	// the only place the bytes are meant for, and a redirect could name
+	// any host. Nor could following one upload anything: net/http turns a
+	// redirected POST into a GET without a body (301, 302, 303), whose 200
+	// would pass for a successful upload, and cannot replay a streamed
+	// body (307, 308).
+	hc := *client.HTTPClient()
+	hc.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	resp, err := hc.Do(req)
 	if err != nil {
 		// *url.Error embeds the full pre-signed URL; keep it out of
 		// messages that end up in agent transcripts.
@@ -297,6 +323,14 @@ func postBytes(ctx context.Context, client *slackapi.Client, uploadURL string, b
 		return fmt.Errorf("sending file bytes to %s: %w", u.Host, err)
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode >= 300 && resp.StatusCode <= 399 {
+		// Only the host of the target: its path and query may be signed.
+		target := "another location"
+		if loc, err := url.Parse(resp.Header.Get("Location")); err == nil && loc.Host != "" {
+			target = loc.Host
+		}
+		return fmt.Errorf("sending file bytes to %s: it answered with a redirect (HTTP %d) to %s, which was not followed: the contents of a file are only sent to the upload URL Slack reserved. Nothing was uploaded: run the command again", u.Host, resp.StatusCode, target)
+	}
 	snippet, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
 		msg := fmt.Sprintf("sending file bytes to %s failed with HTTP %d", u.Host, resp.StatusCode)

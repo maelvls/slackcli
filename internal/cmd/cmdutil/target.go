@@ -1,7 +1,8 @@
 // Package cmdutil holds what the command packages share: turning a
 // <target> argument and the --workspace/--ts flags into a workspace, a
 // conversation and a message; flag validation; free-text arguments that
-// start with a dash; and printing the result of a list command.
+// start with a dash; the wording of usage errors; and printing the result
+// of a list command.
 package cmdutil
 
 import (
@@ -69,9 +70,7 @@ type Target struct {
 // ParseTarget parses a <target> argument (a Slack message or channel URL,
 // "#channel", "channel", a channel ID, or a user ID meaning the DM with
 // that user) and picks its workspace (see Workspace). It makes no API
-// call. It fails when a channel name cannot be attributed to a workspace,
-// and warns on stderr about a message URL that looks cut at an unquoted
-// "&".
+// call. It fails when a channel name cannot be attributed to a workspace.
 func ParseTarget(rt *clictx.Context, arg, workspaceFlag string) (Target, error) {
 	parsed, err := slackurl.ParseTarget(arg)
 	if err != nil {
@@ -81,14 +80,9 @@ func ParseTarget(rt *clictx.Context, arg, workspaceFlag string) (Target, error) 
 	if err != nil {
 		return Target{}, err
 	}
-	switch parsed.Kind {
-	case slackurl.TargetChannel:
+	if parsed.Kind == slackurl.TargetChannel {
 		if err := rt.AssertWorkspaceForChannelNames(workspace, parsed.Channel); err != nil {
 			return Target{}, err
-		}
-	case slackurl.TargetURL:
-		if hint := slackurl.TruncatedURLHint(parsed.Ref); hint != "" {
-			rt.Hintf("%s", hint)
 		}
 	}
 	return Target{Target: parsed, Workspace: workspace}, nil

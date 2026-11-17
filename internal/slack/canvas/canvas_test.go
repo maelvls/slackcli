@@ -76,6 +76,14 @@ func TestParseURL(t *testing.T) {
 		{in: "https://evil.example/docs/T12345678/F12345678", wantErr: "not a Slack workspace URL"},
 		{in: "https://acme.slack.com.evil.example/docs/T12345678/F12345678", wantErr: "not a Slack workspace URL"},
 		{in: "https://user@acme.slack.com/docs/T12345678/F12345678", wantErr: "not a Slack workspace URL"},
+		// The workspace URL is where credentials get sent: it is the origin
+		// slackapi.WorkspaceOrigin gives, so a port is refused (another
+		// service of the host) and a trailing dot is dropped.
+		{in: "https://acme.slack.com:8443/docs/T12345678/F12345678", wantErr: "not a Slack workspace URL"},
+		{in: "https://acme.slack.com:443/canvas/C12345678", wantErr: "not a Slack workspace URL"},
+		{in: "https://Acme.slack.com./docs/T12345678/F12345678", want: Ref{WorkspaceURL: "https://acme.slack.com", CanvasID: "F12345678"}},
+		{in: "https://app.slack.com./docs/T12345678/F12345678", want: Ref{CanvasID: "F12345678"}},
+		{in: "https://files.slack-edge.com/docs/T12345678/F12345678", wantErr: "not a Slack workspace URL"},
 		{in: "F12345678", wantErr: "invalid canvas URL"},
 	}
 	for _, tt := range tests {

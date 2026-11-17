@@ -9,7 +9,7 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/maelvls/slackcli/internal/appinfo"
+	"github.com/maelvls/slackcli/internal/slackapi"
 	"github.com/maelvls/slackcli/internal/slackid"
 )
 
@@ -30,9 +30,6 @@ type MessageRef struct {
 	ThreadTSHint string `json:"thread_ts_hint,omitempty"`
 	// Raw is the URL as given.
 	Raw string `json:"raw"`
-	// PossiblyTruncated is true when the URL has thread_ts but no cid,
-	// which usually means an unquoted "&" was eaten by the shell.
-	PossiblyTruncated bool `json:"possibly_truncated,omitempty"`
 }
 
 var (
@@ -45,15 +42,11 @@ var (
 func IsTS(s string) bool { return tsRe.MatchString(s) }
 
 // IsSlackURL reports whether input is an https URL on a Slack workspace
-// host (*.slack.com, *.slack-gov.com), whatever its path.
+// host (slackapi.IsWorkspaceHost: slack.com, slack-gov.com and their
+// subdomains), whatever its path.
 func IsSlackURL(input string) bool {
 	u, err := url.Parse(strings.TrimSpace(input))
-	return err == nil && u.Scheme == "https" && isWorkspaceHost(u.Hostname())
-}
-
-func isWorkspaceHost(host string) bool {
-	host = strings.ToLower(host)
-	return strings.HasSuffix(host, ".slack.com") || strings.HasSuffix(host, ".slack-gov.com")
+	return err == nil && u.Scheme == "https" && slackapi.IsWorkspaceHost(u.Hostname())
 }
 
 // location is what a Slack URL points at: a channel, or a message in it.
@@ -63,7 +56,6 @@ type location struct {
 	channelID    string
 	messageTS    string // "" for a channel URL
 	threadTS     string
-	truncated    bool
 }
 
 func parseLocation(input string) (location, error) {
@@ -72,15 +64,17 @@ func parseLocation(input string) (location, error) {
 	if err != nil || u.Scheme == "" || u.Host == "" {
 		return loc, fmt.Errorf("invalid URL: %s", input)
 	}
-	host := strings.ToLower(u.Hostname())
-	if !isWorkspaceHost(host) {
+	if !slackapi.IsWorkspaceHost(u.Hostname()) {
 		return loc, fmt.Errorf("not a Slack workspace URL: %s", u.Hostname())
 	}
-	// The workspace URL is where credentials get sent, so plain http and
-	// "user@host" tricks are refused rather than normalised.
-	if u.Scheme != "https" || u.User != nil {
+	// The workspace URL is where credentials get sent, so plain http,
+	// "user@host" tricks and ports are refused rather than normalised:
+	// the origin is the one the API client accepts, or nothing.
+	origin, err := slackapi.WorkspaceOrigin("https://" + u.Host)
+	if err != nil || u.Scheme != "https" || u.User != nil {
 		return loc, fmt.Errorf("unsupported Slack URL (expected https://<workspace>.slack.com/…): %s", input)
 	}
+	host := strings.TrimPrefix(origin, "https://")
 
 	var parts []string
 	for p := range strings.SplitSeq(u.Path, "/") {
@@ -114,7 +108,7 @@ func parseLocation(input string) (location, error) {
 		}
 	case len(parts) >= 2 && parts[0] == "archives":
 		// /archives/<channel>[/p<digits>]
-		loc.workspaceURL = "https://" + strings.ToLower(u.Host)
+		loc.workspaceURL = origin
 		loc.channelID = parts[1]
 		if len(parts) >= 3 {
 			ts, err := permalinkTS(parts[2])
@@ -130,14 +124,18 @@ func parseLocation(input string) (location, error) {
 	if !slackid.IsChannelID(loc.channelID) {
 		return loc, fmt.Errorf("unsupported Slack channel id in URL: %s", loc.channelID)
 	}
-	query := u.Query()
-	if t := query.Get("thread_ts"); t != "" {
-		if IsTS(t) {
-			loc.threadTS = t
+	// ?thread_ts=<root>&cid=<channel> is how a permalink names the thread
+	// of a reply. cid only repeats the channel of the path, so a URL
+	// without it (written that way, or cut by the shell at an unquoted
+	// "&") designates the same message and is accepted as it is. A
+	// thread_ts that is not a ts is refused rather than ignored: the
+	// thread is where a reply is looked for, replied to and listed from.
+	if query := u.Query(); query.Has("thread_ts") {
+		t := query.Get("thread_ts")
+		if !IsTS(t) {
+			return loc, fmt.Errorf("invalid thread_ts %q in Slack URL: expected the ts of the thread root, <seconds>.<micros> (e.g. ?thread_ts=1770165109.628379); copy the message link again, or drop the query", t)
 		}
-		// Slack always puts cid next to thread_ts; a lone thread_ts means
-		// the shell cut the URL at "&".
-		loc.truncated = !query.Has("cid")
+		loc.threadTS = t
 	}
 	return loc, nil
 }
@@ -153,7 +151,7 @@ func permalinkTS(part string) (string, error) {
 
 // ParseMessageURL parses a message permalink:
 //
-//	https://acme.slack.com/archives/C…/p1770165109628379[?thread_ts=…&cid=…]
+//	https://acme.slack.com/archives/C…/p1770165109628379[?thread_ts=…[&cid=…]]
 //	https://acme.enterprise.slack.com/archives/C…/p…
 //	https://app.slack.com/client/T…/C…/thread/C…-1770165109.628379
 //
@@ -168,13 +166,12 @@ func ParseMessageURL(input string) (MessageRef, error) {
 		return MessageRef{}, fmt.Errorf("Slack URL points at channel %s, not at a message: copy a message link, or pass the channel ID with a message ts", loc.channelID)
 	}
 	return MessageRef{
-		WorkspaceURL:      loc.workspaceURL,
-		TeamID:            loc.teamID,
-		ChannelID:         loc.channelID,
-		MessageTS:         loc.messageTS,
-		ThreadTSHint:      loc.threadTS,
-		Raw:               input,
-		PossiblyTruncated: loc.truncated,
+		WorkspaceURL: loc.workspaceURL,
+		TeamID:       loc.teamID,
+		ChannelID:    loc.channelID,
+		MessageTS:    loc.messageTS,
+		ThreadTSHint: loc.threadTS,
+		Raw:          input,
 	}, nil
 }
 
@@ -198,15 +195,4 @@ func permalinkDigits(ts string) string {
 		frac = frac[:6]
 	}
 	return secs + frac + strings.Repeat("0", 6-len(frac))
-}
-
-// TruncatedURLHint returns the hint to show on stderr (rt.Hintf) when ref
-// looks like it was cut by the shell at an unquoted "&"; "" when it does
-// not.
-func TruncatedURLHint(ref MessageRef) string {
-	if !ref.PossiblyTruncated {
-		return ""
-	}
-	return `Hint: URL may have been truncated by shell. Quote URLs containing "&":` + "\n" +
-		`  ` + appinfo.Name + ` message get "https://...?thread_ts=...&cid=..."`
 }

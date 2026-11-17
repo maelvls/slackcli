@@ -3,6 +3,7 @@ package drafts
 import (
 	"context"
 	"errors"
+	"math"
 	"reflect"
 	"regexp"
 	"strings"
@@ -184,6 +185,18 @@ func TestParseRecordTolerates(t *testing.T) {
 	}
 	if !ok || !reflect.DeepEqual(got, want) {
 		t.Errorf("got %+v (ok=%v), want %+v", got, ok, want)
+	}
+
+	// Dates no int64 holds saturate on every architecture (a plain
+	// conversion gives the smallest int64 on amd64, which then reads as
+	// "not scheduled").
+	got, _ = ParseRecord(map[string]any{"id": "Dr1", "date_created": 1e300, "date_scheduled": 1e300})
+	if got.DateCreated != math.MaxInt64 || got.DateScheduled != math.MaxInt64 {
+		t.Errorf("dates = %d and %d, want both %d", got.DateCreated, got.DateScheduled, int64(math.MaxInt64))
+	}
+	got, _ = ParseRecord(map[string]any{"id": "Dr1", "date_created": -1e300, "date_scheduled": -1e300})
+	if got.DateCreated != math.MinInt64 || got.DateScheduled != 0 {
+		t.Errorf("dates = %d and %d, want %d and no schedule", got.DateCreated, got.DateScheduled, int64(math.MinInt64))
 	}
 }
 

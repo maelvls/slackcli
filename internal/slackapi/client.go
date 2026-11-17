@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"mime/multipart"
 	"net/http"
 	"net/url"
@@ -62,14 +63,22 @@ const (
 	maxResponseBodyLen = 64 << 20
 )
 
+// LegacyAPITimeoutEnv is the variable the request timeout was first read
+// from. It keeps its name, and is read when the tool-specific
+// API_TIMEOUT_MS variable gives no usable value.
+const LegacyAPITimeoutEnv = "SLACK_API_TIMEOUT_MS"
+
 // Client calls Slack Web API methods.
 type Client struct {
 	auth         Auth
 	workspaceURL string
 	baseURL      string
 	httpClient   *http.Client
-	handler      Handler
-	sleep        func(ctx context.Context, d time.Duration) error
+	// apiHTTP is httpClient with redirects turned off, for the Web API
+	// itself (see noRedirects).
+	apiHTTP *http.Client
+	handler Handler
+	sleep   func(ctx context.Context, d time.Duration) error
 	// loopbackForTesting lets credentials go to a loopback address (see
 	// WithLoopbackWorkspaceForTesting).
 	loopbackForTesting bool
@@ -123,7 +132,26 @@ func New(auth Auth, workspaceURL string, opts ...Option) *Client {
 	for _, o := range opts {
 		o(c)
 	}
+	if c.httpClient == nil {
+		c.httpClient = &http.Client{}
+	}
+	c.apiHTTP = noRedirects(c.httpClient)
 	return c
+}
+
+// noRedirects returns a copy of h that hands a 3xx response back instead of
+// following it. A Web API call is a POST that carries the credentials (the
+// xoxc token is a form field): on a 307 or 308 net/http would replay that
+// body to whatever host and scheme the Location names, and it only strips
+// the Cookie and Authorization headers, not the body. The Web API never
+// redirects, so a redirect is an error (see redirectError) rather than
+// something to follow, even to another Slack host. It is a copy so that
+// the policy holds for a client given with WithHTTPClient and does not
+// leak into HTTPClient, whose users have their own.
+func noRedirects(h *http.Client) *http.Client {
+	c := *h
+	c.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	return &c
 }
 
 // NewFake returns a browser-auth client for workspace
@@ -141,7 +169,9 @@ func (c *Client) Auth() Auth { return c.auth }
 func (c *Client) WorkspaceURL() string { return c.workspaceURL }
 
 // HTTPClient returns the underlying HTTP client, for non-API requests such
-// as file downloads and uploads.
+// as file downloads and uploads. It follows redirects as configured (by
+// default, as net/http does): a caller that sends anything worth protecting
+// sets its own CheckRedirect on a copy.
 func (c *Client) HTTPClient() *http.Client { return c.httpClient }
 
 // Authorize adds credentials and the User-Agent to a non-API request (file
@@ -167,12 +197,38 @@ func APITimeout() time.Duration {
 	return appinfo.EnvDurationMS("API_TIMEOUT_MS", legacyAPITimeout(), false)
 }
 
+// legacyAPITimeout reads LegacyAPITimeoutEnv by the rule of
+// appinfo.EnvDurationMS: a value that cannot be used gives the default,
+// and is reported by the root command (CheckLegacyAPITimeout), not here.
 func legacyAPITimeout() time.Duration {
-	n, err := strconv.ParseFloat(strings.TrimSpace(getenv("SLACK_API_TIMEOUT_MS")), 64)
-	if err != nil || n <= 0 {
+	raw := strings.TrimSpace(getenv(LegacyAPITimeoutEnv))
+	if raw == "" {
 		return defaultAPITimeout
 	}
-	return time.Duration(n) * time.Millisecond
+	d, err := appinfo.ParseDurationMS(raw, false)
+	if err != nil {
+		return defaultAPITimeout
+	}
+	return d
+}
+
+// CheckLegacyAPITimeout says what is wrong with the value of
+// LegacyAPITimeoutEnv, as appinfo.CheckEnvDurationMS does for the
+// tool-specific variables. It returns nil when the variable is unset or
+// valid, and when APITimeout does not read it because the tool-specific
+// variable has a valid value.
+func CheckLegacyAPITimeout() error {
+	raw := strings.TrimSpace(getenv(LegacyAPITimeoutEnv))
+	if raw == "" {
+		return nil
+	}
+	if _, current := appinfo.EnvSource("API_TIMEOUT_MS"); current != "" && appinfo.CheckEnvDurationMS("API_TIMEOUT_MS", false) == nil {
+		return nil
+	}
+	if _, err := appinfo.ParseDurationMS(raw, false); err != nil {
+		return fmt.Errorf("%s=%q is not valid: %w", LegacyAPITimeoutEnv, raw, err)
+	}
+	return nil
 }
 
 // RateLimitMaxWait is how long the client is willing to sleep on HTTP 429
@@ -249,6 +305,10 @@ func (c *Client) call(ctx context.Context, method string, params map[string]any,
 			continue
 		}
 
+		if status >= 300 && status <= 399 {
+			return nil, c.redirectError(method, status, header.Get("Location"))
+		}
+
 		var data map[string]any
 		_ = json.Unmarshal(body, &data)
 		if status < 200 || status > 299 {
@@ -294,6 +354,28 @@ func (c *Client) checkWorkspaceURL() error {
 		return nil
 	}
 	return fmt.Errorf("refusing to send browser credentials to %q: a workspace URL must be an https Slack origin such as https://acme.slack.com", c.workspaceURL)
+}
+
+// redirectError is returned when Slack (or whatever answers at the
+// workspace URL) redirects an API call. The redirect is not followed (see
+// noRedirects). The message names where it pointed by origin only: neither
+// the response body nor the path and query of the Location, which may echo
+// the request.
+func (c *Client) redirectError(method string, status int, location string) error {
+	target := "an unspecified location"
+	if u, err := url.Parse(location); err == nil && u.Host != "" {
+		target = u.Scheme + "://" + u.Host
+	} else if location != "" {
+		target = "another path of the same host"
+	}
+	sentTo := c.baseURL
+	if c.auth.IsBrowser() {
+		sentTo = c.workspaceURL
+	}
+	return fmt.Errorf("Slack API call %s to %s was answered with a redirect (HTTP %d) to %s, which was not followed: the Slack API never redirects, and following it would send the credentials there. "+
+		"The workspace URL is probably wrong or out of date (a renamed workspace redirects to its new address): list the configured workspaces with `%s auth whoami`, "+
+		"then pass the right one with --workspace, or import it again with `%s auth import-desktop`",
+		method, sentTo, status, target, appinfo.Name, appinfo.Name)
 }
 
 // mayReceiveCredentials reports whether a non-API request to u may carry
@@ -375,11 +457,16 @@ func (c *Client) post(ctx context.Context, endpoint string, fields map[string]st
 		req.Header.Set("Authorization", "Bearer "+c.auth.Token)
 	}
 
-	resp, err := c.httpClient.Do(req)
+	resp, err := c.apiHTTP.Do(req)
 	if err != nil {
 		return 0, nil, nil, err
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode >= 300 && resp.StatusCode <= 399 {
+		// Not read: the body of a redirect is of no use, and must not end
+		// up in an error message.
+		return resp.StatusCode, resp.Header, nil, nil
+	}
 	data, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBodyLen))
 	if err != nil {
 		return 0, nil, nil, err
@@ -456,18 +543,17 @@ func DecodeCookieD(v string) string {
 
 func parseRetryAfter(h string) time.Duration {
 	secs, err := strconv.ParseFloat(strings.TrimSpace(h), 64)
-	if err != nil || secs < 1 {
-		if err != nil {
-			secs = 5
-		} else {
-			secs = 1
-		}
+	switch {
+	case err != nil || math.IsNaN(secs):
+		secs = 5
+	case secs < 1:
+		secs = 1
 	}
-	d := time.Duration(secs * float64(time.Second))
-	if d > maxRateLimitDelay {
-		d = maxRateLimitDelay
-	}
-	return d
+	// Capped before the conversion: what an out-of-range float (an absurd
+	// or infinite Retry-After) converts to depends on the architecture, and
+	// a negative delay would retry at once.
+	secs = min(secs, maxRateLimitDelay.Seconds())
+	return time.Duration(secs * float64(time.Second))
 }
 
 func sleepCtx(ctx context.Context, d time.Duration) error {

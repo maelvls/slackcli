@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -108,7 +109,8 @@ func TestDownloadCanvasAsMarkdown(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(h.c.downloadsDir, "F3.html")); err == nil {
 		t.Error("the intermediate HTML was left behind")
 	}
-	if info, _ := os.Stat(want.Path); info.Mode().Perm() != 0o600 {
+	// Windows has no Unix permission bits (it reports 0666).
+	if info, _ := os.Stat(want.Path); runtime.GOOS != "windows" && info.Mode().Perm() != 0o600 {
 		t.Errorf("mode = %v, want 0600", info.Mode().Perm())
 	}
 

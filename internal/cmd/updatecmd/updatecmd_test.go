@@ -296,13 +296,14 @@ func TestDevelopmentBuild(t *testing.T) {
 	f.publish(t, "v1.2.0")
 	goInstall := "go install github.com/acme/tool/cmd/" + appinfo.Name + "@latest"
 
+	// GitHub is not asked: the answer is the same offline.
+	f.srv.FailAPI(http.StatusServiceUnavailable, nil)
 	stdout, _, err := f.run(t, "--check")
 	if err != nil {
 		t.Fatal(err)
 	}
 	wantJSON(t, stdout,
 		`"current": "dev"`,
-		`"latest": "1.2.0"`,
 		`"update_available": false`,
 		`"install_method": "source"`,
 		`"update_command": "`+goInstall+`"`,

@@ -4,7 +4,6 @@ package draftcmd
 
 import (
 	"fmt"
-	"strconv"
 
 	"github.com/spf13/cobra"
 
@@ -35,18 +34,17 @@ where they can edit and send it.
 
 Drafts are the user's own, unposted state: safe mode does not cover them.
 
-` + fmt.Sprintf(`Note: the browser compose editor moved to
-"%s message compose <target> [text]".`, appinfo.Name),
-		// `message draft <target> [text]` used to open the browser editor:
-		// point old invocations at `message compose` rather than leave a
-		// bare "unknown command".
-		Args: func(_ *cobra.Command, args []string) error {
+` + fmt.Sprintf(`To write a message in a browser editor instead, see
+"%s message compose".`, appinfo.Name),
+		// "message draft <target> [text]" is how the predecessor opened
+		// the browser editor: say where that went, on top of the usual
+		// "unknown command".
+		Args: func(cmd *cobra.Command, args []string) error {
 			if len(args) == 0 {
 				return nil
 			}
-			return fmt.Errorf("%s is not a 'message draft' subcommand (expected: list, create, update, delete).\n"+
-				"The browser compose editor moved to `message compose`:\n  %s message compose %s [text]",
-				strconv.Quote(args[0]), appinfo.Name, strconv.Quote(args[0]))
+			return fmt.Errorf(`unknown command %[1]q for %[2]q: its commands are list, create, update and delete. To write to %[1]s in the browser editor, run: %[3]s message compose %[1]q [text]`,
+				args[0], cmd.CommandPath(), appinfo.Name)
 		},
 		RunE: func(cmd *cobra.Command, _ []string) error { return cmd.Help() },
 	}
@@ -94,8 +92,13 @@ is posted: the draft waits in the user's Slack client.
 
 ` + targetHelp + `
 
+With a message URL, --thread-ts is redundant: it may repeat the thread of
+that message but not name another one.
+
 <text> is the draft text in Slack mrkdwn (*bold*, _italic_, ` + "`code`" + `, lists,
-> quotes, <url|label>). It may be "" when --attach is given.
+> quotes, <url|label>). It may be "" when --attach is given. Text of several
+words may start with a dash; a single word that looks like a flag ("-1")
+must come after "--".
 
 Prints {ok, draft: {id, text, destinations, last_updated_ts, date_created,
 file_ids}}.
@@ -114,7 +117,7 @@ draft cannot be created, the files uploaded for it are deleted.
 		},
 	}
 	cmdutil.AddTargetWorkspaceFlag(cmd, &opts.workspace)
-	cmd.Flags().StringVar(&opts.threadTS, "thread-ts", "", "Thread root ts to draft a reply into (optional; overrides the thread of a message URL target)")
+	cmd.Flags().StringVar(&opts.threadTS, "thread-ts", "", "Thread root ts to draft a reply into, for channel and user-ID targets; redundant with a message URL target, which already says which thread and which it must not contradict")
 	cmd.Flags().BoolVar(&opts.broadcast, "broadcast", false, "Also send the thread reply to the channel when posted (requires thread context; not for DMs)")
 	cmd.Flags().StringArrayVar(&opts.attach, "attach", nil, "Attach a local file to the draft (repeatable)")
 	// <text> may start with "- ". No command timeout: an upload may take
@@ -170,7 +173,7 @@ draft cannot be updated, the files newly uploaded for it are deleted.
 	}
 	cmdutil.AddTargetWorkspaceFlag(cmd, &opts.workspace)
 	cmd.Flags().StringVar(&opts.channel, "channel", "", "Re-address the draft to a different channel (#name or id), DM (user id) or thread (message URL)")
-	cmd.Flags().StringVar(&opts.threadTS, "thread-ts", "", "Thread root ts to draft a reply into (optional)")
+	cmd.Flags().StringVar(&opts.threadTS, "thread-ts", "", "Thread root ts to draft a reply into; redundant with a message URL given to --channel, which it must not contradict")
 	cmd.Flags().BoolVar(&broadcast, "broadcast", false, "Also send the thread reply to the channel when posted (requires thread context; not for DMs)")
 	cmd.Flags().BoolVar(&noBroadcast, "no-broadcast", false, "Clear an inherited broadcast flag (keeps the thread)")
 	cmd.MarkFlagsMutuallyExclusive("broadcast", "no-broadcast")

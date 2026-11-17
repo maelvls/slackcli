@@ -47,7 +47,8 @@ func (c *command) newScheduled() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "scheduled",
 		Short: "List or cancel pending scheduled messages",
-		Long: fmt.Sprintf(`List or cancel the messages you scheduled with "%[1]s message send --schedule/--schedule-in".
+		Long: fmt.Sprintf(`List or cancel the messages you scheduled with
+"%[1]s message send --schedule/--schedule-in".
 
 "%[1]s message scheduled" is short for "%[1]s message scheduled list".`, appinfo.Name),
 		Args: cobra.NoArgs,

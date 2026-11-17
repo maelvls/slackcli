@@ -4,35 +4,26 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
-	"net/url"
 	"strings"
+
+	"github.com/maelvls/slackcli/internal/slackapi"
 )
 
 // localConfigKeys are the Local Storage keys under which the Slack web
 // client keeps its signed-in teams.
 var localConfigKeys = []string{"localConfig_v3", "localConfig_v2"}
 
-// isSlackHost reports whether host belongs to Slack. Team URLs read from
-// browser storage become the hosts that tokens and cookies are sent to, so
-// anything else is refused.
-func isSlackHost(host string) bool {
-	host = strings.ToLower(host)
-	for _, domain := range []string{"slack.com", "slack-gov.com"} {
-		if host == domain || strings.HasSuffix(host, "."+domain) {
-			return true
-		}
-	}
-	return false
-}
-
-// slackOrigin returns the origin of a Slack https URL, or "" if raw is not
-// one.
+// slackOrigin returns the origin of an https URL on a Slack workspace
+// host ("https://acme.slack.com"), or "" if raw is not one. Team URLs read
+// from browser storage become the hosts that tokens and cookies are sent
+// to, so the rule is the one the API client applies
+// (slackapi.WorkspaceOrigin), not a copy of it.
 func slackOrigin(raw string) string {
-	u, err := url.Parse(strings.TrimSpace(raw))
-	if err != nil || u.Scheme != "https" || u.User != nil || u.Port() != "" || !isSlackHost(u.Hostname()) {
+	origin, err := slackapi.WorkspaceOrigin(raw)
+	if err != nil {
 		return ""
 	}
-	return "https://" + strings.ToLower(u.Hostname())
+	return origin
 }
 
 // parseTeams extracts the signed-in teams from the JSON text of a Slack

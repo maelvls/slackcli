@@ -13,6 +13,7 @@ import (
 	"github.com/maelvls/slackcli/internal/cmd/cmdutil"
 	"github.com/maelvls/slackcli/internal/slack/channels"
 	"github.com/maelvls/slackcli/internal/slack/drafts"
+	"github.com/maelvls/slackcli/internal/slack/enrich"
 	"github.com/maelvls/slackcli/internal/slack/upload"
 	"github.com/maelvls/slackcli/internal/slackapi"
 )
@@ -65,7 +66,9 @@ func list(ctx context.Context, rt *clictx.Context, opts listOptions) (listOutput
 		if err != nil {
 			return listOutput{}, err
 		}
-		nameChannels(ctx, client, found)
+		if err := nameChannels(ctx, client, found); err != nil {
+			return listOutput{}, err
+		}
 		return listOutput{OK: true, Drafts: found, Count: len(found)}, nil
 	})
 }
@@ -73,9 +76,13 @@ func list(ctx context.Context, rt *clictx.Context, opts listOptions) (listOutput
 // maxNameLookups bounds the concurrent conversations.info calls of a list.
 const maxNameLookups = 8
 
-// nameChannels fills in the display name of every destination, best
-// effort: a draft whose channel cannot be read is listed without a name.
-func nameChannels(ctx context.Context, client *slackapi.Client, found []drafts.Draft) {
+// nameChannels fills in the display name of every destination. A name is
+// an enrichment (see package enrich): a draft whose channel cannot be read
+// is listed without one, and a rate limit stops the lookups with a
+// warning. Only what no further call would survive is an error: a
+// cancelled command, or credentials that are no longer valid (which the
+// caller then refreshes).
+func nameChannels(ctx context.Context, client *slackapi.Client, found []drafts.Draft) error {
 	var ids []string
 	for _, d := range found {
 		for _, dest := range d.Destinations {
@@ -85,30 +92,48 @@ func nameChannels(ctx context.Context, client *slackapi.Client, found []drafts.D
 		}
 	}
 	var (
-		mu    sync.Mutex
-		wg    sync.WaitGroup
-		names = map[string]string{}
-		sem   = make(chan struct{}, maxNameLookups)
+		mu      sync.Mutex
+		wg      sync.WaitGroup
+		names   = map[string]string{}
+		fatal   error
+		limited enrich.Gate
+		sem     = make(chan struct{}, maxNameLookups)
 	)
 	for _, id := range ids {
 		wg.Go(func() {
 			sem <- struct{}{}
 			defer func() { <-sem }()
-			// ResolveName answers the ID itself when it finds no name.
-			if name := channels.ResolveName(ctx, client, id); name != id {
-				mu.Lock()
+			if limited.Closed() {
+				return
+			}
+			name, err := channels.LookupName(ctx, client, id)
+			mu.Lock()
+			defer mu.Unlock()
+			switch {
+			case err == nil:
 				names[id] = name
-				mu.Unlock()
+			case enrich.MustAbort(ctx, err):
+				fatal = cmp.Or(fatal, err)
+			default:
+				limited.Failed(err)
 			}
 		})
 	}
 	wg.Wait()
+	if fatal != nil {
+		return fmt.Errorf("looking up the channels of the drafts: %w", fatal)
+	}
+	if skipped, rateLimit := limited.Skipped(); skipped > 0 {
+		enrich.Warnf(ctx, "the names of %d of %d channels were not looked up (%v): their drafts are listed with the channel ID only; %s",
+			skipped, len(ids), enrich.Cause(rateLimit), enrich.Hint())
+	}
 	for i := range found {
 		for j := range found[i].Destinations {
 			dest := &found[i].Destinations[j]
 			dest.ChannelName = names[dest.ChannelID]
 		}
 	}
+	return nil
 }
 
 type createOptions struct {

@@ -522,7 +522,9 @@ func TestGetRejectsBadInputBeforeAuthenticating(t *testing.T) {
 	// The TypeScript version parsed "abc" to NaN, which meant "no limit".
 	h.fails("invalid argument", "get", "F12345678", "--max-chars", "abc")
 	h.fails("invalid argument", "get", "F12345678", "--max-chars", "10k")
-	h.fails("invalid --max-chars -5", "get", "F12345678", "--max-chars", "-5")
+	h.fails("invalid --max-chars value -5: must be a positive integer, or -1 for unlimited", "get", "F12345678", "--max-chars", "-5")
+	// 0 would print an empty canvas: refused, like every other --max-* flag.
+	h.fails("invalid --max-chars value 0: must be a positive integer, or -1 for unlimited", "get", "F12345678", "--max-chars", "0")
 	h.fails("unsupported canvas", "get", "launch-plan")
 	h.fails("not a Slack workspace URL", "get", "http://acme.slack.com/docs/T12345678/F12345678")
 	h.fails("no canvas ID", "get", acmeURL+"/docs/T12345678")
