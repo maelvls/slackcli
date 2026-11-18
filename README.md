@@ -24,6 +24,7 @@ Open Slack Desktop and sign in, then:
 ```bash
 slackcli auth test
 slackcli message list "#general" --limit 20
+slackcli message list "#general" --oldest 2026-01-30 --expand-threads --resolve-users
 slackcli search messages "deploy failed" --after 2026-01-01
 slackcli message send "#general" "Hello from slackcli"
 ```
@@ -53,7 +54,7 @@ Most commands take a target:
 
 - **A message URL**, such as `https://acme.slack.com/archives/C0123ABCDEF/p1770165109628379`. It names the workspace, the channel and the message, so prefer it. Quote it.
 - **A channel**: `#general`, `general` or an ID. A command that acts on one message then also needs `--ts`.
-- **A user ID** (`U…`), for a direct message.
+- **A user ID** (`U…`), for a direct message. Reading never opens one: `message list U…` fails when you have no DM with that user.
 
 With several workspaces saved, a channel name needs `--workspace <url-or-name>`, or a default set with `slackcli auth set-default`.
 
@@ -103,7 +104,8 @@ Saved credentials live in `~/.config/slackcli/credentials.json`. On macOS the se
 
 ## Output
 
-- Results are JSON on stdout, with empty fields removed. Hints and warnings go to stderr.
+- Results are JSON on stdout, with empty fields removed: on one line, or indented when stdout is a terminal. Hints and warnings go to stderr.
+- Messages have `ts`, which identifies them, and `time`, the same instant as a local date and time.
 - A list command always prints its list, `[]` when empty, and `next_cursor` when there is more (pass it to `--cursor`).
 - Files attached to messages are downloaded to the cache directory and listed with their local `path`.
 
