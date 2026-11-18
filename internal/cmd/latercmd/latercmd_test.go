@@ -395,19 +395,16 @@ func TestRemind(t *testing.T) {
 	}
 }
 
-func TestTruncatedURLHint(t *testing.T) {
+// A message URL is complete with or without cid: no warning.
+func TestURLWithoutCID(t *testing.T) {
 	h := newHarness(t)
-	if _, err := h.run("save", messageURL+"?thread_ts=1699999999.000100"); err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(h.stderr.String(), "truncated") {
-		t.Errorf("stderr = %q, want the truncated-URL hint", h.stderr)
-	}
-	if _, err := h.run("save", messageURL+"?thread_ts=1699999999.000100&cid=C12345678"); err != nil {
-		t.Fatal(err)
-	}
-	if h.stderr.Len() != 0 {
-		t.Errorf("stderr = %q, want nothing", h.stderr)
+	for _, query := range []string{"?thread_ts=1699999999.000100", "?thread_ts=1699999999.000100&cid=C12345678"} {
+		if _, err := h.run("save", messageURL+query); err != nil {
+			t.Fatal(err)
+		}
+		if h.stderr.Len() != 0 {
+			t.Errorf("%s: stderr = %q, want nothing", query, h.stderr)
+		}
 	}
 }
 

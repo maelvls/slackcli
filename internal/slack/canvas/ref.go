@@ -9,7 +9,6 @@ import (
 	"strings"
 
 	"github.com/maelvls/slackcli/internal/jsonx"
-	"github.com/maelvls/slackcli/internal/slack/slackurl"
 	"github.com/maelvls/slackcli/internal/slackapi"
 	"github.com/maelvls/slackcli/internal/slackid"
 )
@@ -44,12 +43,17 @@ func ParseURL(input string) (Ref, error) {
 	if err != nil || u.Host == "" {
 		return Ref{}, fmt.Errorf("invalid canvas URL %q", input)
 	}
-	if !slackurl.IsSlackURL(raw) || u.User != nil {
+	// The workspace URL is the origin the API client accepts, or nothing:
+	// plain http, "user@host" tricks and ports are refused rather than
+	// normalised, and a trailing dot is dropped (as slackurl does for
+	// message URLs).
+	origin, err := slackapi.WorkspaceOrigin(u.Scheme + "://" + u.Host)
+	if err != nil || u.User != nil {
 		return Ref{}, fmt.Errorf("not a Slack workspace URL: %q (expected https://<workspace>.slack.com/docs/T…/F…)", input)
 	}
 
-	ref := Ref{WorkspaceURL: "https://" + strings.ToLower(u.Host)}
-	if strings.EqualFold(u.Hostname(), "app.slack.com") {
+	ref := Ref{WorkspaceURL: origin}
+	if origin == "https://app.slack.com" {
 		ref.WorkspaceURL = ""
 	}
 	parts := strings.FieldsFunc(u.Path, func(r rune) bool { return r == '/' })

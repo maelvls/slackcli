@@ -18,7 +18,7 @@ import (
 )
 
 // composeFunc opens the human review editor (composecmd.Compose).
-type composeFunc func(ctx context.Context, rt *clictx.Context, target, initialText string, opts composecmd.Options) (map[string]any, error)
+type composeFunc func(ctx context.Context, rt *clictx.Context, target, initialText string, opts composecmd.Options) (composecmd.Result, error)
 
 // command holds what the subcommands share. Tests replace compose, now
 // and downloadsDir.
@@ -46,10 +46,8 @@ func newCommand(c *command) *cobra.Command {
 
 "%[1]s message <target>" is short for "%[1]s message get <target>".
 
-Safe mode (--safe-mode or %[2]s=1) keeps a human in the loop:
-%[3]s.
-("*" stands for every subcommand.)`,
-			appinfo.Name, appinfo.EnvName("SAFE_MODE"), clictx.SafeModeSummary()),
+%[2]s`,
+			appinfo.Name, clictx.SafeModeHelp()),
 		Args: cobra.ArbitraryArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if len(args) == 0 {

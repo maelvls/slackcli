@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"reflect"
 	"strconv"
 	"strings"
@@ -207,6 +208,16 @@ func TestToCompactUser(t *testing.T) {
 	if got := ToCompactUser(map[string]any{}); !reflect.DeepEqual(got, CompactUser{}) {
 		t.Errorf("got %+v", got)
 	}
+
+	// A number no int64 holds saturates, on every architecture (a plain
+	// conversion gives the largest int64 on arm64 and the smallest on
+	// amd64).
+	for in, want := range map[float64]int64{1e300: math.MaxInt64, -1e300: math.MinInt64, 1770165109.9: 1770165109} {
+		got := ToCompactUser(map[string]any{"profile": map[string]any{"status_expiration": in}})
+		if got.StatusExpiration != want {
+			t.Errorf("status_expiration %g = %d, want %d", in, got.StatusExpiration, want)
+		}
+	}
 }
 
 func TestCompactUserJSON(t *testing.T) {
@@ -331,6 +342,9 @@ func TestResolveUserID(t *testing.T) {
 			if !strings.Contains(err.Error(), want) {
 				t.Errorf("error does not mention %q: %v", want, err)
 			}
+		}
+		if n := strings.Count(err.Error(), appinfo.EnvName("RATE_LIMIT_MAX_WAIT_MS")); n != 1 {
+			t.Errorf("the error names the variable %d times, want once: %v", n, err)
 		}
 		if strings.Contains(err.Error(), "or the email address instead") {
 			t.Errorf("error suggests passing an email for an email: %v", err)

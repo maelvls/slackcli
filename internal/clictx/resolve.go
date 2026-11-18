@@ -58,7 +58,7 @@ func (c *Context) client(ctx context.Context, workspace string) (*Resolved, erro
 	selector := strings.TrimSpace(workspace)
 	selectorURL, _ := auth.NormalizeURL(selector) // "" unless selector is a URL
 
-	if a, ok, err := authFromEnv(); err != nil {
+	if a, ok, err := EnvAuth(); err != nil {
 		return nil, err
 	} else if ok {
 		return c.clientFromEnv(a, selector, selectorURL)
@@ -206,7 +206,21 @@ func onlyURL(workspaces []auth.Workspace, url string) []auth.Workspace {
 	return out
 }
 
+// clientFromEnv returns a client for the credentials of SLACK_TOKEN. The
+// workspace is the selector, or SLACK_WORKSPACE_URL when there is none: a
+// full workspace URL, or what designates a stored workspace. A browser
+// token needs one; a standard token works without, but a value that
+// designates nothing is refused all the same rather than silently ignored.
 func (c *Context) clientFromEnv(a slackapi.Auth, selector, selectorURL string) (*Resolved, error) {
+	source := "--workspace"
+	// SLACK_WORKSPACE_URL only applies when nothing else was asked for: a
+	// selector that designates nothing must not silently become another
+	// workspace.
+	env := strings.TrimSpace(os.Getenv("SLACK_WORKSPACE_URL"))
+	if selector == "" || selector == env {
+		source, selector = "SLACK_WORKSPACE_URL", env
+		selectorURL, _ = auth.NormalizeURL(selector)
+	}
 	workspaceURL := selectorURL
 	if workspaceURL == "" && selector != "" {
 		// A substring selector can still name a stored workspace.
@@ -219,26 +233,16 @@ func (c *Context) clientFromEnv(a slackapi.Auth, selector, selectorURL string) (
 				workspaceURL = match.URL
 			}
 		}
-	}
-	// SLACK_WORKSPACE_URL only applies when nothing else was asked for: a
-	// selector that designates nothing must not silently become another
-	// workspace.
-	if workspaceURL == "" && selector == "" {
-		if env := strings.TrimSpace(os.Getenv("SLACK_WORKSPACE_URL")); env != "" {
-			u, err := auth.NormalizeURL(env)
-			if err != nil {
-				if a.IsBrowser() {
-					return nil, fmt.Errorf("SLACK_WORKSPACE_URL must be an https Slack workspace URL such as https://acme.slack.com when SLACK_TOKEN is a browser token (got %q)", env)
-				}
-			} else {
-				workspaceURL = u
+		if workspaceURL == "" {
+			advice := "a standard token also works without a workspace: fix the value or leave it out"
+			if a.IsBrowser() {
+				advice = "the token and cookie are only ever sent to Slack"
 			}
+			return nil, fmt.Errorf(`%s must be an https Slack workspace URL such as https://acme.slack.com when SLACK_TOKEN is set, or a unique substring of a workspace listed by "%s auth whoami" (got %q); %s`,
+				source, appinfo.Name, selector, advice)
 		}
 	}
 	if a.IsBrowser() && workspaceURL == "" {
-		if selector != "" {
-			return nil, fmt.Errorf("cannot tell which workspace %q refers to: with a browser token in SLACK_TOKEN, pass --workspace (or SLACK_WORKSPACE_URL) as a full https Slack workspace URL such as https://acme.slack.com; the token and cookie are only ever sent to Slack", selector)
-		}
 		return nil, errors.New("SLACK_TOKEN is a browser token (xoxc-): also set SLACK_WORKSPACE_URL (e.g. https://acme.slack.com), pass --workspace, or use a Slack message URL as the target")
 	}
 	return c.resolved(a, workspaceURL, false), nil

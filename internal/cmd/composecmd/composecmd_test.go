@@ -47,6 +47,8 @@ type harness struct {
 	openErr error
 	// failOnce makes the first chat.postMessage fail with that code.
 	failOnce string
+	// getPermalink answers chat.getPermalink; nil answers {ok: true}.
+	getPermalink func() (map[string]any, error)
 
 	mu       sync.Mutex
 	calls    []apiCall
@@ -107,6 +109,10 @@ func (h *harness) slack(_ context.Context, method string, params map[string]any)
 		return map[string]any{"ok": true, "messages": []any{
 			map[string]any{"ts": params["latest"], "text": "root"},
 		}}, nil
+	case "chat.getPermalink":
+		if h.getPermalink != nil {
+			return h.getPermalink()
+		}
 	case "chat.postMessage":
 		if h.failOnce != "" && !h.failedAt {
 			h.failedAt = true
@@ -450,7 +456,7 @@ func TestComposeInterrupted(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	h.human = func(*browser) { cancel() } // Ctrl-C while the editor is open
 	out, err := h.c.compose(ctx, "#general", "hello", Options{})
-	if !errors.Is(err, context.Canceled) || out != nil {
+	if !errors.Is(err, context.Canceled) || out != (Result{}) {
 		t.Errorf("out = %v, err = %v", out, err)
 	}
 	h.wantNothingPosted()
@@ -763,7 +769,7 @@ func TestSafeModeNeverSendsWithoutAHuman(t *testing.T) {
 				t.Errorf("command: err = %v", err)
 			}
 			out, err := Compose(context.Background(), h.rt, "#general", "hello", Options{})
-			if err == nil || out != nil || !strings.Contains(err.Error(), "refusing to send without human review") {
+			if err == nil || out != (Result{}) || !strings.Contains(err.Error(), "refusing to send without human review") {
 				t.Errorf("Compose: out = %v, err = %v", out, err)
 			}
 			h.wantNoSlackCalls()
@@ -800,8 +806,10 @@ func TestComposeExportedEntryPointInCI(t *testing.T) {
 	wantParams(t, h.posted(), map[string]any{
 		"channel": "C12345678", "text": "hello", "thread_ts": "1770160500.000100", "unfurl_links": false, "unfurl_media": false,
 	})
-	if out["editor"] != "skipped" || out["thread_ts"] != "1770160500.000100" {
-		t.Errorf("output = %v", out)
+	want := Result{OK: true, Sent: true, Editor: "skipped", ChannelID: "C12345678", TS: "1770170000.000200", ThreadTS: "1770160500.000100",
+		Permalink: workspaceURL + "/archives/C12345678/p1770170000000200?thread_ts=1770160500.000100&cid=C12345678"}
+	if out != want {
+		t.Errorf("output = %+v\nwant     %+v", out, want)
 	}
 }
 

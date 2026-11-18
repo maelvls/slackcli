@@ -22,53 +22,52 @@ var outboundTokenRE = regexp.MustCompile(`<(?:@[UWB][A-Z0-9]+(?:\|[^>]*)?|#[CG][
 // path: see [bareMentionAt] for what counts as one.
 func FormatOutboundText(text string) string {
 	var b strings.Builder
+	offset := 0 // of the segment in text
 	splitCode(text, func(seg string, kind codeKind) {
-		literal := func(s string) {
-			if kind == notCode {
-				writeWithMentions(&b, s)
-			} else {
-				b.WriteString(entityEscaper.Replace(s))
-			}
+		start := offset
+		offset += len(seg)
+		if kind != notCode {
+			b.WriteString(entityEscaper.Replace(seg))
+			return
 		}
 		last := 0
 		for _, loc := range outboundTokenRE.FindAllStringIndex(seg, -1) {
-			literal(seg[last:loc[0]])
+			writeWithMentions(&b, text, start+last, start+loc[0])
 			b.WriteString(seg[loc[0]:loc[1]])
 			last = loc[1]
 		}
-		literal(seg[last:])
+		writeWithMentions(&b, text, start+last, offset)
 	})
 	return b.String()
 }
 
-// writeWithMentions writes s entity-escaped, with its bare mentions turned
-// into tokens. s is a run of literal text between tokens and code: its
-// start is a place where a mention may begin.
-func writeWithMentions(b *strings.Builder, s string) {
-	urls := bareURLRE.FindAllStringIndex(s, -1)
-	pending := 0
-	for i := 0; i < len(s); i++ {
-		if len(urls) > 0 && i == urls[0][0] {
+// writeWithMentions writes text[start:end], a run of literal text between
+// tokens and code, entity-escaped and with its bare mentions turned into
+// tokens. It is given the whole text because what precedes an "@", code and
+// tokens included, decides whether it is a mention.
+func writeWithMentions(b *strings.Builder, text string, start, end int) {
+	pending := start
+	for i := start; i < end; i++ {
+		switch text[i] {
+		case 'h':
 			// "https://medium.com/@channel/post" must stay a working link.
-			i = urls[0][1] - 1
-			urls = urls[1:]
-			continue
+			if url, ok := bareURLAt(text, i); ok {
+				i += len(url) - 1
+			}
+		case '@':
+			m, after, ok := bareMentionAt(text, i)
+			if !ok {
+				continue
+			}
+			b.WriteString(entityEscaper.Replace(text[pending:i]))
+			if m.userID != "" {
+				b.WriteString("<@" + m.userID + ">")
+			} else {
+				b.WriteString("<!" + m.broadcast + ">")
+			}
+			pending = after
+			i = after - 1
 		}
-		if s[i] != '@' {
-			continue
-		}
-		m, end, ok := bareMentionAt(s, i)
-		if !ok {
-			continue
-		}
-		b.WriteString(entityEscaper.Replace(s[pending:i]))
-		if m.userID != "" {
-			b.WriteString("<@" + m.userID + ">")
-		} else {
-			b.WriteString("<!" + m.broadcast + ">")
-		}
-		pending = end
-		i = end - 1
 	}
-	b.WriteString(entityEscaper.Replace(s[pending:]))
+	b.WriteString(entityEscaper.Replace(text[pending:end]))
 }

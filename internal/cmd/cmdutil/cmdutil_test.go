@@ -147,13 +147,15 @@ func TestParseTarget(t *testing.T) {
 	wantErr(t, err, `--workspace "other" contradicts the URL`)
 }
 
-func TestParseTargetWarnsAboutATruncatedURL(t *testing.T) {
+// "…/p<digits>?thread_ts=<ts>" is a complete message URL: no warning.
+func TestParseTargetAcceptsAURLWithoutCID(t *testing.T) {
 	e := newEnv(t, acme)
-	if _, err := ParseTarget(e.rt, messageURL+"?thread_ts=1700000000.000001", ""); err != nil {
-		t.Fatal(err)
+	target, err := ParseTarget(e.rt, messageURL+"?thread_ts=1700000000.000001", "")
+	if err != nil || target.Ref.ThreadTSHint != "1700000000.000001" {
+		t.Fatalf("target = %+v, err = %v", target, err)
 	}
-	if !strings.Contains(e.stderr.String(), "truncated") {
-		t.Errorf("stderr = %q, want a truncation hint", e.stderr)
+	if e.stderr.Len() != 0 {
+		t.Errorf("stderr = %q, want nothing", e.stderr)
 	}
 }
 

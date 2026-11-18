@@ -14,7 +14,7 @@ func scheduledListFixture(h *harness) {
 		return map[string]any{
 			"ok": true,
 			"scheduled_messages": []any{
-				map[string]any{"id": "Q1234ABCD", "channel_id": channel, "post_at": 1770168709, "text": "scheduled"},
+				map[string]any{"text": "scheduled", "post_at": 1770168709, "id": "Q1234ABCD", "date_created": 1770160000, "channel_id": channel},
 			},
 			"response_metadata": map[string]any{"next_cursor": "next-1"},
 		}, nil
@@ -23,7 +23,7 @@ func scheduledListFixture(h *harness) {
 
 const wantScheduledList = `{
 	"ok": true,
-	"scheduled_messages": [{"id": "Q1234ABCD", "channel_id": "C12345678", "post_at": 1770168709, "text": "scheduled"}],
+	"scheduled_messages": [{"id": "Q1234ABCD", "channel_id": "C12345678", "post_at": 1770168709, "date_created": 1770160000, "text": "scheduled"}],
 	"next_cursor": "next-1"
 }`
 
@@ -37,6 +37,33 @@ func TestScheduledList(t *testing.T) {
 	want := map[string]any{"channel": testChannel, "cursor": "cursor-1", "oldest": "1770160000", "latest": "1770170000", "limit": 25}
 	if len(calls) != 1 || !reflect.DeepEqual(calls[0].params, want) {
 		t.Errorf("chat.scheduledMessages.list calls = %v", calls)
+	}
+}
+
+// The fields of an entry come out in the order the help gives, not sorted.
+func TestScheduledListFieldOrder(t *testing.T) {
+	h := newHarness(t)
+	scheduledListFixture(h)
+	out, err := h.run("scheduled", "list")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := `{
+  "ok": true,
+  "scheduled_messages": [
+    {
+      "id": "Q1234ABCD",
+      "channel_id": "C12345678",
+      "post_at": 1770168709,
+      "date_created": 1770160000,
+      "text": "scheduled"
+    }
+  ],
+  "next_cursor": "next-1"
+}
+`
+	if out != want {
+		t.Errorf("output:\n%s\nwant:\n%s", out, want)
 	}
 }
 

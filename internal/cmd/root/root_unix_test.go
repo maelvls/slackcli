@@ -31,4 +31,17 @@ func TestRunInterrupt(t *testing.T) {
 	if got.code != 130 || got.stderr != "interrupted\n" {
 		t.Errorf("got %+v", got)
 	}
+
+	// A command that writes to Slack may have got its change through.
+	message := &cobra.Command{Use: "message"}
+	message.AddCommand(&cobra.Command{Use: "send", RunE: waiting.RunE}, &cobra.Command{Use: "list", RunE: waiting.RunE})
+	got = runWith(t, time.Second, one(message), "message", "send")
+	if got.code != 130 || got.stderr != "interrupted. What the command was sending or changing may still have gone through: check before retrying.\n" {
+		t.Errorf("message send: got %+v", got)
+	}
+	message = &cobra.Command{Use: "message"}
+	message.AddCommand(&cobra.Command{Use: "list", RunE: waiting.RunE})
+	if got = runWith(t, time.Second, one(message), "message", "list"); got.code != 130 || got.stderr != "interrupted\n" {
+		t.Errorf("message list: got %+v", got)
+	}
 }

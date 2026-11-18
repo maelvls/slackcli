@@ -1,4 +1,4 @@
-# Check out with LF everywhere, Windows included: gofmt, install.sh and
-# test fixtures all expect it.
+# Check out with LF everywhere, Windows included: gofmt and the test
+# fixtures expect it.
 * text=auto eol=lf
 *.png binary

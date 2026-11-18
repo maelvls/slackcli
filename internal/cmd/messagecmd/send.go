@@ -5,7 +5,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"strconv"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -13,6 +12,7 @@ import (
 	"github.com/maelvls/slackcli/internal/appinfo"
 	"github.com/maelvls/slackcli/internal/cmd/cmdutil"
 	"github.com/maelvls/slackcli/internal/jsonx"
+	"github.com/maelvls/slackcli/internal/slack/messages"
 	"github.com/maelvls/slackcli/internal/slack/scheduled"
 	"github.com/maelvls/slackcli/internal/slack/slacktext"
 	"github.com/maelvls/slackcli/internal/slack/slackurl"
@@ -65,15 +65,21 @@ as real Slack lists. It is required unless --attach or --blocks is given.
 
 Prints {ok, channel_id, ts, thread_ts, permalink}; with --schedule/--schedule-in
 {ok, channel_id, scheduled_message_id, post_at, thread_ts}; with --attach
-{ok, channel_id, thread_ts, files}.
+{ok, channel_id, thread_ts, files}. "permalink" is only left out, with a
+warning on stderr, when Slack would not give it for a token that names no
+workspace: the message is sent all the same.
+
+[text] of several words may start with a dash ("- one\n- two"). A single word
+that looks like a flag ("-1", "--force") must come after "--":
+  %[2]s message send <target> -- "-1"
 
 With --attach the command does not time out: uploads can be long.
 
-In safe mode (--safe-mode or %[1]s=1) nothing is posted: the compose editor
-opens with the text for a human to review and send. --attach, --blocks,
---schedule, --schedule-in and --reply-broadcast are refused in safe mode, and
-so is running in CI or without a browser, where no editor can open: the
-editor's link is never printed in safe mode.`, appinfo.EnvName("SAFE_MODE")),
+In safe mode (--safe-mode or %[1]s=1) nothing is posted: the
+compose editor opens with the text for a human to review and send. --attach,
+--blocks, --schedule, --schedule-in and --reply-broadcast are refused in safe
+mode, and so is running in CI or without a browser, where no editor can open:
+the editor's link is never printed in safe mode.`, appinfo.EnvName("SAFE_MODE"), appinfo.Name),
 		Args: cobra.RangeArgs(1, 2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			text := ""
@@ -116,7 +122,7 @@ func (c *command) runSend(cmd *cobra.Command, targetInput, text string, opts sen
 	case hasScheduleIn && strings.TrimSpace(opts.scheduleIn) == "":
 		return errors.New("--schedule-in needs a duration or a day, got an empty value: pass " + scheduled.InHelp)
 	case strings.TrimSpace(text) == "" && !hasAttach && !hasBlocks:
-		return errors.New("<text> is required when no --attach files or --blocks are provided")
+		return errors.New(missingTextMessage(cmd))
 	}
 	threadTS, err := cmdutil.ParseTS("--thread-ts", opts.threadTS)
 	if err != nil {
@@ -212,6 +218,17 @@ func (c *command) runSend(cmd *cobra.Command, targetInput, text string, opts sen
 	return c.rt.Print(result)
 }
 
+// missingTextMessage says that "send" got nothing to send. When flags were
+// given, one of them may be the text itself: a single word such as
+// "--safe-mode" is read as a flag.
+func missingTextMessage(cmd *cobra.Command) string {
+	msg := "[text] is required unless --attach or --blocks is given"
+	if cmd.Flags().NFlag() > 0 {
+		msg += fmt.Sprintf(`; if the text is a single word starting with a dash, which is read as a flag, put it after "--": %s <target> -- "--text"`, cmd.CommandPath())
+	}
+	return msg
+}
+
 // outgoing is a message ready to be sent to a resolved conversation.
 type outgoing struct {
 	// text is escaped mrkdwn (slacktext.FormatOutboundText).
@@ -258,7 +275,7 @@ func (c *command) sendToChannel(ctx context.Context, loc cmdutil.Located, m outg
 		}
 		result.ChannelID = cmp.Or(jsonx.Str(resp["channel"]), loc.ChannelID)
 		result.ScheduledMessageID = jsonx.Str(resp["scheduled_message_id"])
-		result.PostAt = cmp.Or(responseInt(resp["post_at"]), m.postAt)
+		result.PostAt = cmp.Or(scheduled.UnixSeconds(resp["post_at"]), m.postAt)
 		if result.ScheduledMessageID == "" {
 			c.rt.Hintf(`Warning: Slack accepted the scheduled message but returned no scheduled_message_id; find it with "%s message scheduled list".`, appinfo.Name)
 		}
@@ -270,9 +287,8 @@ func (c *command) sendToChannel(ctx context.Context, loc cmdutil.Located, m outg
 		}
 		result.ChannelID = cmp.Or(jsonx.Str(resp["channel"]), loc.ChannelID)
 		result.TS = jsonx.Str(resp["ts"])
-		if loc.WorkspaceURL != "" && result.TS != "" {
-			result.Permalink = slackurl.BuildMessageURL(loc.WorkspaceURL, result.ChannelID, result.TS, m.threadTS)
-		}
+		// Never fails: the message is posted (see SentPermalink).
+		result.Permalink = messages.SentPermalink(ctx, loc.Client, loc.WorkspaceURL, result.ChannelID, result.TS, m.threadTS)
 
 	default:
 		if m.blocks != nil {
@@ -291,21 +307,14 @@ func (c *command) sendToChannel(ctx context.Context, loc cmdutil.Located, m outg
 	return result, nil
 }
 
-// responseInt reads an integer Slack may send as a number or as a string.
-func responseInt(v any) int64 {
-	if n, ok := jsonx.Num(v); ok {
-		return int64(n)
-	}
-	n, _ := strconv.ParseInt(strings.TrimSpace(jsonx.Str(v)), 10, 64)
-	return n
-}
-
 // explainSendError adds what to do about the Slack errors an agent is
-// most likely to hit when posting.
+// most likely to hit when posting. The codes that slackapi.APIError
+// explains itself (not_in_channel, channel_not_found, ...) only get the
+// channel here: a second explanation would say the same thing twice.
 func explainSendError(err error, channelID string) error {
 	switch {
-	case slackapi.IsErrorCode(err, "not_in_channel"):
-		return fmt.Errorf("you are not a member of %s: join the channel first: %w", channelID, err)
+	case slackapi.IsErrorCode(err, "not_in_channel", "channel_not_found"):
+		return fmt.Errorf("posting to %s: %w", channelID, err)
 	case slackapi.IsErrorCode(err, "is_archived"):
 		return fmt.Errorf("channel %s is archived and cannot be posted to: %w", channelID, err)
 	case slackapi.IsErrorCode(err, "thread_not_found"):

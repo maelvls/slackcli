@@ -48,10 +48,19 @@ func TestParseTeamsTolerance(t *testing.T) {
 
 func TestSlackOrigin(t *testing.T) {
 	for in, want := range map[string]string{
-		"https://acme.slack.com/":              "https://acme.slack.com",
-		"https://ACME.Slack.com/api/x?y=1":     "https://acme.slack.com",
-		"https://slack.com":                    "https://slack.com",
-		"https://a.enterprise.slack.com/":      "https://a.enterprise.slack.com",
+		"https://acme.slack.com/":          "https://acme.slack.com",
+		"https://ACME.Slack.com/api/x?y=1": "https://acme.slack.com",
+		"https://slack.com":                "https://slack.com",
+		"https://a.enterprise.slack.com/":  "https://a.enterprise.slack.com",
+		"https://acme.slack-gov.com/":      "https://acme.slack-gov.com",
+		// A fully-qualified host (trailing dot) is the same host: it is
+		// accepted and normalised, as slackapi.WorkspaceOrigin does.
+		"https://acme.slack.com./api/x":        "https://acme.slack.com",
+		"https://slack.com.":                   "https://slack.com",
+		"https://acme.slack.com.evil.example.": "",
+		// File hosts are Slack's, but they are not workspaces.
+		"https://files.slack-edge.com/":        "",
+		"https://slack-files.com/":             "",
 		"http://acme.slack.com/":               "",
 		"https://acme.slack.com:8443/":         "",
 		"https://user@acme.slack.com/":         "",

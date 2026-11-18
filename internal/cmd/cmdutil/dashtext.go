@@ -6,6 +6,8 @@ import (
 	"unicode"
 
 	"github.com/spf13/cobra"
+
+	"github.com/maelvls/slackcli/internal/appinfo"
 )
 
 // AllowDashText lets the positional arguments of cmd start with a dash, as
@@ -15,31 +17,45 @@ import (
 //
 // It takes over flag parsing, and with it the checks cobra skips for a
 // command that parses its own flags: cmd.Args and cmd.RunE, which must
-// both be set, then receive the positional arguments as usual. An
-// argument is text rather than a flag when it starts with a dash and what
-// would be the flag name contains whitespace; anything goes after "--".
+// both be set, then receive the positional arguments as usual; a command
+// line they reject is a *UsageError.
+//
+// The rule: an argument that starts with a dash is text rather than a
+// flag when what would be the flag name (up to the first "=") contains
+// whitespace, as in "- item", "-1 for me" or "--> see below". A single
+// word such as "-1", "-h" or "--force" is still read as a flag and must
+// come after "--", after which every argument is positional. The value
+// that follows a "--flag" taking one is never looked at.
 func AllowDashText(cmd *cobra.Command) *cobra.Command {
 	validate, run := cmd.Args, cmd.RunE
 	cmd.DisableFlagParsing = true
 	cmd.Args = cobra.ArbitraryArgs
+	if cmd.Annotations == nil {
+		cmd.Annotations = map[string]string{}
+	}
+	cmd.Annotations[freeTextAnnotation] = "true"
 	cmd.RunE = func(cmd *cobra.Command, raw []string) error {
 		args, ok, err := parseArgsWithDashText(cmd, raw)
 		if !ok {
 			return err
 		}
-		if err := validate(cmd, args); err != nil {
+		if err := CheckArgs(cmd, validate, args); err != nil {
 			return err
 		}
-		if err := cmd.ValidateRequiredFlags(); err != nil {
-			return err
-		}
-		if err := cmd.ValidateFlagGroups(); err != nil {
+		if err := CheckFlags(cmd); err != nil {
 			return err
 		}
 		return run(cmd, args)
 	}
 	return cmd
 }
+
+// freeTextAnnotation marks the commands declared with AllowDashText.
+const freeTextAnnotation = appinfo.Name + "/free-text"
+
+// TakesText reports whether cmd was declared with AllowDashText: one of
+// its arguments is free text, which may need quoting or a "--" before it.
+func TakesText(cmd *cobra.Command) bool { return cmd.Annotations[freeTextAnnotation] == "true" }
 
 // isDashText reports whether arg starts with a dash but cannot be a flag,
 // because what would be the flag name contains whitespace.
@@ -82,7 +98,7 @@ func parseArgsWithDashText(cmd *cobra.Command, raw []string) (args []string, ok 
 
 	cmd.DisableFlagParsing = false
 	if err := cmd.ParseFlags(protected); err != nil {
-		return nil, false, cmd.FlagErrorFunc()(cmd, err)
+		return nil, false, FlagError(cmd, err)
 	}
 	if help, _ := cmd.Flags().GetBool("help"); help {
 		return nil, false, cmd.Help()

@@ -3,6 +3,7 @@ package search
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -41,13 +42,13 @@ func TestSearchFilesKeepsGoingAfterFailedDownload(t *testing.T) {
 		t.Fatalf("files = %+v", res.Files)
 	}
 	missing, working := res.Files[0], res.Files[1]
-	if working.Title != "Working report" || working.Mimetype != "text/plain" || !strings.HasSuffix(working.Path, "/F2.txt") || working.Error != "" {
+	if working.Title != "Working report" || working.Mimetype != "text/plain" || filepath.Base(working.Path) != "F2.txt" || working.Error != "" {
 		t.Errorf("working = %+v", working)
 	}
 	if body, err := os.ReadFile(working.Path); err != nil || string(body) != "ok" {
 		t.Errorf("downloaded %q, %v", body, err)
 	}
-	if missing.Title != "Missing report" || missing.Error != "Failed to download file (404)" || !strings.HasSuffix(missing.Path, "/F1.download-error.txt") {
+	if missing.Title != "Missing report" || missing.Error != "Failed to download file (404)" || filepath.Base(missing.Path) != "F1.download-error.txt" {
 		t.Errorf("missing = %+v", missing)
 	}
 	if missing.Permalink != "https://test.slack.com/files/U1/F1" {
@@ -139,7 +140,7 @@ func TestScanFilesKeepsGoingAfterFailedDownload(t *testing.T) {
 	if len(res.Files) != 2 {
 		t.Fatalf("files = %+v", res.Files)
 	}
-	if got := res.Files[1]; got.Title != "Healthy report" || got.Mimetype != "text/plain" || !strings.HasSuffix(got.Path, "/F2.txt") {
+	if got := res.Files[1]; got.Title != "Healthy report" || got.Mimetype != "text/plain" || filepath.Base(got.Path) != "F2.txt" {
 		t.Errorf("healthy = %+v", got)
 	}
 	if got := res.Files[0]; got.Title != "Broken report" || got.Error == "" {

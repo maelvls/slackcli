@@ -181,7 +181,7 @@ func ListViaCounts(ctx context.Context, client *slackapi.Client, opts ListOption
 	if n, err := limited.Skipped(); n > 0 {
 		page.Warnings = append(page.Warnings, fmt.Sprintf(
 			"the details of %d of %d conversations were not looked up (%v): they are listed by ID only; %s",
-			n, len(ids), err, enrich.Hint()))
+			n, len(ids), enrich.Cause(err), enrich.Hint()))
 	}
 	return page, nil
 }

@@ -11,9 +11,9 @@ import (
 
 // markResult is printed by `channel mark`.
 type markResult struct {
-	OK      bool   `json:"ok"`
-	Channel string `json:"channel"`
-	TS      string `json:"ts"`
+	OK        bool   `json:"ok"`
+	ChannelID string `json:"channel_id"`
+	TS        string `json:"ts"`
 }
 
 func newMarkCommand(rt *clictx.Context) *cobra.Command {
@@ -28,7 +28,8 @@ ts marks messages as unread again).
 <target> is a Slack message URL (read up to that message), or a channel
 (#name or ID) together with --ts.
 
-Prints {"ok": true, "channel": <channel ID>, "ts": <new read position>}.`,
+Prints {"ok": true, "channel_id": <channel ID>, "ts": <new read position>}.
+Not covered by safe mode: it only moves your own read marker.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			target, err := cmdutil.ParseTarget(rt, args[0], workspace)
@@ -57,7 +58,7 @@ Prints {"ok": true, "channel": <channel ID>, "ts": <new read position>}.`,
 			if err != nil {
 				return err
 			}
-			return rt.Print(markResult{OK: true, Channel: channelID, TS: readTS})
+			return rt.Print(markResult{OK: true, ChannelID: channelID, TS: readTS})
 		},
 	}
 	cmd.Flags().StringVar(&ts, "ts", "", "Message ts to mark as read, e.g. 1770165109.628379 (required for channel name/ID targets; overrides a URL timestamp)")

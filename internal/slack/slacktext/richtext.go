@@ -61,20 +61,46 @@ type richChunk struct {
 	code bool
 }
 
-// splitFences carves the ``` code blocks out of text, wherever their fences
-// are: at the start of a line, indented, or in the middle of one. It is done
-// before any line is looked at, so that nothing in a code block is read as
-// a list item or a quote, and no fence is mistaken for text. An unclosed
-// block whose fence starts a line runs to the end of the text, as it does in
-// Slack's composer; a lone ``` in the middle of a line is text.
+// splitFences carves the ``` code blocks out of text. It is done before any
+// line is looked at, so that nothing in a code block is read as a list item
+// or a quote. Every other ``` stays in the text: nothing is ever dropped.
+//
+// A fence opens a block when:
+//   - it starts its line (indented or not): the block runs to the next
+//     fence, or to the end of the text when there is none, as it does in
+//     Slack's composer;
+//   - it ends its line ("Run: ```") and another fence follows;
+//   - it is inside a line and so is its closing fence ("run ```ls``` now").
+//
+// So the ``` of "use ``` to open a block" is text, even when a real block
+// follows on later lines: it does not pair with the fence of that block.
+// A fence that would open a block with no code in it is text too.
 func splitFences(text string) []richChunk {
 	var chunks []richChunk
-	for text != "" {
-		before, rest, found := strings.Cut(text, codeFence)
-		ownLine := lastLineIsBlank(before)
-		if found && !ownLine && !strings.Contains(rest, codeFence) {
-			before, found = text, false
+	prose := 0 // start of the text that is not in a chunk yet
+	for from := 0; ; {
+		idx := strings.Index(text[from:], codeFence)
+		if idx < 0 {
+			break
 		}
+		open := from + idx
+		// Should this fence turn out to be text, look for the next one.
+		from = open + len(codeFence)
+
+		before := text[prose:open]
+		ownLine := lastLineIsBlank(before)
+		raw, after, closed := strings.Cut(text[from:], codeFence)
+		if !ownLine {
+			line, _, multiline := strings.Cut(raw, "\n")
+			if !closed || multiline && strings.TrimSpace(line) != "" {
+				continue
+			}
+		}
+		code := fencedCode(raw, ownLine, closed)
+		if strings.TrimSpace(code) == "" {
+			continue
+		}
+
 		if ownLine {
 			// The indentation of the fence, and the line break before it.
 			before = strings.TrimRight(before, " \t")
@@ -83,15 +109,14 @@ func splitFences(text string) []richChunk {
 		if before != "" {
 			chunks = append(chunks, richChunk{text: before})
 		}
-		if !found {
-			break
-		}
-		code, after, closed := strings.Cut(rest, codeFence)
-		if code = fencedCode(code, ownLine, closed); strings.TrimSpace(code) != "" {
-			chunks = append(chunks, richChunk{text: code, code: true})
-		}
+		chunks = append(chunks, richChunk{text: code, code: true})
 		// What follows the closing fence on its line is ordinary text.
-		text = strings.TrimPrefix(strings.TrimLeft(after, " \t"), "\n")
+		after = strings.TrimPrefix(strings.TrimLeft(after, " \t"), "\n")
+		prose = len(text) - len(after)
+		from = prose
+	}
+	if prose < len(text) {
+		chunks = append(chunks, richChunk{text: text[prose:]})
 	}
 	return chunks
 }

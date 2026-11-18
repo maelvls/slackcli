@@ -2,6 +2,7 @@ package scheduled
 
 import (
 	"context"
+	"math"
 	"reflect"
 	"strings"
 	"testing"
@@ -41,8 +42,28 @@ func TestListForwardsFilters(t *testing.T) {
 	if !reflect.DeepEqual(got, wantParams) {
 		t.Errorf("params = %v, want %v", got, wantParams)
 	}
-	if !res.OK || res.NextCursor != "next" || len(res.ScheduledMessages) != 1 || res.ScheduledMessages[0]["id"] != "Q1234ABCD" {
-		t.Errorf("result = %+v", res)
+	want := []Message{{ID: "Q1234ABCD", ChannelID: "C12345678", PostAt: 1780000000, Text: "scheduled"}}
+	if !res.OK || res.NextCursor != "next" || !reflect.DeepEqual(res.ScheduledMessages, want) {
+		t.Errorf("result = %+v, want messages %+v", res, want)
+	}
+}
+
+func TestUnixSeconds(t *testing.T) {
+	for _, tc := range []struct {
+		in   any
+		want int64
+	}{
+		{1780000000.0, 1780000000},
+		{int64(1780000000), 1780000000},
+		{" 1780000000 ", 1780000000},
+		{1e300, math.MaxInt64}, // saturates instead of wrapping
+		{"soon", 0},
+		{nil, 0},
+		{true, 0},
+	} {
+		if got := UnixSeconds(tc.in); got != tc.want {
+			t.Errorf("UnixSeconds(%#v) = %d, want %d", tc.in, got, tc.want)
+		}
 	}
 }
 

@@ -185,11 +185,11 @@ func ParseRecord(raw any) (draft Draft, ok bool) {
 		}
 	}
 	draft.Text = strings.TrimSpace(strings.Join(parts, "\n\n"))
-	if n, ok := jsonx.Num(rec["date_created"]); ok {
-		draft.DateCreated = int64(n)
+	if n, ok := jsonx.Int64(rec["date_created"]); ok {
+		draft.DateCreated = n
 	}
-	if n, ok := jsonx.Num(rec["date_scheduled"]); ok && n > 0 {
-		draft.DateScheduled = int64(n)
+	if n, ok := jsonx.Int64(rec["date_scheduled"]); ok && n > 0 {
+		draft.DateScheduled = n
 	}
 	for _, f := range jsonx.Slice(rec["file_ids"]) {
 		if s := jsonx.Str(f); s != "" {

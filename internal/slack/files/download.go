@@ -89,20 +89,12 @@ type DownloadOptions struct {
 	Overwrite bool
 }
 
-// IsSlackHost reports whether host belongs to Slack, i.e. whether Slack
-// credentials may be sent to it.
-func IsSlackHost(host string) bool {
-	host = strings.ToLower(strings.TrimSuffix(host, "."))
-	for _, domain := range []string{"slack.com", "slack-edge.com", "slack-files.com", "slack-gov.com"} {
-		if host == domain || strings.HasSuffix(host, "."+domain) {
-			return true
-		}
-	}
-	return false
-}
-
+// checkSlackURL refuses a URL that credentials must not be sent to: one
+// that is not https on a Slack-owned host. Files live on workspace hosts
+// and on Slack's file hosts alike, hence slackapi.IsSlackHost rather than
+// slackapi.IsWorkspaceHost.
 func checkSlackURL(u *url.URL) error {
-	if u.Scheme != "https" || u.User != nil || !IsSlackHost(u.Hostname()) {
+	if u.Scheme != "https" || u.User != nil || !slackapi.IsSlackHost(u.Hostname()) {
 		return &DownloadError{
 			Message: fmt.Sprintf("Refusing to send Slack credentials to %s: not an https URL on a Slack host (external file? open the link directly)", u.Redacted()),
 			Err:     ErrNotSlackHost,
@@ -115,7 +107,7 @@ func checkSlackURL(u *url.URL) error {
 // response whatever its status; the caller closes the body. Credentials
 // are only ever sent over https to Slack-owned hosts: any other URL fails
 // with ErrNotSlackHost, and a redirect that leaves Slack is followed
-// without credentials.
+// without credentials, as is everything after it.
 func Get(ctx context.Context, client *slackapi.Client, rawURL string) (*http.Response, error) {
 	u, err := url.Parse(rawURL)
 	if err != nil {
@@ -133,8 +125,12 @@ func Get(ctx context.Context, client *slackapi.Client, rawURL string) (*http.Res
 	// A copy, so that the redirect policy does not leak into the API
 	// client. net/http already drops Authorization and Cookie when a
 	// redirect leaves the original domain; this policy states the rule
-	// explicitly for both directions (files.slack.com → another Slack host
-	// keeps credentials, anything else never has them).
+	// explicitly, whatever the status (301, 302, 303, 307, 308: a GET has
+	// no body to replay, so only the headers matter). A redirect between
+	// https Slack hosts keeps the credentials. Anything else never has
+	// them, and neither does the rest of the chain: a foreign host must
+	// not be able to send an authenticated request back to a Slack URL of
+	// its choosing.
 	hc := *client.HTTPClient()
 	hc.CheckRedirect = func(next *http.Request, via []*http.Request) error {
 		if len(via) >= maxRedirects {
@@ -143,9 +139,15 @@ func Get(ctx context.Context, client *slackapi.Client, rawURL string) (*http.Res
 		for _, h := range []string{"Authorization", "Cookie", "Referer"} {
 			next.Header.Del(h)
 		}
-		if checkSlackURL(next.URL) == nil {
-			authorize(client, next)
+		if checkSlackURL(next.URL) != nil {
+			return nil
 		}
+		for _, prev := range via {
+			if checkSlackURL(prev.URL) != nil {
+				return nil
+			}
+		}
+		authorize(client, next)
 		return nil
 	}
 	resp, err := hc.Do(req)

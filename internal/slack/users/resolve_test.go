@@ -213,6 +213,14 @@ func TestResolveUserIDBySearch(t *testing.T) {
 				t.Errorf("error does not mention %q: %v", want, err)
 			}
 		}
+		// The explanation and the rate limit it wraps both know which
+		// variable to set: it is named once.
+		if n := strings.Count(err.Error(), appinfo.EnvName("RATE_LIMIT_MAX_WAIT_MS")); n != 1 {
+			t.Errorf("the error names the variable %d times, want once: %v", n, err)
+		}
+		if !strings.Contains(err.Error(), "retry after 30s") {
+			t.Errorf("the error does not say how long the limit lasts: %v", err)
+		}
 		if n := len(rec.only("users.list")); n != 1 {
 			t.Errorf("users.list calls = %d, want 1", n)
 		}
@@ -300,6 +308,29 @@ func TestResolveUserIDs(t *testing.T) {
 
 	if got, err := ResolveUserIDs(ctx, dir.recorder().client(), nil); err != nil || len(got) != 0 {
 		t.Errorf("no inputs: got %+v, %v", got, err)
+	}
+}
+
+// A scan cut short by a rate limit only names the inputs it did not
+// settle: the deactivated member an email was looked for is settled as
+// soon as it is found.
+func TestScanErrorLeavesOutDeactivatedMembersAlreadyFound(t *testing.T) {
+	gone := member("U00000007A", "gone", "deleted", true, "profile", profile("email", "gone@example.com"))
+	rec := directory{pages: [][]map[string]any{{gone}, {member("U00000001A", "alice")}}}.recorder()
+	serve := rec.serve
+	rec.serve = func(method string, params map[string]any) (map[string]any, error) {
+		if c, _ := params["cursor"].(string); method == "users.list" && c != "" {
+			return nil, &slackapi.RateLimitError{Method: method, RetryAfter: 30 * time.Second}
+		}
+		return serve(method, params)
+	}
+	_, err := ResolveUserIDs(context.Background(), rec.client(), []string{"gone@example.com", "@ghost"})
+	var rl *slackapi.RateLimitError
+	if !errors.As(err, &rl) {
+		t.Fatalf("err = %v, want a rate limit error", err)
+	}
+	if !strings.Contains(err.Error(), `"@ghost"`) || strings.Contains(err.Error(), "gone@example.com") {
+		t.Errorf("err = %v, want only @ghost reported as unresolved", err)
 	}
 }
 

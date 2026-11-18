@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"reflect"
 	"strconv"
 	"strings"
@@ -128,6 +129,46 @@ func TestFetchThread(t *testing.T) {
 	}
 	if msgs[1].ChannelID != "C12345678" || msgs[1].ThreadTS != "1.000001" || msgs[1].User != "U22222222" {
 		t.Errorf("reply = %+v", msgs[1])
+	}
+}
+
+// The messages of a thread have the documented shape {channel_id, ts,
+// thread_ts, …}, like those of a channel history: the root too, even when
+// Slack's payload for it carries no thread_ts.
+func TestFetchThreadMessagesCarryChannelAndThread(t *testing.T) {
+	for name, root := range map[string]map[string]any{
+		"root as Slack sends it":   raw("1.000001", "root", "thread_ts", "1.000001", "reply_count", float64(2)),
+		"root without a thread_ts": raw("1.000001", "root"),
+	} {
+		rec := &recorder{serve: func(string, map[string]any) (map[string]any, error) {
+			return map[string]any{"messages": anys(
+				root,
+				raw("2.000002", "first reply", "thread_ts", "1.000001"),
+				raw("3.000003", "second reply", "thread_ts", "1.000001"),
+			)}, nil
+		}}
+		msgs, err := FetchThread(context.Background(), rec.client(), "C12345678", "1.000001", false)
+		if err != nil || len(msgs) != 3 {
+			t.Fatalf("%s: messages = %+v, err = %v", name, msgs, err)
+		}
+		for _, m := range msgs {
+			c := ToCompact(m, CompactOptions{})
+			if c.ChannelID != "C12345678" || c.ThreadTS != "1.000001" || c.TS != m.TS {
+				t.Errorf("%s: message %s is printed as channel_id %q, thread_ts %q; want C12345678 and 1.000001", name, m.TS, c.ChannelID, c.ThreadTS)
+			}
+		}
+	}
+
+	// A message that has no thread is not given one.
+	rec := &recorder{serve: func(string, map[string]any) (map[string]any, error) {
+		return map[string]any{"messages": anys(raw("1.000001", "alone"))}, nil
+	}}
+	msgs, err := FetchThread(context.Background(), rec.client(), "C12345678", "1.000001", false)
+	if err != nil || len(msgs) != 1 {
+		t.Fatalf("messages = %+v, err = %v", msgs, err)
+	}
+	if c := ToCompact(msgs[0], CompactOptions{}); c.ChannelID != "C12345678" || c.ThreadTS != "" {
+		t.Errorf("lone message = %+v, want its channel and no thread_ts", c)
 	}
 }
 
@@ -671,6 +712,10 @@ func TestParseFile(t *testing.T) {
 			t.Errorf("ParseFile(%v) ok", v)
 		}
 	}
+	// A size no int64 holds saturates on every architecture.
+	if got, _ := ParseFile(map[string]any{"id": "F1", "size": 1e300}); got.Size != math.MaxInt64 {
+		t.Errorf("size 1e300 = %d, want %d", got.Size, int64(math.MaxInt64))
+	}
 }
 
 func TestFetchEnrichesFiles(t *testing.T) {
@@ -807,5 +852,27 @@ func TestFetchKeepsMessagesWhenFileLookupIsRateLimited(t *testing.T) {
 	}
 	if _, err := FetchThread(context.Background(), rec.client(), "C12345678", tsOf(5), false); err != nil {
 		t.Errorf("FetchThread: %v", err)
+	}
+}
+
+// FindTS is shared with the "later" listing: Slack answers a history or
+// replies call with the nearest messages, so only an exact ts counts.
+func TestFindTS(t *testing.T) {
+	resp := map[string]any{"messages": []any{
+		map[string]any{"ts": "1770165109.000001", "text": "root"},
+		"garbage",
+		map[string]any{"ts": "1770165109.000002", "text": "reply"},
+	}}
+	if got := FindTS(resp, "1770165109.000002"); got == nil || got["text"] != "reply" {
+		t.Errorf("FindTS = %v, want the reply", got)
+	}
+	for name, resp := range map[string]map[string]any{
+		"another ts":  resp,
+		"no messages": {"ok": true},
+		"nil":         nil,
+	} {
+		if got := FindTS(resp, "1770165109.000003"); got != nil {
+			t.Errorf("%s: FindTS = %v, want nil", name, got)
+		}
 	}
 }

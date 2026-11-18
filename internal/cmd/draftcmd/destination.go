@@ -62,17 +62,17 @@ func checkBroadcast(dest destination, how string) error {
 }
 
 // resolveDestination turns a target into a channel and thread. A message
-// URL drafts a reply in that message's thread, like `message send`; a user
-// ID drafts a DM. threadTS (--thread-ts) wins over the URL's thread.
+// URL drafts a reply in that message's thread, like "message send"; a user
+// ID drafts a DM. threadTS (--thread-ts) is the thread for the other
+// targets; with a message URL it may repeat the URL's thread but not
+// contradict it (cmdutil.Target.ThreadTS).
 func resolveDestination(ctx context.Context, client *slackapi.Client, target cmdutil.Target, threadTS string) (destination, error) {
 	channelID, err := target.ConversationID(ctx, client)
 	if err != nil {
 		return destination{}, err
 	}
-	if threadTS == "" {
-		if threadTS, err = target.ReplyThreadTS(ctx, client); err != nil {
-			return destination{}, err
-		}
+	if threadTS, err = target.ThreadTS(ctx, client, threadTS); err != nil {
+		return destination{}, err
 	}
 	return destination{channelID: channelID, threadTS: threadTS}, nil
 }

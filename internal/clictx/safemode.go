@@ -15,7 +15,7 @@ const SafeModeReviewed = "message send"
 // safeModeBlocked is everything safe mode refuses outright, because there
 // is no way for a human to review it first: the command, and what an
 // agent could otherwise do with it. Together with safeModeNotCovered it is
-// the single source of the help texts (SafeModeSummary), of the refusals
+// the single source of the help texts (SafeModeHelp), of the refusals
 // (CheckSafeMode) and of what the docs must list (see the tests).
 var safeModeBlocked = []struct{ command, action string }{
 	{"message edit", "edit messages"},
@@ -48,21 +48,43 @@ func SafeModeBlocked() []string {
 // unreviewed; "*" stands for every subcommand.
 func SafeModeNotCovered() []string { return append([]string(nil), safeModeNotCovered...) }
 
-// SafeModeSummary says, for help texts, what safe mode does and what it
-// does not cover.
-func SafeModeSummary() string {
-	return fmt.Sprintf(`"%s" opens the compose editor, where a human reviews and sends the message, instead of posting; %s are refused; %s are NOT covered by safe mode`,
-		SafeModeReviewed, quotedList(SafeModeBlocked()), quotedList(safeModeNotCovered))
+// SafeModeHelp says, for help texts, what safe mode does and what it does
+// not cover, in lines of at most 78 columns.
+func SafeModeHelp() string {
+	const indent = "               "
+	return fmt.Sprintf(`Safe mode (--safe-mode or %s=1) keeps a human in the loop:
+  reviewed     %s: opens the compose editor, where a human reviews
+               and sends the message, instead of posting
+  refused      %s
+  not covered  %s
+               ("*" stands for every subcommand)`,
+		appinfo.EnvName("SAFE_MODE"), SafeModeReviewed, wrapItems(SafeModeBlocked(), indent), wrapItems(safeModeNotCovered, indent))
 }
 
-// quotedList renders items as `"a", "b" and "c"`.
-func quotedList(items []string) string {
-	quoted := make([]string, len(items))
+// wrapItems renders items as a comma-separated list that continues on
+// lines starting with indent, none longer than 78 columns. The first line
+// is taken to start after a label as wide as indent.
+func wrapItems(items []string, indent string) string {
+	const width = 78
+	var b strings.Builder
+	column := len(indent)
 	for i, item := range items {
-		quoted[i] = `"` + item + `"`
+		if i < len(items)-1 {
+			item += ","
+		}
+		switch {
+		case i == 0:
+		case column+1+len(item) > width:
+			b.WriteString("\n" + indent)
+			column = len(indent)
+		default:
+			b.WriteString(" ")
+			column++
+		}
+		b.WriteString(item)
+		column += len(item)
 	}
-	last := len(quoted) - 1
-	return strings.Join(quoted[:last], ", ") + " and " + quoted[last]
+	return b.String()
 }
 
 // CheckSafeMode refuses command (e.g. "canvas edit") when safe mode is on;
@@ -78,8 +100,25 @@ func (c *Context) CheckSafeMode(command string) error {
 			action = b.action
 		}
 	}
-	return fmt.Errorf(`safe mode is active (%s or --safe-mode): %q is blocked so that an agent cannot %s without human review. Ask the user to do it, or to disable safe mode`,
-		appinfo.EnvName("SAFE_MODE"), command, action)
+	return fmt.Errorf(`safe mode is active (turned on by %s): %q is blocked so that an agent cannot %s without human review. Ask the user to do it, or to disable safe mode`,
+		c.SafeModeSource(), command, action)
+}
+
+// ChangesSlack reports whether command (its path below the root, e.g.
+// "message send" or "later remind") posts, edits or deletes something in
+// Slack: the commands safe mode reviews, refuses or deliberately lets
+// through, and the compose editor. After such a command was cut short,
+// nobody knows whether Slack got the change.
+func ChangesSlack(command string) bool {
+	writers := append([]string{SafeModeReviewed, "message compose"}, SafeModeBlocked()...)
+	for _, w := range append(writers, safeModeNotCovered...) {
+		// "later *" and "message react" stand for their subcommands too.
+		w = strings.TrimSuffix(w, " *")
+		if command == w || strings.HasPrefix(command, w+" ") {
+			return true
+		}
+	}
+	return false
 }
 
 // IsCI reports whether the CI environment variable says this is an

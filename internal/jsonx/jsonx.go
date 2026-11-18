@@ -37,12 +37,6 @@ func Str(v any) string {
 	return s
 }
 
-// StrOK returns v if it is a string.
-func StrOK(v any) (string, bool) {
-	s, ok := v.(string)
-	return s, ok
-}
-
 // Bool returns v if it is a bool, else false.
 func Bool(v any) bool {
 	b, _ := v.(bool)
@@ -69,13 +63,53 @@ func Num(v any) (float64, bool) {
 	return 0, false
 }
 
-// Int returns v as an int if it is a finite JSON number, truncating.
-func Int(v any) (int, bool) {
+// Int64 returns v as an int64 if it is a finite JSON number, truncating
+// towards zero. A number beyond the int64 range saturates to
+// math.MaxInt64 or math.MinInt64; NaN and the infinities, which JSON
+// cannot express, are not numbers (0, false).
+//
+// Use it rather than converting the result of Num: Go leaves the
+// conversion of an out-of-range float to an integer up to the
+// architecture (arm64 saturates, amd64 yields math.MinInt64).
+func Int64(v any) (int64, bool) {
+	// Integers are returned as they are: a float64 only holds them
+	// exactly up to 2^53.
+	switch n := v.(type) {
+	case int:
+		return int64(n), true
+	case int64:
+		return n, true
+	case int32:
+		return int64(n), true
+	case json.Number:
+		if i, err := n.Int64(); err == nil {
+			return i, true
+		}
+	}
 	f, ok := Num(v)
 	if !ok || math.IsNaN(f) || math.IsInf(f, 0) {
 		return 0, false
 	}
-	return int(f), true
+	// 2^63 is the smallest float64 above math.MaxInt64 (which a float64
+	// cannot hold), and -2^63 is math.MinInt64 exactly.
+	const limit = 1 << 63
+	switch {
+	case f >= limit:
+		return math.MaxInt64, true
+	case f <= -limit:
+		return math.MinInt64, true
+	}
+	return int64(f), true
+}
+
+// Int is Int64 for an int: a number beyond the range of int (which is 32
+// bits wide on some platforms) saturates to math.MaxInt or math.MinInt.
+func Int(v any) (int, bool) {
+	n, ok := Int64(v)
+	if !ok {
+		return 0, false
+	}
+	return int(min(max(n, math.MinInt), math.MaxInt)), true
 }
 
 // Get walks nested objects: Get(resp, "channel", "id").

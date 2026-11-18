@@ -18,6 +18,7 @@ import (
 	"github.com/maelvls/slackcli/internal/authextract"
 	"github.com/maelvls/slackcli/internal/clictx"
 	"github.com/maelvls/slackcli/internal/slackapi"
+	"github.com/maelvls/slackcli/internal/testenv"
 )
 
 const workspaceURL = "https://workspace.slack.com"
@@ -46,9 +47,7 @@ func newHarness(t *testing.T) *harness {
 		t.Setenv(env, "")
 	}
 	// The user cache and the downloads live under the user cache directory.
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("XDG_CACHE_HOME", filepath.Join(home, "cache"))
+	testenv.Isolate(t)
 
 	h := &harness{t: t, handlers: map[string]func(map[string]any) (map[string]any, error){}, files: map[string]string{}}
 	h.rt = &clictx.Context{

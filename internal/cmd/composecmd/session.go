@@ -38,9 +38,19 @@ import (
 //     granted.
 //
 // Lifecycle: the session ends when the page sends or cancels, when the
-// context is cancelled (Ctrl-C), when the page is closed (it says goodbye,
-// and otherwise stops pinging), or when nobody opens it. A send in flight
-// always runs to completion first, and a message is sent at most once.
+// context is cancelled (Ctrl-C), when the page is closed, or when nobody
+// opens it. A send in flight always runs to completion first, and a
+// message is sent at most once.
+//
+// Whether the page is still open is told by a connection, not by a
+// heartbeat: the page holds one request open (/live) for as long as it
+// lives, and the browser drops it when the tab goes away, however that
+// happens. Timers in the page would not do: browsers throttle them in
+// background tabs and stop them in frozen ones, and a human may well leave
+// the tab in the background for a long time while writing. The session
+// never ends for want of a sign of life while such a connection is open;
+// without one it ends after a grace period, short when the page said it
+// was going away (/bye) and long otherwise.
 type session struct {
 	page     pageConfig
 	send     sendFunc
@@ -62,15 +72,23 @@ type session struct {
 	served   chan struct{} // closed when the server goroutine returns
 	serveErr error
 
-	mu       sync.Mutex
-	state    sessionState
-	keyUsed  bool
+	mu      sync.Mutex
+	state   sessionState
+	keyUsed bool
+	// live counts the connections that pages hold open (see handleLive).
+	live     int
 	timer    *time.Timer
 	onExpiry endReason     // why the session ends if timer fires
-	deadline time.Time     // when timer is due
+	deadline time.Time     // when timer is due; zero when it is not armed
 	inFlight chan struct{} // closed when the send in progress returns
 	result   outcome
 	done     chan struct{} // closed when state becomes stateDone
+
+	// unused holds the connections on which no request has arrived yet;
+	// stopping says that they are to be closed on arrival (see stop).
+	connMu   sync.Mutex
+	unused   map[net.Conn]struct{}
+	stopping bool
 }
 
 // sendFunc posts the reviewed text.
@@ -116,25 +134,24 @@ type outcome struct {
 type timeouts struct {
 	// Unopened is how long the page may remain unopened.
 	Unopened time.Duration
-	// Silent is how long an opened page may go without pinging. Browsers
-	// throttle timers of background tabs to as little as once a minute,
-	// so this is well above Ping.
-	Silent time.Duration
+	// Disconnected is how long an opened page may hold no connection
+	// without having said that it is going away: its browser crashed or
+	// was killed, or dropped the connection of a tab that it suspended.
+	// It is long because the latter tab may come back, with the human's
+	// draft in it; it bounds how long the command outlives a dead browser.
+	Disconnected time.Duration
 	// Closing is the grace period after the page said it is going away,
 	// in which a reload can still bring it back.
 	Closing time.Duration
-	// Ping is how often the page is asked to ping.
-	Ping time.Duration
-	// Shutdown bounds the wait for open connections when stopping.
+	// Shutdown bounds the wait for responses in flight when stopping.
 	Shutdown time.Duration
 }
 
 var defaultTimeouts = timeouts{
-	Unopened: 30 * time.Minute,
-	Silent:   150 * time.Second,
-	Closing:  5 * time.Second,
-	Ping:     10 * time.Second,
-	Shutdown: 5 * time.Second,
+	Unopened:     30 * time.Minute,
+	Disconnected: 10 * time.Minute,
+	Closing:      5 * time.Second,
+	Shutdown:     2 * time.Second,
 }
 
 // maxBodyBytes caps a request body: Slack messages are at most 40 000
@@ -166,15 +183,16 @@ func startSession(ctx context.Context, page pageConfig, send sendFunc, t timeout
 		onExpiry:     endNeverOpened,
 		deadline:     time.Now().Add(t.Unopened),
 		done:         make(chan struct{}),
+		unused:       make(map[net.Conn]struct{}),
 	}
 	s.page.Token = s.token
-	s.page.PingMillis = t.Ping.Milliseconds()
 	s.server = &http.Server{
 		Handler:           http.HandlerFunc(s.serveHTTP),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       15 * time.Second,
 		IdleTimeout:       time.Minute,
 		MaxHeaderBytes:    64 << 10,
+		ConnState:         s.trackConn,
 	}
 	go func() {
 		defer close(s.served)
@@ -217,9 +235,38 @@ func (s *session) wait(ctx context.Context) (outcome, error) {
 	}
 }
 
-// stop shuts the server down, letting responses in flight complete, and
-// waits for its goroutine.
+// trackConn keeps track of the connections on which no request has arrived
+// yet, for stop.
+func (s *session) trackConn(conn net.Conn, state http.ConnState) {
+	s.connMu.Lock()
+	defer s.connMu.Unlock()
+	switch {
+	case state != http.StateNew:
+		delete(s.unused, conn)
+	case s.stopping:
+		_ = conn.Close()
+	default:
+		s.unused[conn] = struct{}{}
+	}
+}
+
+// stop shuts the server down and waits for its goroutine. Responses in
+// flight are written out first (for at most timeouts.Shutdown): the page
+// that sent the message must be told so.
+//
+// Browsers open connections ahead of need, and http.Server.Shutdown waits
+// five seconds for a connection that never carried a request before it
+// takes it for idle. Nothing is owed to those: they are closed first, so
+// that the command returns as soon as the message is sent.
 func (s *session) stop() {
+	s.connMu.Lock()
+	s.stopping = true
+	for conn := range s.unused {
+		_ = conn.Close()
+	}
+	clear(s.unused)
+	s.connMu.Unlock()
+
 	ctx, cancel := context.WithTimeout(context.Background(), s.timeouts.Shutdown)
 	defer cancel()
 	if err := s.server.Shutdown(ctx); err != nil {
@@ -241,8 +288,14 @@ func (s *session) outcome() outcome {
 func (s *session) finishLocked(result outcome) {
 	s.state = stateDone
 	s.result = result
-	s.timer.Stop()
+	s.disarmLocked()
 	close(s.done)
+}
+
+// disarmLocked stops the liveness timer; s.mu must be held.
+func (s *session) disarmLocked() {
+	s.timer.Stop()
+	s.deadline = time.Time{}
 }
 
 // armLocked (re)starts the liveness timer; s.mu must be held. It does
@@ -257,13 +310,20 @@ func (s *session) armLocked(d time.Duration, reason endReason) {
 }
 
 // expire ends an open session whose liveness timer fired. A firing that
-// crossed a sign of life (which re-armed the timer) is ignored.
+// crossed a sign of life (which stopped or re-armed the timer) is ignored,
+// and so is one that finds a page connected: of two tabs showing the
+// editor, one said goodbye.
 func (s *session) expire() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.state == stateOpen && !time.Now().Before(s.deadline) {
-		s.finishLocked(outcome{Reason: s.onExpiry})
+	if s.state != stateOpen || s.deadline.IsZero() || time.Now().Before(s.deadline) {
+		return
 	}
+	if s.live > 0 {
+		s.disarmLocked()
+		return
+	}
+	s.finishLocked(outcome{Reason: s.onExpiry})
 }
 
 // interrupt ends an open session. While a send is in flight it returns a
@@ -301,7 +361,7 @@ func (s *session) serveHTTP(w http.ResponseWriter, r *http.Request) {
 	switch r.URL.Path {
 	case "/":
 		s.servePage(w, r)
-	case "/send", "/cancel", "/ping", "/bye":
+	case "/send", "/cancel", "/live", "/bye":
 		s.serveAction(w, r)
 	default:
 		http.NotFound(w, r)
@@ -352,7 +412,8 @@ func (s *session) servePage(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, linkSpentMessage, http.StatusForbidden)
 		return
 	}
-	s.armLocked(s.timeouts.Silent, endTabClosed)
+	// The page connects as soon as it runs (see handleLive).
+	s.armLocked(s.timeouts.Disconnected, endTabClosed)
 	s.mu.Unlock()
 
 	nonce := rand.Text()
@@ -451,19 +512,55 @@ func (s *session) serveAction(w http.ResponseWriter, r *http.Request) {
 		s.handleSend(w, req.Text)
 	case "/cancel":
 		s.handleCancel(w)
-	case "/ping":
-		s.handleLiveness(w, s.timeouts.Silent)
+	case "/live":
+		s.handleLive(w, r)
 	case "/bye":
-		// The tab is closing or reloading: a reload fetches the page
-		// again within the grace period.
-		s.handleLiveness(w, s.timeouts.Closing)
+		s.handleBye(w)
 	}
 }
 
-func (s *session) handleLiveness(w http.ResponseWriter, d time.Duration) {
+// handleLive answers at once, then holds the response open until the
+// session is over or the page goes away: an open connection is the sign
+// that the page is still there.
+func (s *session) handleLive(w http.ResponseWriter, r *http.Request) {
+	s.mu.Lock()
+	if s.state == stateDone {
+		s.mu.Unlock()
+		refuse(w, http.StatusGone, "this compose session is over")
+		return
+	}
+	s.live++
+	s.disarmLocked()
+	s.mu.Unlock()
+	defer func() {
+		s.mu.Lock()
+		s.live--
+		// A timer already running is the shorter one of a page that said
+		// goodbye: leave it.
+		if s.live == 0 && s.deadline.IsZero() {
+			s.armLocked(s.timeouts.Disconnected, endTabClosed)
+		}
+		s.mu.Unlock()
+	}()
+
+	// The server's ReadTimeout does not cut this short: net/http lifts the
+	// read deadline once a request has been read.
+	reply(w, http.StatusOK, actionResponse{OK: true})
+	if err := http.NewResponseController(w).Flush(); err != nil {
+		return
+	}
+	select {
+	case <-r.Context().Done():
+	case <-s.done:
+	}
+}
+
+// handleBye notes that the tab is closing or reloading: a reload fetches
+// the page again within the grace period.
+func (s *session) handleBye(w http.ResponseWriter) {
 	s.mu.Lock()
 	over := s.state == stateDone
-	s.armLocked(d, endTabClosed)
+	s.armLocked(s.timeouts.Closing, endTabClosed)
 	s.mu.Unlock()
 	if over {
 		refuse(w, http.StatusGone, "this compose session is over")
@@ -512,7 +609,7 @@ func (s *session) handleSend(w http.ResponseWriter, text string) {
 		return
 	}
 	s.state = stateSending
-	s.timer.Stop()
+	s.disarmLocked()
 	inFlight := make(chan struct{})
 	s.inFlight = inFlight
 	s.mu.Unlock()
@@ -524,7 +621,9 @@ func (s *session) handleSend(w http.ResponseWriter, text string) {
 	if err != nil {
 		// The human can fix the message, or simply try again.
 		s.state = stateOpen
-		s.armLocked(s.timeouts.Silent, endTabClosed)
+		if s.live == 0 {
+			s.armLocked(s.timeouts.Disconnected, endTabClosed)
+		}
 	} else {
 		s.finishLocked(outcome{Sent: &sent, Text: text})
 	}

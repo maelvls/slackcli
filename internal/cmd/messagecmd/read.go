@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -47,8 +48,10 @@ type getResult struct {
 	ReferencedUsers map[string]users.CompactUser `json:"referenced_users"`
 }
 
-// listResult is the output of "list". ChannelID is only set in channel
-// history mode.
+// listResult is the output of "list", the same for a channel's history and
+// for a thread: every message carries its own channel_id (and thread_ts
+// when it belongs to a thread), so that a message taken out of the list
+// still has the documented message shape.
 type listResult struct {
 	ChannelID       string                       `json:"channel_id"`
 	Messages        []messages.CompactMessage    `json:"messages"`
@@ -182,7 +185,17 @@ func (c *command) newList() *cobra.Command {
 <channel> is #name, name, a channel ID or a channel URL. Channel history does
 not include thread replies: a message with "thread_ts" has a thread, list it
 to read the replies. At most %d messages are returned per call; to page back,
-pass the ts of the oldest message received as --latest.`, messages.MaxHistoryLimit),
+pass the ts of the oldest message received as --latest.
+
+Prints {channel_id, messages: [{channel_id, ts, thread_ts, author: {user_id,
+bot_id}, content, files, reactions, forwarded_threads}], referenced_users},
+oldest message first, in the same shape for a channel and for a thread.
+"messages" is [] when there are none, with a hint on stderr. "content" is
+Markdown. "thread_ts" is the root of the thread a message belongs to: every
+message of a listed thread has it, and in channel history only the messages
+that started a thread. "reactions" needs --include-reactions and
+"referenced_users" --resolve-users. Attached files are downloaded and listed
+with their local path, as by "get".`, messages.MaxHistoryLimit),
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return c.runList(cmd, args[0], opts)
@@ -190,8 +203,8 @@ pass the ts of the oldest message received as --latest.`, messages.MaxHistoryLim
 	}
 	addReadFlags(cmd, &opts.readOptions)
 	f := cmd.Flags()
-	f.StringVar(&opts.threadTS, "thread-ts", "", "Thread root ts: list that thread (root and replies) instead of the channel history")
-	f.StringVar(&opts.ts, "ts", "", "Message ts: list the thread that message belongs to")
+	f.StringVar(&opts.threadTS, "thread-ts", "", "Thread root ts: list that thread (root and replies) instead of the channel history. Cannot be combined with a different --ts")
+	f.StringVar(&opts.ts, "ts", "", "Message ts: list the thread that message belongs to. Cannot be combined with a different --thread-ts")
 	f.IntVar(&opts.limit, "limit", messages.DefaultHistoryLimit, fmt.Sprintf("Max messages to return (channel history mode; 1 to %d)", messages.MaxHistoryLimit))
 	f.StringVar(&opts.oldest, "oldest", "", "Only messages after this ts or Unix time, exclusive (channel history mode)")
 	f.StringVar(&opts.latest, "latest", "", "Only messages before this ts or Unix time, exclusive (channel history mode)")
@@ -253,13 +266,25 @@ func (c *command) runList(cmd *cobra.Command, targetInput string, opts listOptio
 		if _, err := target.MessageTS(opts.ts); err != nil {
 			return err
 		}
+		// As elsewhere, a flag may repeat what the URL says but not
+		// contradict it.
+		if hint := target.Ref.ThreadTSHint; threadTS != "" && hint != "" && threadTS != hint {
+			return fmt.Errorf("--thread-ts %s contradicts the message URL, whose thread is %s: drop --thread-ts, or pass the channel instead of the URL", threadTS, hint)
+		}
 		if rootTS == "" {
 			rootTS = cmp.Or(target.Ref.ThreadTSHint, target.Ref.MessageTS)
 		}
-	} else if rootTS == "" {
-		if rootTS, err = cmdutil.ParseTS("--ts", opts.ts); err != nil {
+	} else {
+		ts, err := cmdutil.ParseTS("--ts", opts.ts)
+		if err != nil {
 			return err
 		}
+		// Both name the thread to list; one of two different values would
+		// have to be ignored.
+		if ts != "" && threadTS != "" && ts != threadTS {
+			return fmt.Errorf("--ts %s and --thread-ts %s both say which thread to list: pass only one of them (--thread-ts with the ts of the thread's first message, or --ts with the ts of any of its messages)", ts, threadTS)
+		}
+		rootTS = cmp.Or(rootTS, ts)
 	}
 
 	if rootTS != "" {
@@ -286,11 +311,7 @@ func (c *command) listThread(ctx context.Context, target cmdutil.Target, rootTS 
 		if err != nil {
 			return listResult{}, err
 		}
-		// Every message of a thread shares channel and root: not repeated.
-		for i := range compact {
-			compact[i].ChannelID, compact[i].ThreadTS = "", ""
-		}
-		return listResult{Messages: compact, ReferencedUsers: referenced}, nil
+		return listResult{ChannelID: loc.ChannelID, Messages: compact, ReferencedUsers: referenced}, nil
 	})
 	if err != nil {
 		return err
@@ -309,6 +330,9 @@ func (c *command) listHistory(ctx context.Context, target cmdutil.Target, opts l
 	latest, err := parseHistoryBound("--latest", opts.latest)
 	if err != nil {
 		return err
+	}
+	if oldest != "" && latest != "" && !boundBefore(oldest, latest) {
+		return fmt.Errorf("--oldest %s is not before --latest %s: no message can be in between; swap them", oldest, latest)
 	}
 	with, err := parseReactionFilters("--with-reaction", opts.withReaction)
 	if err != nil {
@@ -364,6 +388,15 @@ func parseHistoryBound(flag, raw string) (string, error) {
 		return "", fmt.Errorf("invalid %s value %q: expected a Slack ts (1770165109.628379) or a Unix time in seconds", flag, raw)
 	}
 	return v, nil
+}
+
+// boundBefore reports whether the history bound a (validated by
+// parseHistoryBound) is strictly before b. Bounds have at most 6 decimals,
+// which a float64 holds exactly enough at this magnitude.
+func boundBefore(a, b string) bool {
+	x, errA := strconv.ParseFloat(a, 64)
+	y, errB := strconv.ParseFloat(b, 64)
+	return errA == nil && errB == nil && x < y
 }
 
 // describeRange words the --oldest/--latest window for the "no messages"

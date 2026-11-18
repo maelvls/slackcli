@@ -8,12 +8,10 @@ import (
 )
 
 // The commands an agent could misuse to reach other people are refused,
-// and the summary shown in the --safe-mode help names both what is
-// covered and what is not.
+// and the help of safe mode names both what is covered and what is not.
 func TestSafeModeBlocksOutreachAndCancellation(t *testing.T) {
 	c := newContext(t)
 	c.SafeModeFlag = true
-	summary := SafeModeSummary()
 	for command, action := range map[string]string{
 		"channel invite":           "Slack Connect invitations",
 		"channel new":              "create channels",
@@ -25,23 +23,38 @@ func TestSafeModeBlocksOutreachAndCancellation(t *testing.T) {
 		}
 	}
 
-	refused, notCovered, found := strings.Cut(summary, " are refused; ")
-	if !found || !strings.HasSuffix(notCovered, " are NOT covered by safe mode") {
-		t.Fatalf("summary = %q", summary)
-	}
-	for _, command := range SafeModeBlocked() {
-		if !strings.Contains(refused, `"`+command+`"`) {
-			t.Errorf("%q is not in the refused part of the summary: %s", command, summary)
-		}
-	}
+	help := SafeModeHelp()
+	// The lists are wrapped: compare them with the line breaks undone.
+	flat := strings.Join(strings.Fields(help), " ")
 	wantNotCovered := []string{"message react", "message draft *", "channel mark", "later *", "user dm-open"}
 	if got := SafeModeNotCovered(); strings.Join(got, "|") != strings.Join(wantNotCovered, "|") {
 		t.Errorf("SafeModeNotCovered() = %q, want %q", got, wantNotCovered)
 	}
-	for _, command := range wantNotCovered {
-		if !strings.Contains(notCovered, `"`+command+`"`) {
-			t.Errorf("%q is not in the not-covered part of the summary: %s", command, summary)
+	for _, want := range []string{
+		"(--safe-mode or SLACKCLI_SAFE_MODE=1)",
+		"reviewed message send: opens the compose editor",
+		"refused " + strings.Join(SafeModeBlocked(), ", ") + " not covered",
+		"not covered " + strings.Join(wantNotCovered, ", ") + ` ("*" stands for every subcommand)`,
+	} {
+		if !strings.Contains(flat, want) {
+			t.Errorf("the help does not contain %q:\n%s", want, help)
 		}
+	}
+	for _, line := range strings.Split(help, "\n") {
+		if len(line) > 78 {
+			t.Errorf("line longer than 78 columns: %q", line)
+		}
+	}
+}
+
+func TestWrapItems(t *testing.T) {
+	items := []string{strings.Repeat("a", 30), strings.Repeat("b", 30), strings.Repeat("c", 30)}
+	want := strings.Repeat("a", 30) + ", " + strings.Repeat("b", 30) + ",\n    " + strings.Repeat("c", 30)
+	if got := wrapItems(items, "    "); got != want {
+		t.Errorf("wrapItems = %q, want %q", got, want)
+	}
+	if got := wrapItems(nil, "    "); got != "" {
+		t.Errorf("wrapItems(nil) = %q", got)
 	}
 }
 

@@ -7,12 +7,19 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
 	"github.com/maelvls/slackcli/internal/appinfo"
 	"github.com/maelvls/slackcli/internal/slackapi"
+	"github.com/maelvls/slackcli/internal/testenv"
 )
+
+// hasUnixPermissions is false on Windows, where a file reports 0666 and a
+// directory 0777 whatever mode it was created with: the assertions on
+// permission bits are skipped there.
+const hasUnixPermissions = runtime.GOOS != "windows"
 
 // transport is a fake HTTP transport recording the requests it serves.
 type transport struct {
@@ -98,7 +105,7 @@ func TestDownloadWritesFile(t *testing.T) {
 	if data, _ := os.ReadFile(got); string(data) != "hello world" {
 		t.Errorf("content = %q", data)
 	}
-	if info, _ := os.Stat(got); info.Mode().Perm() != 0o600 {
+	if info, _ := os.Stat(got); hasUnixPermissions && info.Mode().Perm() != 0o600 {
 		t.Errorf("mode = %v, want 0600", info.Mode().Perm())
 	}
 	if names := dirEntries(t, dir); len(names) != 1 {
@@ -132,14 +139,12 @@ func TestDownloadNamesFileAfterURL(t *testing.T) {
 }
 
 func TestDownloadUsesDefaultDownloadsDir(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("XDG_CACHE_HOME", filepath.Join(home, "cache"))
+	home := testenv.Isolate(t)
 	got, err := Download(context.Background(), standardClient(serving(200, "", "x")), "https://files.slack.com/files/a.txt", DownloadOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got != filepath.Join(appinfo.DownloadsDir(), "a.txt") || !strings.HasPrefix(got, home) {
+	if got != filepath.Join(appinfo.DownloadsDir(), "a.txt") || !strings.HasPrefix(got, home+string(filepath.Separator)) {
 		t.Errorf("path = %s", got)
 	}
 }
@@ -275,6 +280,7 @@ func TestDownloadRefusesNonSlackHosts(t *testing.T) {
 	for _, u := range []string{
 		"https://docs.google.com/document/d/abc",       // external file
 		"https://files.slack.com.evil.example/x",       // look-alike
+		"https://files.slack.com.evil.example./x",      // look-alike, fully qualified
 		"https://evilslack.com/x",                      // look-alike
 		"http://files.slack.com/files/a.txt",           // not https
 		"https://files.slack.com@evil.example/a.txt",   // host in userinfo
@@ -296,14 +302,21 @@ func TestDownloadRefusesNonSlackHosts(t *testing.T) {
 	}
 }
 
-func TestIsSlackHost(t *testing.T) {
-	for host, want := range map[string]bool{
-		"files.slack.com": true, "slack.com": true, "acme.enterprise.slack.com": true, "FILES.SLACK.COM": true,
-		"a.slack-edge.com": true, "slack-files.com": true, "files.slack-gov.com": true,
-		"evilslack.com": false, "slack.com.evil.example": false, "example.com": false, "": false,
+// Which hosts get credentials is decided by slackapi.IsSlackHost alone:
+// workspace hosts and Slack's file hosts, in any case and with or without
+// the trailing dot of a fully-qualified name.
+func TestDownloadSendsCredentialsToSlackOwnedHosts(t *testing.T) {
+	for _, host := range []string{
+		"files.slack.com", "slack.com", "acme.enterprise.slack.com", "FILES.SLACK.COM", "files.slack.com.",
+		"a.slack-edge.com", "slack-files.com", "files.slack-gov.com",
 	} {
-		if IsSlackHost(host) != want {
-			t.Errorf("IsSlackHost(%q) = %v", host, !want)
+		tr := serving(200, "", "x")
+		if _, err := Download(context.Background(), standardClient(tr), "https://"+host+"/files/a.txt", DownloadOptions{DestDir: t.TempDir()}); err != nil {
+			t.Errorf("%s: %v", host, err)
+			continue
+		}
+		if len(tr.requests) != 1 || tr.requests[0].Header.Get("Authorization") != "Bearer xoxb-test" {
+			t.Errorf("%s: requests = %d, want one carrying the token", host, len(tr.requests))
 		}
 	}
 }
@@ -350,6 +363,84 @@ func TestDownloadRedirects(t *testing.T) {
 		}
 		if got := tr.requests[1].Header.Get("Authorization"); got != "" {
 			t.Errorf("Authorization sent over http: %q", got)
+		}
+	})
+
+	// A 307 or 308 replays the request as it was: the headers must still
+	// be dropped, exactly as for the other statuses.
+	for _, status := range []int{301, 302, 303, 307, 308} {
+		for _, location := range []string{
+			"https://cdn.example.net/a.txt",
+			"https://files.slack.com.evil.example/a.txt",
+			"http://files.slack.com/files/a.txt",
+			"https://user:pw@files.slack.com/files/a.txt",
+		} {
+			for name, client := range map[string]func(*transport) *slackapi.Client{"browser": browserClient, "standard": standardClient} {
+				tr := &transport{}
+				tr.serve = func(req *http.Request) (*http.Response, error) {
+					if len(tr.requests) == 1 {
+						resp := response(status, "", "")
+						resp.Header.Set("Location", location)
+						return resp, nil
+					}
+					return response(200, "application/octet-stream", "payload"), nil
+				}
+				if _, err := Download(context.Background(), client(tr), "https://files.slack.com/files/a.txt", DownloadOptions{DestDir: t.TempDir()}); err != nil {
+					t.Errorf("%d to %s (%s): %v", status, location, name, err)
+					continue
+				}
+				if len(tr.requests) != 2 {
+					t.Errorf("%d to %s (%s): %d requests, want 2", status, location, name, len(tr.requests))
+					continue
+				}
+				next := tr.requests[1]
+				// net/http turns the user info of a URL into its own
+				// Basic Authorization header: what must not be there is
+				// a Slack secret.
+				for _, h := range []string{"Authorization", "Cookie"} {
+					if strings.Contains(next.Header.Get(h), "xox") {
+						t.Errorf("%d to %s (%s): %s was sent: %q", status, location, name, h, next.Header.Get(h))
+					}
+				}
+				if next.Header.Get("Referer") != "" {
+					t.Errorf("%d to %s (%s): Referer was sent: %q", status, location, name, next.Header.Get("Referer"))
+				}
+				if next.Method != http.MethodGet || next.Body != nil {
+					t.Errorf("%d to %s (%s): replayed as %s with a body", status, location, name, next.Method)
+				}
+			}
+		}
+	}
+
+	t.Run("credentials do not come back after leaving Slack", func(t *testing.T) {
+		tr := &transport{}
+		tr.serve = func(req *http.Request) (*http.Response, error) {
+			var location string
+			switch len(tr.requests) {
+			case 1:
+				location = "https://cdn.example.net/hop"
+			case 2:
+				// The foreign host picks a Slack URL.
+				location = "https://slack.com/api/users.list"
+			default:
+				return response(200, "application/octet-stream", "payload"), nil
+			}
+			resp := response(307, "", "")
+			resp.Header.Set("Location", location)
+			return resp, nil
+		}
+		if _, err := Download(context.Background(), browserClient(tr), "https://files.slack.com/files/a.txt", DownloadOptions{DestDir: t.TempDir()}); err != nil {
+			t.Fatal(err)
+		}
+		if len(tr.requests) != 3 {
+			t.Fatalf("%d requests, want 3", len(tr.requests))
+		}
+		for i, req := range tr.requests[1:] {
+			for _, h := range []string{"Authorization", "Cookie", "Referer"} {
+				if req.Header.Get(h) != "" {
+					t.Errorf("hop %d (%s): %s was sent: %q", i+1, req.URL.Host, h, req.Header.Get(h))
+				}
+			}
 		}
 	})
 
@@ -495,10 +586,10 @@ func TestWriteDownloadErrorFile(t *testing.T) {
 	if data, _ := os.ReadFile(got); string(data) != "Failed to download file (404)\n" {
 		t.Errorf("content = %q", data)
 	}
-	if info, _ := os.Stat(got); info.Mode().Perm() != 0o600 {
+	if info, _ := os.Stat(got); hasUnixPermissions && info.Mode().Perm() != 0o600 {
 		t.Errorf("mode = %v", info.Mode().Perm())
 	}
-	if info, _ := os.Stat(dir); info.Mode().Perm() != 0o700 {
+	if info, _ := os.Stat(dir); hasUnixPermissions && info.Mode().Perm() != 0o700 {
 		t.Errorf("dir mode = %v", info.Mode().Perm())
 	}
 

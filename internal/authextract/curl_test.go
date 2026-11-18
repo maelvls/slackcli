@@ -49,6 +49,11 @@ func TestParseCurl(t *testing.T) {
 			input:   `curl 'https://acme.slack.com/api/x' -b 'd=xoxd-abc+def/ghi==' --data 'token=xoxc-1-2-3-abcdef'`,
 			wantURL: "https://acme.slack.com",
 		},
+		{
+			name:    "fully-qualified host (trailing dot) is normalised",
+			input:   `curl 'https://acme.slack.com./api/x' -b 'd=xoxd-abc%2Bdef%2Fghi%3D%3D' --data 'token=xoxc-1-2-3-abcdef'`,
+			wantURL: "https://acme.slack.com",
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got, err := ParseCurl(tc.input)
@@ -73,6 +78,7 @@ func TestParseCurlErrors(t *testing.T) {
 		{"plain http", `curl 'http://acme.slack.com/api/x'` + cookie + token, "not an https request to Slack"},
 		{"shared host", `curl 'https://edgeapi.slack.com/cache/T1/users/info'` + cookie + token, "does not identify a workspace"},
 		{"web client host", `curl 'https://app.slack.com/client/T1'` + cookie + token, "does not identify a workspace"},
+		{"web client host with a trailing dot", `curl 'https://app.slack.com./client/T1'` + cookie + token, "does not identify a workspace"},
 		{"no cookie", `curl 'https://acme.slack.com/api/x' -b 'b=1; lc=2'` + token, "xoxd cookie"},
 		{"cookie of another name", `curl 'https://acme.slack.com/api/x' -b 'ssid=xoxd-abc'` + token, "xoxd cookie"},
 		{"no token", `curl 'https://acme.slack.com/api/x'` + cookie, "xoxc token"},

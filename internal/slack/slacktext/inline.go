@@ -28,11 +28,21 @@ func (s inlineStyle) apply(el map[string]any) map[string]any {
 
 // ParseInlineElements parses the inline formatting a user types into Slack
 // rich text inline elements: `*bold*`, `_italic_`, `~strike~`, backtick-quoted code,
-// `:emoji:` (one element for `:wave::skin-tone-3:`), `<url|label>`, `<url>`,
+// `:emoji:` (see below), `<url|label>`, `<url>`,
 // bare http(s) URLs, `<@U123>`, `<#C123>`, `<!subteam^S123>`, `<!here>`,
 // `<!date^...>`, and the bare `@U123ABCDE`, `@here`, `@channel` and
 // `@everyone` (see [bareMentionAt]). Everything else, CommonMark syntax
 // included, is kept as literal text.
+//
+// Every syntactically valid shortcode becomes an emoji element (a single
+// one for `:wave::skin-tone-3:`), whether or not its name is in the emoji
+// table: `:name:` with a name made of letters, digits, `_`, `+` and `-`,
+// that neither follows nor precedes a word character (`12:30:45`) and that
+// follows a colon only when that colon closes another emoji
+// (`:tada::tada:`, not `a::b::c`). The table cannot be what decides: the
+// custom emoji of a workspace (`:partyparrot:`) are never in it, and they
+// are sent as emoji elements by Slack's own clients. The table is for what
+// needs the character itself (reactions given as unicode, rendering).
 //
 // As in Slack, a `*`, `_` or `~` only opens or closes a span at a word
 // boundary, so that `snake_case_name`, `2 * 3 * 4` and URLs stay intact.
@@ -70,7 +80,7 @@ func (p *inlineParser) parse(text string, style inlineStyle) {
 	}
 	i := 0
 	for i < len(text) {
-		end := p.elementAt(text, i, style, flush)
+		end := p.elementAt(text, i, pending, style, flush)
 		if end > i {
 			pending, i = end, end
 			continue
@@ -80,10 +90,11 @@ func (p *inlineParser) parse(text string, style inlineStyle) {
 	flush(len(text))
 }
 
-// elementAt tries to parse an element starting at text[i]. On success it
-// calls flush(i), appends the element and returns the index after it. It
-// returns i when there is none.
-func (p *inlineParser) elementAt(text string, i int, style inlineStyle, flush func(int)) int {
+// elementAt tries to parse an element starting at text[i]; elementEnd is
+// the index after the last element parsed. On success it calls flush(i),
+// appends the element and returns the index after it. It returns i when
+// there is none.
+func (p *inlineParser) elementAt(text string, i, elementEnd int, style inlineStyle, flush func(int)) int {
 	rest := text[i:]
 	afterWord := i > 0 && isWordByte(text[i-1])
 	switch text[i] {
@@ -103,10 +114,19 @@ func (p *inlineParser) elementAt(text string, i int, style inlineStyle, flush fu
 		if !ok || afterWord || end < len(text) && isShortcodeByte(text[end]) {
 			return i
 		}
+		// "a::b::c" and "std::vector::iterator" have no emoji: after a
+		// colon, only the one closing another emoji (":tada::tada:").
+		if i > 0 && text[i-1] == ':' && i != elementEnd {
+			return i
+		}
 		flush(i)
+		// Whatever the name: a custom emoji of the workspace is not in
+		// the emoji table (see ParseInlineElements).
 		emoji := map[string]any{"type": "emoji", "name": name}
 		if tone, toneEnd, ok := skinToneAt(text, end); ok {
-			// Slack has one element for an emoji and its skin tone.
+			// One element for an emoji and its skin tone, with the field
+			// Slack's own messages carry (the one render_richtext.go reads
+			// back).
 			emoji["skin_tone"] = int(tone - '0')
 			end = toneEnd
 		}
@@ -156,14 +176,10 @@ func (p *inlineParser) elementAt(text string, i int, style inlineStyle, flush fu
 	case 'h':
 		// A bare URL is a link, as it is in a message sent as plain text,
 		// and its `_`, `~` and `@` are neither formatting nor mentions.
-		if afterWord {
+		url, ok := bareURLAt(text, i)
+		if !ok {
 			return i
 		}
-		loc := bareURLRE.FindStringIndex(rest)
-		if loc == nil || loc[0] != 0 {
-			return i
-		}
-		url := trimBareURL(rest[:loc[1]])
 		flush(i)
 		p.out = append(p.out, style.apply(map[string]any{"type": "link", "url": url}))
 		return i + len(url)

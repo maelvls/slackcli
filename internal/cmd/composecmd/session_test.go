@@ -1,6 +1,7 @@
 package composecmd
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -21,11 +22,10 @@ import (
 
 // patient are timeouts that never fire during a test.
 var patient = timeouts{
-	Unopened: time.Minute,
-	Silent:   time.Minute,
-	Closing:  time.Minute,
-	Ping:     10 * time.Second,
-	Shutdown: 5 * time.Second,
+	Unopened:     time.Minute,
+	Disconnected: time.Minute,
+	Closing:      time.Minute,
+	Shutdown:     5 * time.Second,
 }
 
 // sendRecorder is a sendFunc that records what it is asked to send.
@@ -172,6 +172,56 @@ func (b *browser) postRaw(path string, raw []byte, mutate ...func(*http.Request)
 	return resp.StatusCode, decoded
 }
 
+// connect holds a request open the way the page does for as long as it
+// lives, and returns what drops it, as closing the tab does (without a
+// goodbye). The session knows of the connection when connect returns.
+func (b *browser) connect(mutate ...func(*http.Request)) (closeTab func()) {
+	b.t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	b.t.Cleanup(cancel)
+	raw, _ := json.Marshal(map[string]any{"token": b.token})
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, b.origin+"/live", bytes.NewReader(raw))
+	if err != nil {
+		b.t.Fatal(err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Origin", b.origin)
+	req.Header.Set("Sec-Fetch-Site", "same-origin")
+	for _, m := range mutate {
+		m(req)
+	}
+	resp, err := b.client.Do(req)
+	if err != nil {
+		b.t.Fatalf("POST /live: %v", err)
+	}
+	b.t.Cleanup(func() { resp.Body.Close() })
+	// The response is answered at once, and then left open.
+	line, err := bufio.NewReader(resp.Body).ReadString('\n')
+	var decoded actionResponse
+	_ = json.Unmarshal([]byte(line), &decoded)
+	if resp.StatusCode != http.StatusOK || err != nil || !decoded.OK {
+		b.t.Fatalf("POST /live: %s %q (%v)", resp.Status, line, err)
+	}
+	return cancel
+}
+
+// waitFor polls until cond holds.
+func waitFor(t *testing.T, what string, cond func() bool) {
+	t.Helper()
+	for deadline := time.Now().Add(5 * time.Second); !cond(); time.Sleep(time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting until %s", what)
+		}
+	}
+}
+
+// connected is the number of connections that pages hold open.
+func connected(s *session) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.live
+}
+
 // waitResult runs s.wait in the background.
 type waitResult struct {
 	out outcome
@@ -283,7 +333,7 @@ func TestPageIsServedOnceForTheKey(t *testing.T) {
 			t.Errorf("CSP lacks %q: %q", directive, csp)
 		}
 	}
-	for _, forbidden := range []string{"unsafe-eval", "script-src 'unsafe-inline'", "http:", "https:", "*"} {
+	for _, forbidden := range []string{"unsafe-eval", "script-src 'unsafe-inline'", "http:", "https:", "*", "img-src", "data:"} {
 		if strings.Contains(csp, forbidden) {
 			t.Errorf("CSP allows %q: %q", forbidden, csp)
 		}
@@ -424,11 +474,31 @@ func TestEditorPageHasNoInlineHandlersOrRemoteResources(t *testing.T) {
 	if strings.Count(editorHTML, noncePlaceholder) != 1 || strings.Count(editorHTML, configPlaceholder) != 1 {
 		t.Error("editor.html must hold each placeholder exactly once")
 	}
+	// The page does not rely on timers to say that it is still open:
+	// browsers throttle and stop them in background tabs.
+	if strings.Contains(lower, "setinterval") || !strings.Contains(editorHTML, `post("/live", {})`) {
+		t.Error("editor.html must hold a /live request open rather than ping on a timer")
+	}
 	// The mrkdwn renderer escapes everything it is given.
 	for _, want := range []string{`t = escapeHtml(t);`, `.replace(/"/g, "&quot;")`, `msg.textContent = title;`} {
 		if !strings.Contains(editorHTML, want) {
 			t.Errorf("editor.html no longer contains %q", want)
 		}
+	}
+}
+
+// The editor is this tool's: it names it (from appinfo, through the
+// configuration) and credits or links to nobody else. The upstream project
+// is credited in the README.
+func TestEditorPageCarriesNoForeignBranding(t *testing.T) {
+	lower := strings.ToLower(editorHTML)
+	for _, leftover := range []string{"stably", "agent-slack", "byline", "<img", "data:image", `href="http`} {
+		if strings.Contains(lower, leftover) {
+			t.Errorf("editor.html contains %q", leftover)
+		}
+	}
+	if !strings.Contains(editorHTML, `document.getElementById("brandName").textContent = CONFIG.appName;`) {
+		t.Error("editor.html no longer takes the tool's name from the configuration")
 	}
 }
 
@@ -464,7 +534,7 @@ func TestActionsAreRefusedUnlessFromThePage(t *testing.T) {
 		{"PUT", func(r *http.Request) { r.Method = http.MethodPut }, http.StatusMethodNotAllowed},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			for _, path := range []string{"/send", "/cancel", "/ping", "/bye"} {
+			for _, path := range []string{"/send", "/cancel", "/live", "/bye"} {
 				if status, resp := b.post(path, send, tc.mutate); status != tc.want || resp.OK {
 					t.Errorf("POST %s: status %d (ok=%v), want %d", path, status, resp.OK, tc.want)
 				}
@@ -474,7 +544,7 @@ func TestActionsAreRefusedUnlessFromThePage(t *testing.T) {
 
 	t.Run("wrong or missing token", func(t *testing.T) {
 		for _, token := range []any{"", "wrong", s.key, s.cookieSecret, s.token + "x", nil, 42} {
-			for _, path := range []string{"/send", "/cancel", "/ping", "/bye"} {
+			for _, path := range []string{"/send", "/cancel", "/live", "/bye"} {
 				status, _ := b.post(path, map[string]any{"text": "hello", "token": token})
 				// A token of the wrong JSON type is a malformed body.
 				if status != http.StatusForbidden && status != http.StatusBadRequest {
@@ -531,25 +601,20 @@ func TestActionsAreRefusedUnlessFromThePage(t *testing.T) {
 	if got := rec.sent(); len(got) != 0 {
 		t.Fatalf("sent %q", got)
 	}
-	if status, resp := b.post("/ping", nil); status != http.StatusOK || !resp.OK {
-		t.Errorf("ping: %d %+v", status, resp)
+	if n := connected(s); n != 0 {
+		t.Errorf("%d connections were taken for the page's", n)
 	}
+	b.connect() // fails the test unless accepted
 	t.Run("localhost is the same server", func(t *testing.T) {
-		status, resp := b.post("/ping", nil, func(r *http.Request) {
+		b.connect(func(r *http.Request) {
 			r.Host = "localhost:" + port
 			r.Header.Set("Origin", "http://localhost:"+port)
 		})
-		if status != http.StatusOK || !resp.OK {
-			t.Errorf("ping: %d %+v", status, resp)
-		}
 	})
 	t.Run("a charset on the Content-Type is fine", func(t *testing.T) {
-		status, resp := b.post("/ping", nil, func(r *http.Request) {
+		b.connect(func(r *http.Request) {
 			r.Header.Set("Content-Type", "application/json; charset=utf-8")
 		})
-		if status != http.StatusOK || !resp.OK {
-			t.Errorf("ping: %d %+v", status, resp)
-		}
 	})
 }
 
@@ -650,8 +715,8 @@ func TestConcurrentSendsSendOnce(t *testing.T) {
 	if status, _ := b.post("/cancel", nil); status != http.StatusConflict {
 		t.Errorf("cancel after sent: %d, want 409", status)
 	}
-	if status, _ := b.post("/ping", nil); status != http.StatusGone {
-		t.Errorf("ping after sent: %d, want 410", status)
+	if status, _ := b.post("/live", nil); status != http.StatusGone {
+		t.Errorf("connecting after sent: %d, want 410", status)
 	}
 	if resp, _ := b.get(s.origin() + "/"); resp.StatusCode != http.StatusGone {
 		t.Errorf("page after sent: %s, want 410", resp.Status)
@@ -824,31 +889,105 @@ func TestUnopenedEditorTimesOut(t *testing.T) {
 	mustBeStopped(t, s)
 }
 
+// A send ends the command at once: the page gets its answer, and neither
+// the connection that the page holds open nor one that the browser opened
+// ahead of need (which http.Server.Shutdown would wait five seconds for)
+// delays it.
+func TestStopIsPromptAndTheSenderIsAnswered(t *testing.T) {
+	rec := &sendRecorder{gate: make(chan struct{}), started: make(chan struct{}, 1)}
+	// patient.Shutdown is far above what this test tolerates: stop must
+	// not use that budget up.
+	s := startTestSession(t, pageConfig{}, rec.send, patient)
+	b := newBrowser(t, s.origin())
+	b.open(s.url())
+	b.connect()
+
+	spare, err := net.Dial("tcp", s.hosts[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer spare.Close()
+	waitFor(t, "the server has the spare connection", func() bool {
+		s.connMu.Lock()
+		defer s.connMu.Unlock()
+		return len(s.unused) == 1
+	})
+
+	ended := waitAsync(context.Background(), s)
+	type result struct {
+		status int
+		resp   actionResponse
+	}
+	posted := make(chan result, 1)
+	go func() {
+		status, resp := b.post("/send", map[string]any{"text": "hello"})
+		posted <- result{status, resp}
+	}()
+	<-rec.started
+
+	start := time.Now()
+	close(rec.gate)
+	r := mustEnd(t, ended)
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
+		t.Errorf("the session took %v to stop after the send", elapsed)
+	}
+	if r.err != nil || r.out.Sent == nil || r.out.Text != "hello" {
+		t.Errorf("outcome = %+v, err = %v", r.out, r.err)
+	}
+	if p := <-posted; p.status != http.StatusOK || !p.resp.OK || p.resp.TS != "1700000000.000100" || p.resp.Permalink == "" {
+		t.Errorf("the page was not told that the message was sent: %d %+v", p.status, p.resp)
+	}
+	_ = spare.SetReadDeadline(time.Now().Add(2 * time.Second))
+	if _, err := spare.Read(make([]byte, 1)); !errors.Is(err, io.EOF) {
+		t.Errorf("reading the spare connection: %v, want it closed by the server", err)
+	}
+	mustBeStopped(t, s)
+
+	t.Run("stopping again is harmless", func(t *testing.T) {
+		s.stop()
+	})
+}
+
 func TestClosedTabEndsTheSession(t *testing.T) {
-	t.Run("a tab that stops pinging", func(t *testing.T) {
+	t.Run("a connected tab is never taken for closed", func(t *testing.T) {
 		to := patient
 		to.Unopened = 40 * time.Millisecond // opening the page lifts this one
-		to.Silent = 250 * time.Millisecond
+		to.Disconnected = 100 * time.Millisecond
 		s := startTestSession(t, pageConfig{}, (&sendRecorder{}).send, to)
 		b := newBrowser(t, s.origin())
 		b.open(s.url())
+		closeTab := b.connect()
 		ended := waitAsync(context.Background(), s)
 
-		// Pings keep the session alive well past Silent.
-		for range 8 {
-			time.Sleep(60 * time.Millisecond)
-			if status, _ := b.post("/ping", nil); status != http.StatusOK {
-				t.Fatalf("ping: %d", status)
-			}
+		// The tab says nothing at all, as one whose timers are stopped
+		// in the background does.
+		mustNotEnd(t, ended, 6*to.Disconnected)
+		if n := connected(s); n != 1 {
+			t.Fatalf("%d connections held, want 1", n)
 		}
-		mustNotEnd(t, ended, 0)
 
-		// Then the tab goes away without a word (crash, kill).
+		// Then it goes away without a word (crash, kill).
+		closed := time.Now()
+		closeTab()
 		r := mustEnd(t, ended)
 		if r.err != nil || r.out.Sent != nil || r.out.Reason != endTabClosed {
 			t.Errorf("outcome = %+v, err = %v", r.out, r.err)
 		}
+		if time.Since(closed) < to.Disconnected {
+			t.Error("the session ended before the grace period")
+		}
 		mustBeStopped(t, s)
+	})
+
+	t.Run("a page that never connects", func(t *testing.T) {
+		to := patient
+		to.Disconnected = 60 * time.Millisecond
+		s := startTestSession(t, pageConfig{}, (&sendRecorder{}).send, to)
+		newBrowser(t, s.origin()).open(s.url())
+		r := mustEnd(t, waitAsync(context.Background(), s))
+		if r.err != nil || r.out.Reason != endTabClosed {
+			t.Errorf("outcome = %+v, err = %v", r.out, r.err)
+		}
 	})
 
 	t.Run("a tab that says goodbye", func(t *testing.T) {
@@ -857,11 +996,14 @@ func TestClosedTabEndsTheSession(t *testing.T) {
 		s := startTestSession(t, pageConfig{}, (&sendRecorder{}).send, to)
 		b := newBrowser(t, s.origin())
 		b.open(s.url())
+		closeTab := b.connect()
 		ended := waitAsync(context.Background(), s)
 
 		if status, _ := b.post("/bye", nil); status != http.StatusOK {
 			t.Fatalf("bye: %d", status)
 		}
+		closeTab()
+		// The short grace period applies, not the long one.
 		r := mustEnd(t, ended)
 		if r.err != nil || r.out.Reason != endTabClosed {
 			t.Errorf("outcome = %+v, err = %v", r.out, r.err)
@@ -874,10 +1016,13 @@ func TestClosedTabEndsTheSession(t *testing.T) {
 		s := startTestSession(t, pageConfig{}, (&sendRecorder{}).send, to)
 		b := newBrowser(t, s.origin())
 		b.open(s.url())
+		closeTab := b.connect()
 		ended := waitAsync(context.Background(), s)
 
 		b.post("/bye", nil)
+		closeTab()
 		b.open(s.origin() + "/") // the reloaded page, authorised by its cookie
+		b.connect()
 		mustNotEnd(t, ended, 2*to.Closing)
 
 		if status, resp := b.post("/send", map[string]any{"text": "after reload"}); status != http.StatusOK || !resp.OK {
@@ -886,6 +1031,43 @@ func TestClosedTabEndsTheSession(t *testing.T) {
 		if r := mustEnd(t, ended); r.out.Sent == nil || r.out.Text != "after reload" {
 			t.Errorf("outcome = %+v, err = %v", r.out, r.err)
 		}
+	})
+
+	t.Run("one of two tabs closes", func(t *testing.T) {
+		to := patient
+		to.Closing = 50 * time.Millisecond
+		to.Disconnected = 100 * time.Millisecond
+		s := startTestSession(t, pageConfig{}, (&sendRecorder{}).send, to)
+		b := newBrowser(t, s.origin())
+		b.open(s.url())
+		closeFirst := b.connect()
+		b.open(s.origin() + "/") // a second tab of the same browser
+		closeSecond := b.connect()
+		ended := waitAsync(context.Background(), s)
+
+		b.post("/bye", nil)
+		closeFirst()
+		mustNotEnd(t, ended, 6*to.Closing)
+
+		closeSecond()
+		if r := mustEnd(t, ended); r.err != nil || r.out.Reason != endTabClosed {
+			t.Errorf("outcome = %+v, err = %v", r.out, r.err)
+		}
+	})
+
+	t.Run("a failed send does not start the countdown of a connected tab", func(t *testing.T) {
+		to := patient
+		to.Disconnected = 60 * time.Millisecond
+		rec := &sendRecorder{fail: errors.New("boom")}
+		s := startTestSession(t, pageConfig{}, rec.send, to)
+		b := newBrowser(t, s.origin())
+		b.open(s.url())
+		b.connect()
+		ended := waitAsync(context.Background(), s)
+		if status, _ := b.post("/send", map[string]any{"text": "x"}); status != http.StatusBadGateway {
+			t.Fatalf("failed send: %d", status)
+		}
+		mustNotEnd(t, ended, 5*to.Disconnected)
 	})
 }
 

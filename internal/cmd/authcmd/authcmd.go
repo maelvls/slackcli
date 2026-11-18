@@ -97,11 +97,15 @@ func resolveConfigured(rt *clictx.Context, selector string) (*auth.Workspace, er
 
 func newSetDefault(rt *clictx.Context) *cobra.Command {
 	return &cobra.Command{
-		Use:   "set-default <workspace-url>",
+		Use:   "set-default <workspace>",
 		Short: "Set the default workspace",
 		Long: `Set the workspace used when neither --workspace nor SLACK_WORKSPACE_URL is
-given. The argument is the URL of a configured workspace (like
-https://myteam.slack.com) or a unique substring of its URL or name.`,
+given.
+
+<workspace> is the URL of a configured workspace (like
+https://myteam.slack.com) or a unique substring of its URL or name.
+
+Prints one line of text, not JSON: "Default workspace set to <url>."`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
 			w, err := resolveConfigured(rt, args[0])
@@ -119,11 +123,15 @@ https://myteam.slack.com) or a unique substring of its URL or name.`,
 
 func newRemove(rt *clictx.Context) *cobra.Command {
 	return &cobra.Command{
-		Use:   "remove <workspace-url>",
+		Use:   "remove <workspace>",
 		Short: "Remove a workspace from local config",
 		Long: `Remove a workspace and its saved credentials (including its keychain
-entries on macOS). The argument is the URL of a configured workspace (like
-https://myteam.slack.com) or a unique substring of its URL or name.`,
+entries on macOS).
+
+<workspace> is the URL of a configured workspace (like
+https://myteam.slack.com) or a unique substring of its URL or name.
+
+Prints one line of text, not JSON: "Removed workspace <url>."`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
 			w, err := resolveConfigured(rt, args[0])

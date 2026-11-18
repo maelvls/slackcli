@@ -11,6 +11,7 @@ import (
 
 	"github.com/maelvls/slackcli/internal/appinfo"
 	"github.com/maelvls/slackcli/internal/jsonx"
+	"github.com/maelvls/slackcli/internal/slack/enrich"
 	"github.com/maelvls/slackcli/internal/slack/users"
 	"github.com/maelvls/slackcli/internal/slackid"
 )
@@ -107,7 +108,7 @@ func (s *searcher) fromToken(ctx context.Context, user string) (string, error) {
 		}
 	}
 	resp, err := s.client.API(ctx, "users.info", map[string]any{"user": id})
-	if isFatal(ctx, err) {
+	if enrich.MustAbort(ctx, err) {
 		return "", fmt.Errorf("looking up user %s: %w", id, err)
 	}
 	if name := strings.TrimSpace(jsonx.GetStr(resp, "user", "name")); name != "" {

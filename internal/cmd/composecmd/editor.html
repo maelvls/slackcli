@@ -74,37 +74,13 @@
         letter-spacing: -0.3px;
         color: var(--text);
       }
-      .brand-byline {
-        display: flex;
-        align-items: center;
-        gap: 6px;
-        margin-top: 2px;
-        justify-content: center;
-        font-family: "Inter", sans-serif;
-        font-size: 10px;
-        font-weight: 500;
-        color: rgba(255, 255, 255, 0.5);
-      }
-      .brand-byline a {
-        color: rgba(255, 255, 255, 0.6);
-        text-decoration: none;
-      }
-      .brand-byline a:hover {
-        color: rgba(255, 255, 255, 0.8);
-      }
       .brand-sub {
         font-size: 11px;
         font-weight: 600;
         letter-spacing: 1.5px;
         text-transform: uppercase;
         color: var(--text-muted);
-        margin-top: 8px;
-      }
-      .brand-byline img {
-        width: 12px;
-        height: 12px;
-        opacity: 0.6;
-        vertical-align: -1px;
+        margin-top: 4px;
       }
 
       /* ── Context bar ── */
@@ -637,14 +613,6 @@
       <!-- Branding -->
       <div class="brand">
         <div class="brand-name" id="brandName"></div>
-        <div class="brand-byline">
-          By
-          <a href="https://stably.ai" target="_blank" rel="noopener noreferrer"
-            ><img
-              src="data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMjM3OCIgaGVpZ2h0PSIyMzc4IiB2aWV3Qm94PSIwIDAgMjM3OCAyMzc4IiBmaWxsPSJub25lIiB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciPgo8ZyBjbGlwLXBhdGg9InVybCgjY2xpcDBfMTZfNDcpIj4KPHBhdGggZD0iTTExODguOTQgNjE4LjY0NUMxNTAwLjY5IDYxOC42NDUgMTc1My4zNiA4NzEuMzIyIDE3NTMuMzYgMTE4My4wNEMxNzUzLjM2IDE0OTQuNzIgMTUwMC42OSAxNzQ3LjM5IDExODguOTQgMTc0Ny4zOUM4NzcuMjUyIDE3NDcuMzkgNjI0LjU0NyAxNDk0LjcyIDYyNC41NDcgMTE4My4wNEM2MjQuNTQ3IDg3MS4zMTcgODc3LjI1MiA2MTguNjQ1IDExODguOTQgNjE4LjY0NVoiIGZpbGw9IndoaXRlIi8+CjxwYXRoIGQ9Ik0xMTg4Ljk0IDBDMTA0MC44MSAwIDg5OS40NiAyOC40NTgxIDc2OC42MTkgNzguMTc0MkM3OTcuMjAyIDEwNy4yMDMgODIwLjg0IDE0MC45OTIgODM4Ljk5IDE3OC4wNTJDOTQ4Ljg2MSAxMzkuODE4IDEwNjYuMzUgMTE4LjA1NSAxMTg5IDExOC4wNTVDMTc3OS41IDExOC4wNTUgMjI1OS44NSA1OTguNTYxIDIyNTkuODUgMTE4OC45NEMyMjU5Ljg1IDE3NzkuMzEgMTc3OS41IDIyNTkuOTEgMTE4OC45NCAyMjU5LjkxQzU5OC41MDEgMjI1OS45MSAxMTguMTIgMTc3OS4zNyAxMTguMTIgMTE4OUMxMTguMTIgOTkwLjEwNiAxNzMuNjA3IDgwNC40MDggMjY4LjQwOSA2NDQuNjNDMjM1LjkxOSA2MTkuNzU5IDIwNy4yNzEgNTg5LjkzNyAxODQuMzI4IDU1NS45NThDNjguMjEzNiA3MzkuNDkzIDAgOTU2LjE4NiAwIDExODlDMCAxODQ0LjYgNTMzLjMzIDIzNzguMDEgMTE4OC45NCAyMzc4LjAxQzE4NDQuNiAyMzc4LjAxIDIzNzggMTg0NC42MSAyMzc4IDExODlDMjM3OCA1MzMuMzk1IDE4NDQuNiAwIDExODguOTQgMFoiIGZpbGw9IndoaXRlIi8+CjxwYXRoIGQ9Ik00OTguNjI0IDExMS4xMUM2MzMuMjA5IDExMS4xMSA3NDIuMjg3IDIyMC4xODggNzQyLjI4NyAzNTQuNzczQzc0Mi4yODcgNDg5LjM1OCA2MzMuMjA5IDU5OC40MzYgNDk4LjYyNCA1OTguNDM2QzM2NC4wNzEgNTk4LjQzNiAyNTQuOTYxIDQ4OS4zNTggMjU0Ljk2MSAzNTQuNzczQzI1NC45NjEgMjIwLjE4OCAzNjQuMDcxIDExMS4xMSA0OTguNjI0IDExMS4xMVoiIGZpbGw9IndoaXRlIi8+CjwvZz4KPGRlZnM+CjxjbGlwUGF0aCBpZD0iY2xpcDBfMTZfNDciPgo8cmVjdCB3aWR0aD0iMjM3OCIgaGVpZ2h0PSIyMzc4IiBmaWxsPSJ3aGl0ZSIvPgo8L2NsaXBQYXRoPgo8L2RlZnM+Cjwvc3ZnPgo="
-              alt="" /></a
-          ><a href="https://stably.ai" target="_blank" rel="noopener noreferrer">Stably.ai</a>
-        </div>
         <div class="brand-sub">compose</div>
       </div>
 
@@ -1852,32 +1820,50 @@
       document.getElementById("linkSaveBtn").addEventListener("click", applyLink);
 
       // ─── Liveness ───
-      // The command line waits for this tab: tell it that the tab is still
-      // open, and when it goes away, so that closing the tab cancels instead
-      // of leaving the command hanging.
-      let missedPings = 0;
-      const pinger = setInterval(async () => {
-        if (finished) {
-          clearInterval(pinger);
-          return;
+      // The command line waits for this tab, and must notice when it is
+      // gone. The tab does not ping on a timer: browsers slow down or stop
+      // the timers of background tabs, and a tab left in the background
+      // while its message is being written must not be taken for closed.
+      // Instead it holds one request open for as long as it lives; the
+      // browser drops the connection when the tab is closed, whatever state
+      // the tab is in.
+      function pause(ms) {
+        return new Promise((resolve) => setTimeout(resolve, ms));
+      }
+
+      async function stayConnected() {
+        let failures = 0;
+        while (!finished) {
+          let over = false;
+          try {
+            const resp = await post("/live", {});
+            over = resp.status === 410;
+            if (resp.ok) {
+              failures = 0;
+              // Resolves when the server ends the session, or goes away.
+              const reader = resp.body.getReader();
+              while (!(await reader.read()).done) {}
+            } else {
+              failures++;
+            }
+          } catch (_) {
+            failures++;
+          }
+          // While a send is in flight, its own response says how it went.
+          if ((over || failures >= 3) && !sending && !finished) {
+            finished = true;
+            document.getElementById("sendBtn").disabled = true;
+            showOverlay(
+              "This editor is no longer connected",
+              "The command that opened it has ended. Nothing was sent from this tab; run it again to compose.",
+              "error",
+            );
+            return;
+          }
+          await pause(1000);
         }
-        try {
-          const resp = await post("/ping", {});
-          missedPings = resp.ok ? 0 : missedPings + 1;
-        } catch (_) {
-          missedPings++;
-        }
-        if (missedPings >= 3 && !sending && !finished) {
-          finished = true;
-          clearInterval(pinger);
-          document.getElementById("sendBtn").disabled = true;
-          showOverlay(
-            "This editor is no longer connected",
-            "The command that opened it has ended. Nothing was sent; run it again to compose.",
-            "error",
-          );
-        }
-      }, CONFIG.pingMillis);
+      }
+      stayConnected();
 
       window.addEventListener("pagehide", () => {
         if (finished || sending) {

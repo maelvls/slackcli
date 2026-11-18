@@ -32,8 +32,6 @@ type pageConfig struct {
 	InitialText string `json:"initialText"`
 	// Token must accompany every POST of the page.
 	Token string `json:"token"`
-	// PingMillis is how often the page says it is still open.
-	PingMillis int64 `json:"pingMillis"`
 }
 
 // renderPage returns the editor page for cfg, with nonce as the nonce of
@@ -66,7 +64,6 @@ func contentSecurityPolicy(nonce string) string {
 		"default-src 'none'",
 		"script-src 'nonce-" + nonce + "'",
 		"style-src 'unsafe-inline'",
-		"img-src data:",
 		"connect-src 'self'",
 		"base-uri 'none'",
 		"form-action 'none'",

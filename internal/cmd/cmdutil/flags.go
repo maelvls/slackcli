@@ -49,9 +49,12 @@ func CheckOptionalLimit(cmd *cobra.Command, n int) error {
 // CheckLimit validates a --limit flag that must be between 1 and max.
 // Values above max are refused rather than clamped, so that the caller
 // knows the result is not all it asked for; more says how to get the rest.
-func CheckLimit(n, max int, more string) error {
+func CheckLimit(n, max int, more string) error { return CheckRange("--limit", n, max, more) }
+
+// CheckRange is CheckLimit for a flag of another name (dashes included).
+func CheckRange(flag string, n, max int, more string) error {
 	if n < 1 || n > max {
-		return fmt.Errorf("invalid --limit value %d: must be between 1 and %d (%s)", n, max, more)
+		return fmt.Errorf("invalid %s value %d: must be between 1 and %d (%s)", flag, n, max, more)
 	}
 	return nil
 }

@@ -16,6 +16,7 @@ import (
 	"github.com/maelvls/slackcli/internal/appinfo"
 	"github.com/maelvls/slackcli/internal/auth"
 	"github.com/maelvls/slackcli/internal/clictx"
+	"github.com/maelvls/slackcli/internal/testenv"
 )
 
 // result is what one run of the CLI produced.
@@ -32,7 +33,8 @@ func runWith(t *testing.T, grace time.Duration, build func(rt *clictx.Context) [
 	for _, name := range []string{"SLACK_TOKEN", "SLACK_COOKIE_D", "SLACK_WORKSPACE_URL"} {
 		t.Setenv(name, "")
 	}
-	t.Setenv(appinfo.EnvName("NO_UPDATE_CHECK"), "1")
+	// The real commands must not find the developer's configuration.
+	testenv.Isolate(t)
 	var stdout, stderr bytes.Buffer
 	var rt *clictx.Context
 	r := runner{
@@ -85,9 +87,13 @@ func TestRunSuccessAndErrors(t *testing.T) {
 	if got.code != ExitError || !strings.Contains(got.stderr, "unknown flag: --nope") || !strings.Contains(got.stderr, "--help") {
 		t.Errorf("unknown flag: %+v", got)
 	}
-	// A command that ran and failed on its arguments does not.
+	// An error of the command itself is not followed by a pointer to help.
+	if got = runWith(t, time.Second, build, "fail"); strings.Contains(got.stderr, "--help") {
+		t.Errorf("fail: %+v", got)
+	}
 	got = runWith(t, time.Second, build, "ok", "extra")
-	if got.code != ExitError || !strings.Contains(got.stderr, "unknown command") {
+	want := `"` + appinfo.Name + ` ok" takes no arguments, got 1 argument ("extra")` + "\n" + `Run "` + appinfo.Name + ` ok --help" for usage.` + "\n"
+	if got.code != ExitError || got.stdout != "" || got.stderr != want {
 		t.Errorf("extra argument: %+v", got)
 	}
 
@@ -220,7 +226,7 @@ func TestRunSafeModeFlagCannotDisableTheEnvironment(t *testing.T) {
 }
 
 // -V and --version print the bare version, as the predecessor did, even
-// though release builds are stamped with the "v" of the git tag.
+// when the build is stamped with the "v" of a version tag.
 func TestVersionFlags(t *testing.T) {
 	old := appinfo.Version
 	t.Cleanup(func() { appinfo.Version = old })
@@ -245,22 +251,11 @@ func TestCommandTree(t *testing.T) {
 	for _, c := range cmd.Commands() {
 		names = append(names, c.Name())
 	}
-	want := "auth canvas channel later message search unreads update user workflow"
+	// "completion" and "help" are cobra's, added up front (see newRoot).
+	want := "auth canvas channel completion help later message search unreads user workflow"
 	if got := strings.Join(names, " "); got != want {
 		t.Errorf("commands = %s, want %s", got, want)
 	}
-	if !isUpdateCommand(mustFind(t, cmd, "update")) || isUpdateCommand(mustFind(t, cmd, "auth", "test")) {
-		t.Error("isUpdateCommand is wrong")
-	}
-}
-
-func mustFind(t *testing.T, root *cobra.Command, path ...string) *cobra.Command {
-	t.Helper()
-	cmd, _, err := root.Find(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return cmd
 }
 
 func TestErrorMessage(t *testing.T) {

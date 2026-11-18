@@ -10,6 +10,7 @@ import (
 
 	"github.com/maelvls/slackcli/internal/jsonx"
 	"github.com/maelvls/slackcli/internal/slack/channels"
+	"github.com/maelvls/slackcli/internal/slack/enrich"
 	"github.com/maelvls/slackcli/internal/slack/messages"
 	"github.com/maelvls/slackcli/internal/slack/slacktext"
 	"github.com/maelvls/slackcli/internal/slack/slackurl"
@@ -64,7 +65,7 @@ func (s *searcher) searchMessages(ctx context.Context) ([]hit, *More, error) {
 			}
 			matches, err := p.next(ctx)
 			if err != nil {
-				if len(hits) > 0 && isRateLimit(err) {
+				if len(hits) > 0 && enrich.IsRateLimit(err) {
 					reason = fmt.Sprintf("The search stopped early: %v", err)
 					break
 				}
@@ -122,7 +123,7 @@ func (s *searcher) refs(ctx context.Context, matches []map[string]any, seen map[
 				continue
 			}
 			id, err := channels.ResolveID(ctx, s.client, "#"+name)
-			if isFatal(ctx, err) {
+			if enrich.MustAbort(ctx, err) {
 				return nil, err
 			}
 			if err != nil {
@@ -168,7 +169,7 @@ func (s *searcher) fetch(ctx context.Context, refs []ref) ([]messages.Message, e
 		switch {
 		case err == nil:
 			out[i] = msg
-		case isFatal(ctx, err):
+		case enrich.MustAbort(ctx, err):
 			return err
 		default:
 			out[i] = messages.ParseMessage(refs[i].ChannelID, refs[i].raw)
@@ -251,7 +252,7 @@ func (s *searcher) scanChannel(ctx context.Context, channelID string) (out []mes
 		}
 		resp, err := s.client.API(ctx, "conversations.history", params)
 		if err != nil {
-			if page > 0 && isRateLimit(err) {
+			if page > 0 && enrich.IsRateLimit(err) {
 				s.warnf("the scan of channel %s stopped early, older messages were not searched: %v", channelID, err)
 				return out, true, nil
 			}

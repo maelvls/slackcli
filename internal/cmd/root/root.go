@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"os/signal"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -19,15 +20,15 @@ import (
 	"github.com/maelvls/slackcli/internal/cmd/authcmd"
 	"github.com/maelvls/slackcli/internal/cmd/canvascmd"
 	"github.com/maelvls/slackcli/internal/cmd/channelcmd"
+	"github.com/maelvls/slackcli/internal/cmd/cmdutil"
 	"github.com/maelvls/slackcli/internal/cmd/latercmd"
 	"github.com/maelvls/slackcli/internal/cmd/messagecmd"
 	"github.com/maelvls/slackcli/internal/cmd/searchcmd"
 	"github.com/maelvls/slackcli/internal/cmd/unreadscmd"
-	"github.com/maelvls/slackcli/internal/cmd/updatecmd"
 	"github.com/maelvls/slackcli/internal/cmd/usercmd"
 	"github.com/maelvls/slackcli/internal/cmd/workflowcmd"
 	"github.com/maelvls/slackcli/internal/slack/enrich"
-	"github.com/maelvls/slackcli/internal/update"
+	"github.com/maelvls/slackcli/internal/slackapi"
 )
 
 // Exit codes.
@@ -67,43 +68,114 @@ func commands(rt *clictx.Context) []*cobra.Command {
 		usercmd.New(rt),
 		channelcmd.New(rt),
 		workflowcmd.New(rt),
-		updatecmd.New(rt),
 	}
 }
 
-// newRoot builds the root command (global flags, version) over the given
-// top-level commands.
+// newRoot builds the root command (global flags, version, help) over the
+// given top-level commands.
 func newRoot(rt *clictx.Context, subcommands []*cobra.Command) *cobra.Command {
-	var shortVersion bool
+	var version, shortVersion bool
 	cmd := &cobra.Command{
 		Use:   appinfo.Name,
 		Short: appinfo.Description,
-		// Without the "v" of the git tag, like "update --check" and the
-		// User-Agent.
-		Version:       appinfo.BareVersion(),
+		Long: fmt.Sprintf(`%s.
+
+Commands print JSON on stdout and hints and warnings on stderr; see the help
+of each command for what it prints.
+
+%s
+It fails closed: --safe-mode=false does not turn off a safe mode that the
+environment turned on, and any value of %s other than
+empty, 0, false, no or off turns it on.`,
+			appinfo.Description, clictx.SafeModeHelp(), appinfo.EnvName("SAFE_MODE")),
 		SilenceUsage:  true,
 		SilenceErrors: true,
-		Args:          cobra.NoArgs,
+		// The version is printed here rather than by cobra (cmd.Version),
+		// which would do it before looking at the arguments: "--version
+		// extra" is a mistake, not a request for the version.
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			if shortVersion {
-				_, err := fmt.Fprintln(cmd.OutOrStdout(), cmd.Version)
+			if version || shortVersion {
+				// Without the "v" of a version tag, like the User-Agent.
+				_, err := fmt.Fprintln(cmd.OutOrStdout(), appinfo.BareVersion())
 				return err
 			}
 			return cmd.Help()
 		},
 	}
-	cmd.SetVersionTemplate("{{.Version}}\n")
 	cmd.CompletionOptions.HiddenDefaultCmd = true
-	// -V is the predecessor's shorthand. Defining the flag here keeps
-	// cobra from adding its own with -v, which stays as a hidden alias.
-	cmd.Flags().BoolP("version", "V", false, "Print the version of "+appinfo.Name)
+	// -V is the predecessor's shorthand; -v stays as a hidden alias.
+	cmd.Flags().BoolVarP(&version, "version", "V", false, "Print the version of "+appinfo.Name)
 	cmd.Flags().BoolVarP(&shortVersion, "version-short", "v", false, "Print the version (alias of -V)")
 	_ = cmd.Flags().MarkHidden("version-short")
+	// One line: this flag is listed in the help of every command.
 	cmd.PersistentFlags().BoolVar(&rt.SafeModeFlag, "safe-mode", false,
-		fmt.Sprintf(`Keep a human in the loop: %s (also: %s=1; --safe-mode=false does not turn it off when the environment turns it on)`, clictx.SafeModeSummary(), appinfo.EnvName("SAFE_MODE")))
+		fmt.Sprintf(`Keep a human in the loop: messages are sent from a review editor, other writes are refused (also %s=1; see "%s --help")`,
+			appinfo.EnvName("SAFE_MODE"), appinfo.Name))
 
 	cmd.AddCommand(subcommands...)
+	cmd.SetHelpCommand(newHelp(cmd))
+	// cobra adds "help" and "completion" when the command is executed:
+	// add them now, so that they are checked like the others.
+	cmd.InitDefaultHelpCmd()
+	cmd.InitDefaultCompletionCmd()
+	cmd.SetFlagErrorFunc(cmdutil.FlagError)
+	checkUsage(cmd)
 	return cmd
+}
+
+// checkUsage makes cmd and every command below it report a command line
+// they cannot accept as a *cmdutil.UsageError, which Run words for the
+// user and follows with a pointer to that command's help.
+//
+// It also closes a gap in cobra, which only validates the arguments of a
+// command that can run: a group of commands without a RunE of its own
+// ("auth", "channel") would answer "auth status" with its help and exit
+// code 0. Such a group gets one: its help without arguments, an "unknown
+// command" error otherwise. Doing it here covers every group, present and
+// future.
+func checkUsage(cmd *cobra.Command) {
+	for _, sub := range cmd.Commands() {
+		checkUsage(sub)
+	}
+	if cmd.HasSubCommands() && !cmd.Runnable() {
+		cmd.Args = cobra.NoArgs
+		cmd.RunE = func(c *cobra.Command, _ []string) error { return c.Help() }
+	}
+	if !cmd.HasParent() {
+		cmd.Args = cobra.NoArgs
+	}
+	validate := cmd.Args
+	cmd.Args = func(c *cobra.Command, args []string) error { return cmdutil.CheckArgs(c, validate, args) }
+}
+
+// newHelp returns the "help" command. Unlike cobra's, it fails when asked
+// about a command that does not exist, instead of printing the root's help
+// and succeeding.
+func newHelp(root *cobra.Command) *cobra.Command {
+	return &cobra.Command{
+		Use:   "help [command]",
+		Short: "Help about any command",
+		Long: fmt.Sprintf(`Print the help of a command: "%[1]s help message send" is
+"%[1]s message send --help".`, appinfo.Name),
+		// The mistake is about the commands of the root: that is whose
+		// help the error points at.
+		Args: func(_ *cobra.Command, args []string) error {
+			return cmdutil.CheckArgs(root, func(*cobra.Command, []string) error {
+				if target, rest, err := root.Find(args); err != nil || target == nil || len(rest) > 0 {
+					return fmt.Errorf("unknown help topic %q: it is not a command of %s", strings.Join(args, " "), appinfo.Name)
+				}
+				return nil
+			}, args)
+		},
+		RunE: func(_ *cobra.Command, args []string) error {
+			target, _, err := root.Find(args)
+			if err != nil {
+				return err
+			}
+			target.InitDefaultHelpFlag()
+			return target.Help()
+		},
+	}
 }
 
 // Run executes the CLI with the given arguments (without the program name)
@@ -139,6 +211,8 @@ func (r runner) run(args []string, stdout, stderr io.Writer) int {
 	cmd.SetOut(stdout)
 	cmd.SetErr(stderr)
 
+	warnAboutEnvironment(stderr)
+
 	// The watchdog bounds every command that does not wait on a human, so
 	// that an agent is never left hanging on a stuck network call.
 	timeout := CommandTimeout()
@@ -156,17 +230,20 @@ func (r runner) run(args []string, stdout, stderr io.Writer) int {
 	}
 	rt.SetWatchdogCanceller(stopWatchdog)
 
+	// ran is the command cobra selected, once its command line was
+	// accepted.
 	var ran *cobra.Command
-	finishUpdateCheck := func(io.Writer) {}
 	cmd.PersistentPreRunE = func(c *cobra.Command, _ []string) error {
+		// cobra checks these itself, later; doing it here words the
+		// failure like the other usage errors.
+		if err := cmdutil.CheckFlags(c); err != nil {
+			return err
+		}
 		ran = c
 		if clictx.HasNoTimeout(c) {
 			return nil
 		}
 		watchdog = time.AfterFunc(timeout, func() { close(timedOut) })
-		if !isUpdateCommand(c) && c.HasParent() {
-			finishUpdateCheck = update.StartBackgroundCheck(c.Context())
-		}
 		return nil
 	}
 
@@ -201,30 +278,67 @@ func (r runner) run(args []string, stdout, stderr io.Writer) int {
 
 	if err != nil {
 		if errors.Is(err, context.Canceled) && signalCtx.Err() != nil {
-			fmt.Fprintln(stderr, "interrupted")
+			// As for a timeout: what a writing command was doing may
+			// have reached Slack all the same.
+			if ran != nil && clictx.ChangesSlack(commandName(ran)) {
+				fmt.Fprintln(stderr, "interrupted. What the command was sending or changing may still have gone through: check before retrying.")
+			} else {
+				fmt.Fprintln(stderr, "interrupted")
+			}
 			return 130
 		}
-		fmt.Fprintln(stderr, ErrorMessage(err))
-		if ran == nil {
-			// No command ran: cobra rejected the command line itself.
-			fmt.Fprintf(stderr, "Run \"%s --help\" for usage.\n", appinfo.Name)
+		var usage *cmdutil.UsageError
+		if errors.As(err, &usage) {
+			// The command line was rejected: say how, then where the
+			// usage of the command that rejected it is.
+			fmt.Fprintln(stderr, usage.Message())
+			fmt.Fprintf(stderr, "Run \"%s --help\" for usage.\n", usage.Cmd.CommandPath())
+			return ExitError
 		}
+		fmt.Fprintln(stderr, ErrorMessage(err))
 		return ExitError
 	}
 	for _, w := range incomplete.List() {
 		fmt.Fprintln(stderr, "Warning: "+w)
 	}
-	finishUpdateCheck(stderr)
 	return ExitOK
 }
 
-func isUpdateCommand(c *cobra.Command) bool {
-	for ; c != nil; c = c.Parent() {
-		if c.Name() == "update" && c.Parent() != nil && !c.Parent().HasParent() {
-			return true
+// commandName returns the path of c below the root ("message send").
+func commandName(c *cobra.Command) string {
+	return strings.TrimPrefix(c.CommandPath(), c.Root().Name()+" ")
+}
+
+// durationVariables are the environment variables read as a duration in
+// milliseconds (appinfo.EnvDurationMS), by suffix, and whether 0 is a
+// value they accept. The packages that read them fall back to their
+// default on a value they cannot use; Run warns about it.
+var durationVariables = []struct {
+	suffix    string
+	allowZero bool
+}{
+	{"COMMAND_TIMEOUT_MS", false},
+	{"API_TIMEOUT_MS", false},
+	{"RATE_LIMIT_MAX_WAIT_MS", true},
+	{"KEYCHAIN_TIMEOUT_MS", false},
+}
+
+// warnAboutEnvironment reports, one line each, the duration variables
+// whose value is not usable. A warning rather than an error: the default
+// that applies instead is a sound one, and a stray variable must not keep
+// "--help" or "auth whoami" from running; but whoever set it, to a value
+// that does nothing, has to be told.
+func warnAboutEnvironment(stderr io.Writer) {
+	const ignored = "Warning: %v. The variable is ignored and the default applies.\n"
+	for _, v := range durationVariables {
+		if err := appinfo.CheckEnvDurationMS(v.suffix, v.allowZero); err != nil {
+			fmt.Fprintf(stderr, ignored, err)
 		}
 	}
-	return false
+	// The one duration variable that is not tool-specific.
+	if err := slackapi.CheckLegacyAPITimeout(); err != nil {
+		fmt.Fprintf(stderr, ignored, err)
+	}
 }
 
 // ErrorMessage renders an error for the user on a single line.

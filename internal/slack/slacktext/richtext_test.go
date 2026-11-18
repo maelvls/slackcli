@@ -126,6 +126,46 @@ func TestParseInlineElements(t *testing.T) {
 			{"type":"text","text":"bien","style":{"italic":true}},
 			{"type":"text","text":"»"}]`},
 		{"link with an empty label", "<https://example.com|>", `[{"type":"link","url":"https://example.com"}]`},
+		{"scheme without a host is not a link", "prefix URLs with https://. Or http://, or (https://)", `[{"type":"text","text":"prefix URLs with https://. Or http://, or (https://)"}]`},
+		{"double colons are not emoji", "a::b::c and std::vector::iterator", `[{"type":"text","text":"a::b::c and std::vector::iterator"}]`},
+		{"adjacent emoji", ":tada::tada: :a::b::c:", `[
+			{"type":"emoji","name":"tada"},
+			{"type":"emoji","name":"tada"},
+			{"type":"text","text":" "},
+			{"type":"emoji","name":"a"},
+			{"type":"emoji","name":"b"},
+			{"type":"emoji","name":"c"}]`},
+		// The custom emoji of a workspace are in no table, and Slack's own
+		// clients send them as emoji elements: any syntactically valid
+		// shortcode is one, not only the names of the built-in table.
+		{"custom emoji", "ship it :partyparrot: now, :shipit:", `[
+			{"type":"text","text":"ship it "},
+			{"type":"emoji","name":"partyparrot"},
+			{"type":"text","text":" now, "},
+			{"type":"emoji","name":"shipit"}]`},
+		{"custom emoji next to a standard one", ":partyparrot::rocket: :rocket::party-parrot:", `[
+			{"type":"emoji","name":"partyparrot"},
+			{"type":"emoji","name":"rocket"},
+			{"type":"text","text":" "},
+			{"type":"emoji","name":"rocket"},
+			{"type":"emoji","name":"party-parrot"}]`},
+		{"custom emoji in a styled span, but not in code", "*bold :partyparrot: text* and `:partyparrot:`", `[
+			{"type":"text","text":"bold ","style":{"bold":true}},
+			{"type":"emoji","name":"partyparrot"},
+			{"type":"text","text":" text","style":{"bold":true}},
+			{"type":"text","text":" and "},
+			{"type":"text","text":":partyparrot:","style":{"code":true}}]`},
+		{"skin tone after a custom emoji", ":partyparrot::skin-tone-3:", `[{"type":"emoji","name":"partyparrot","skin_tone":3}]`},
+		{"country flags, in the table or not", ":flag-fr: :flag-zzz:", `[
+			{"type":"emoji","name":"flag-fr"},
+			{"type":"text","text":" "},
+			{"type":"emoji","name":"flag-zzz"}]`},
+		{"what is not a shortcode stays text", "a :b c: d :é: :: : :x y: 12:30:45 foo:bar: :baz:qux", `[{"type":"text","text":"a :b c: d :é: :: : :x y: 12:30:45 foo:bar: :baz:qux"}]`},
+		{"user IDs without a digit", "@UKTRBHMPQ @WKTRBHMPQXZ @UPDATE @WARNING @USERNAME @UNBOXTHERAPY", `[
+			{"type":"user","user_id":"UKTRBHMPQ"},
+			{"type":"text","text":" "},
+			{"type":"user","user_id":"WKTRBHMPQXZ"},
+			{"type":"text","text":" @UPDATE @WARNING @USERNAME @UNBOXTHERAPY"}]`},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -256,8 +296,24 @@ func TestTextToRichTextBlocks(t *testing.T) {
 		{"unclosed code block runs to the end", "- a\n```\ncode\n- still code", false, `[
 			{"type":"rich_text_list","style":"bullet","elements":[` + item("a") + `]},
 			{"type":"rich_text_preformatted","elements":[{"type":"text","text":"code\n- still code"}]}]`},
-		{"empty code block is dropped", "- a\n```\n```", false, `[
-			{"type":"rich_text_list","style":"bullet","elements":[` + item("a") + `]}]`},
+		{"empty code block is kept as text", "- a\n```\n```", false, `[
+			{"type":"rich_text_list","style":"bullet","elements":[` + item("a") + `]},
+			` + item("```\\n```\\n") + `]`},
+		{"lone fence after a list is kept as text", "- x\n```", false, `[
+			{"type":"rich_text_list","style":"bullet","elements":[` + item("x") + `]},
+			` + item("```\\n") + `]`},
+		{"fence inside a sentence does not pair with a later block", "use ``` here\n```\ncode\n```\nafter", true, `[
+			` + item("use ``` here\\n") + `,
+			{"type":"rich_text_preformatted","elements":[{"type":"text","text":"code"}]},
+			` + item("after\\n") + `]`},
+		{"fence inside a sentence, closed on its line", "- a\nrun ```x``` now", false, `[
+			{"type":"rich_text_list","style":"bullet","elements":[` + item("a") + `]},
+			` + item("run \\n") + `,
+			{"type":"rich_text_preformatted","elements":[{"type":"text","text":"x"}]},
+			` + item("now\\n") + `]`},
+		{"fence inside a sentence, closed on a later line, is text", "- a\nsay ```foo\nbar```", false, `[
+			{"type":"rich_text_list","style":"bullet","elements":[` + item("a") + `]},
+			` + item("say ```foo\\nbar```\\n") + `]`},
 		{"CRLF line endings", "- a\r\n- b\r\n", false, `[
 			{"type":"rich_text_list","style":"bullet","elements":[` + item("a") + `,` + item("b") + `]}]`},
 		{"first line of a code block that is not a language tag is code", "- a\n```make\nmake install```", false, `[

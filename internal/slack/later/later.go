@@ -8,10 +8,10 @@ package later
 
 import (
 	"context"
-	"errors"
 	"fmt"
 
 	"github.com/maelvls/slackcli/internal/appinfo"
+	"github.com/maelvls/slackcli/internal/slack/enrich"
 	"github.com/maelvls/slackcli/internal/slackapi"
 )
 
@@ -41,14 +41,6 @@ func itemParams(channelID, ts string) map[string]any {
 	return map[string]any{"item_id": channelID, "item_type": "message", "ts": ts}
 }
 
-// isFatal reports whether err must abort an operation rather than be
-// worked around: the command was cancelled, the credentials are dead (the
-// caller refreshes them and retries), or Slack is rate limiting us.
-func isFatal(ctx context.Context, err error) bool {
-	var rl *slackapi.RateLimitError
-	return err != nil && (ctx.Err() != nil || slackapi.IsAuthError(err) || errors.As(err, &rl))
-}
-
 // Mark changes the state of a saved message (saved.update).
 func Mark(ctx context.Context, client *slackapi.Client, channelID, ts string, mark MarkAction) error {
 	if err := requireBrowser(client); err != nil {
@@ -70,11 +62,11 @@ func Reopen(ctx context.Context, client *slackapi.Client, channelID, ts string) 
 		return err
 	}
 	errUncompleted := Mark(ctx, client, channelID, ts, MarkUncompleted)
-	if isFatal(ctx, errUncompleted) {
+	if enrich.MustAbortRequired(ctx, errUncompleted) {
 		return errUncompleted
 	}
 	errUnarchived := Mark(ctx, client, channelID, ts, MarkUnarchived)
-	if isFatal(ctx, errUnarchived) {
+	if enrich.MustAbortRequired(ctx, errUnarchived) {
 		return errUnarchived
 	}
 	if errUncompleted == nil || errUnarchived == nil {

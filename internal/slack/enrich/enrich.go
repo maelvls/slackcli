@@ -41,6 +41,22 @@ func MustAbort(ctx context.Context, err error) bool {
 	return err != nil && (ctx.Err() != nil || slackapi.IsAuthError(err))
 }
 
+// MustAbortRequired is MustAbort for a required lookup: one of several
+// calls that look for the very thing the command is about (the message, the
+// channel a name designates, the user of an e-mail address), where a call
+// that fails normally only means "not found this way, try the next one".
+// It reports whether err must fail the command instead: the command was
+// cancelled, the credentials are no longer valid, or Slack is rate
+// limiting the call.
+//
+// The rate limit is what sets it apart from MustAbort. An optional lookup
+// that is rate limited is skipped and the result printed without it; a
+// required one has no result to print, and going on to conclude "not
+// found" about something that may well exist would be wrong.
+func MustAbortRequired(ctx context.Context, err error) bool {
+	return MustAbort(ctx, err) || IsRateLimit(err)
+}
+
 // IsRateLimit reports whether err is Slack refusing a call for now.
 func IsRateLimit(err error) bool {
 	var rl *slackapi.RateLimitError
@@ -94,8 +110,24 @@ func (g *Gate) Skipped() (int, error) {
 	return g.skipped, g.err
 }
 
+// Cause describes the error of a rate-limited enrichment (the one
+// [Gate.Skipped] returns) for a warning that ends with [Hint]: which call
+// was limited and for how long, without the advice the error itself gives,
+// which Hint repeats. Any other error is described as it is.
+func Cause(err error) string {
+	var rl *slackapi.RateLimitError
+	if errors.As(err, &rl) {
+		return rl.Summary()
+	}
+	if err == nil {
+		return ""
+	}
+	return err.Error()
+}
+
 // Hint is the end of a warning about a rate-limited enrichment: what the
-// reader can do about it.
+// reader can do about it. Put the error in the warning with [Cause], so
+// that the advice is given once.
 func Hint() string {
 	return fmt.Sprintf("run the command again in a minute, or set %s to wait and retry automatically", appinfo.EnvName("RATE_LIMIT_MAX_WAIT_MS"))
 }

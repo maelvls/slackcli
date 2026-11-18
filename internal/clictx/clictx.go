@@ -4,7 +4,6 @@ package clictx
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -79,7 +78,7 @@ func (c *Context) Hintf(format string, args ...any) {
 
 // SafeMode reports whether safe mode is on (--safe-mode or
 // SLACKCLI_SAFE_MODE): nothing may be posted, edited or deleted without a
-// human reviewing it. See SafeModeSummary for what it covers, and
+// human reviewing it. See SafeModeHelp for what it covers, and
 // CheckSafeMode to refuse a command.
 //
 // It fails closed. The flag and the environment can each turn it on and
@@ -88,6 +87,18 @@ func (c *Context) Hintf(format string, args ...any) {
 // value ("", "0", "false", "no", "off") means on, under the current or the
 // legacy AGENT_SLACK_ name (see appinfo.SafeModeEnv).
 func (c *Context) SafeMode() bool { return c.SafeModeFlag || appinfo.SafeModeEnv() }
+
+// SafeModeSource names what turned safe mode on, for messages: the
+// --safe-mode flag, the environment variables (the legacy
+// AGENT_SLACK_SAFE_MODE included), or all of them, as in "--safe-mode and
+// SLACKCLI_SAFE_MODE". It is "" when safe mode is off.
+func (c *Context) SafeModeSource() string {
+	var sources []string
+	if c.SafeModeFlag {
+		sources = append(sources, "--safe-mode")
+	}
+	return strings.Join(append(sources, appinfo.SafeModeEnvNames()...), " and ")
+}
 
 // EffectiveWorkspace returns the workspace selector to use: the --workspace
 // flag if set, else SLACK_WORKSPACE_URL, else "".
@@ -104,11 +115,10 @@ func AddWorkspaceFlag(cmd *cobra.Command, target *string) {
 }
 
 // noTimeoutAnnotation marks commands that wait on a human.
-const noTimeoutAnnotation = "slackcli/no-timeout"
+const noTimeoutAnnotation = appinfo.Name + "/no-timeout"
 
 // NoTimeout exempts cmd from the global command timeout. Use it for
-// commands that wait on a human or legitimately run long (interactive
-// editor, self-update).
+// commands that wait on a human (the interactive editor).
 func NoTimeout(cmd *cobra.Command) *cobra.Command {
 	if cmd.Annotations == nil {
 		cmd.Annotations = map[string]string{}
@@ -139,31 +149,6 @@ func (c *Context) DisableTimeout() {
 	if cancel != nil {
 		cancel()
 	}
-}
-
-// EnvAuthConfigured reports whether credentials come from SLACK_TOKEN.
-func EnvAuthConfigured() bool { return strings.TrimSpace(os.Getenv("SLACK_TOKEN")) != "" }
-
-// authFromEnv builds credentials from SLACK_TOKEN (+ SLACK_COOKIE_D for
-// xoxc tokens). ok is false when SLACK_TOKEN is unset.
-func authFromEnv() (a slackapi.Auth, ok bool, err error) {
-	token := strings.TrimSpace(os.Getenv("SLACK_TOKEN"))
-	if token == "" {
-		return a, false, nil
-	}
-	if strings.HasPrefix(token, "xoxc-") {
-		cookie := strings.TrimSpace(os.Getenv("SLACK_COOKIE_D"))
-		if cookie == "" {
-			cookie = strings.TrimSpace(os.Getenv("SLACK_COOKIE"))
-		}
-		// Accept "d=xoxd-…" as copied from a Cookie header.
-		cookie = strings.TrimPrefix(cookie, "d=")
-		if cookie == "" {
-			return a, false, errors.New("SLACK_TOKEN is a browser token (xoxc-) but SLACK_COOKIE_D is not set")
-		}
-		return slackapi.Auth{Type: slackapi.AuthBrowser, XoxcToken: token, XoxdCookie: slackapi.DecodeCookieD(cookie)}, true, nil
-	}
-	return slackapi.Auth{Type: slackapi.AuthStandard, Token: token}, true, nil
 }
 
 // AssertWorkspaceForChannelNames fails when a channel is given by name

@@ -43,7 +43,8 @@ func newListCommand(rt *clictx.Context) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "list",
 		Short: "List users in the workspace",
-		Long: `List users in the workspace, deactivated ones included (they have "deleted": true).
+		Long: `List users in the workspace, deactivated ones included (they have
+"deleted": true).
 
 Prints {"users": […], "next_cursor": …}. Each user has id, name (the
 handle), real_name, display_name, email, title, tz, is_bot, deleted,
@@ -52,8 +53,8 @@ have a DM with them. "users" is [] when the page is empty. next_cursor is
 present when there are more users: pass it to --cursor.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			if limit < 1 || limit > maxListLimit {
-				return fmt.Errorf("invalid --limit value %d: must be between 1 and %d (use --cursor with next_cursor to get more)", limit, maxListLimit)
+			if err := cmdutil.CheckLimit(limit, maxListLimit, "use --cursor with next_cursor to get more"); err != nil {
+				return err
 			}
 			ctx := cmd.Context()
 			ws := rt.EffectiveWorkspace(workspace)

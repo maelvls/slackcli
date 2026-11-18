@@ -10,8 +10,10 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/maelvls/slackcli/internal/appinfo"
@@ -35,10 +37,15 @@ type Workspace struct {
 // Workspaces[i].Auth may be keychain placeholders: use Store.Resolve to get
 // usable credentials.
 type Credentials struct {
-	Version             int         `json:"version"`
-	UpdatedAt           string      `json:"updated_at,omitempty"`
-	DefaultWorkspaceURL string      `json:"default_workspace_url,omitempty"`
-	Workspaces          []Workspace `json:"workspaces"`
+	Version             int    `json:"version"`
+	UpdatedAt           string `json:"updated_at,omitempty"`
+	DefaultWorkspaceURL string `json:"default_workspace_url,omitempty"`
+	// LegacyMigrated records that the predecessor's credentials were
+	// imported (see Store.LegacyPath), so that they are imported once only.
+	// A file that exists does not say as much: it may have been written
+	// while the predecessor's secrets could not be read.
+	LegacyMigrated bool        `json:"legacy_migrated,omitempty"`
+	Workspaces     []Workspace `json:"workspaces"`
 }
 
 // Find returns the workspace with the given (normalized) URL.
@@ -72,23 +79,34 @@ func (c *Credentials) Default() *Workspace {
 type Store struct {
 	// Path is the credentials file.
 	Path string
-	// Keychain holds the secrets; nil means secrets stay in the file.
+	// Keychain holds the secrets; nil means secrets stay in the file. A
+	// secret that the keychain does not take is kept in the file too, with
+	// a warning (see SecretsStorage).
 	Keychain Keychain
 	// Service is the keychain service name.
 	Service string
 	// LegacyPath and LegacyService locate the predecessor's (agent-slack)
-	// credentials, imported once when Path does not exist. Empty disables
-	// the migration.
+	// credentials, imported once (see Credentials.LegacyMigrated). Empty
+	// disables the migration.
 	LegacyPath    string
 	LegacyService string
 	// Warnf reports a problem that does not stop the command (a corrupt
-	// credentials file). Nil discards the warning.
+	// credentials file, a migration that has to wait, secrets that the
+	// keychain did not take). Nil discards the warning.
 	Warnf func(format string, args ...any)
 
-	mu            sync.Mutex
-	loaded        *Credentials
-	resolved      map[string]slackapi.Auth
-	warnedCorrupt bool
+	mu       sync.Mutex
+	loaded   *Credentials
+	resolved map[string]slackapi.Auth
+	// legacyUnmigrated holds the predecessor's workspaces that the last
+	// reload could not import (their secrets are placeholders).
+	legacyUnmigrated []Workspace
+	warnedCorrupt    bool
+	warnedMigration  bool
+	warnedLegacy     bool
+	// warnedPlaintext holds the workspaces for which the keychain fallback
+	// was reported already.
+	warnedPlaintext map[string]bool
 }
 
 // DefaultStore is the store used by the CLI.
@@ -153,42 +171,75 @@ func (s *Store) load() (*Credentials, error) {
 	if s.loaded != nil {
 		return s.loaded, nil
 	}
-	creds, err := s.readFile()
-	if errors.Is(err, fs.ErrNotExist) {
-		if s.hasLegacy() {
-			// The migration writes the file: do it under the lock.
-			unlock, err := lockFile(s.Path)
-			if err != nil {
-				return nil, err
-			}
+	creds, err := s.readFileOrEmpty()
+	if err != nil {
+		return nil, err
+	}
+	if pending, _ := s.legacyPending(creds); len(pending) > 0 {
+		// The migration writes the file: do it under the lock. A command
+		// that only reads does not fail when the lock cannot be taken (a
+		// directory that is not writable): it goes without the migration.
+		unlock, lockErr := lockFile(s.Path)
+		if lockErr == nil {
 			defer unlock()
 			return s.reload()
 		}
-		creds, err = &Credentials{Version: 1}, nil
-	}
-	if err != nil {
-		return nil, err
+		s.warnMigration(lockErr)
 	}
 	s.loaded = creds
 	return creds, nil
 }
 
 // reload reads the credentials file again, ignoring the cache, and
-// migrates the predecessor's credentials when there is no file yet. The
-// caller holds the file lock.
+// migrates the predecessor's credentials if that is still to be done. A
+// migration that fails is reported as a warning and left for a later run.
+// The caller holds the file lock.
 func (s *Store) reload() (*Credentials, error) {
-	creds, err := s.readFile()
-	if errors.Is(err, fs.ErrNotExist) {
-		if migrated, mErr := s.migrateLegacy(); mErr == nil && migrated != nil {
-			return migrated, nil
-		}
-		creds, err = &Credentials{Version: 1}, nil
-	}
+	creds, err := s.readFileOrEmpty()
 	if err != nil {
 		return nil, err
 	}
 	s.loaded = creds
-	return creds, nil
+	s.legacyUnmigrated = nil
+	if pending, defaultURL := s.legacyPending(creds); len(pending) > 0 {
+		if err := s.migrateLegacy(creds, pending, defaultURL); err != nil {
+			s.legacyUnmigrated = pending
+			s.warnMigration(err)
+		}
+	}
+	return s.loaded, nil
+}
+
+// readFileOrEmpty is readFile, with a missing file read as an empty set.
+func (s *Store) readFileOrEmpty() (*Credentials, error) {
+	creds, err := s.readFile()
+	if errors.Is(err, fs.ErrNotExist) {
+		return &Credentials{Version: 1}, nil
+	}
+	return creds, err
+}
+
+// warnMigration says once that the predecessor's credentials are still to
+// be imported.
+func (s *Store) warnMigration(cause error) {
+	if s.warnedMigration || s.Warnf == nil {
+		return
+	}
+	s.warnedMigration = true
+	s.Warnf("warning: the workspaces stored in %s could not be imported yet (%v): they are left there, and the next run tries again",
+		s.LegacyPath, cause)
+}
+
+// warnLegacyUnreadable says once that the predecessor's credentials file
+// cannot be read, so that workspaces do not silently fail to migrate. The
+// migration stays to be done: a later run reads the file again.
+func (s *Store) warnLegacyUnreadable(cause error) {
+	if s.warnedLegacy || s.Warnf == nil {
+		return
+	}
+	s.warnedLegacy = true
+	s.Warnf(`warning: the credentials file of %s, %s, cannot be read (%v), so its workspaces were not imported: repair or delete that file, or import credentials again (e.g. "%s auth import-desktop")`,
+		appinfo.LegacyName, s.LegacyPath, cause, appinfo.Name)
 }
 
 // update is one read-modify-write cycle on the credentials file. It holds
@@ -251,7 +302,8 @@ func (s *Store) preserveCorrupt(cause error) {
 }
 
 // copyFileExclusive copies src to dst (0600). An existing dst is left
-// alone: it is an earlier copy of the same file.
+// alone: it is an earlier copy of the same file. A copy that fails half-way
+// is removed, since the next run would take it for a complete one.
 func copyFileExclusive(src, dst string) error {
 	raw, err := os.ReadFile(src)
 	if err != nil {
@@ -264,11 +316,11 @@ func copyFileExclusive(src, dst string) error {
 	if err != nil {
 		return err
 	}
-	if _, err := f.Write(raw); err != nil {
-		f.Close()
+	if err := writeAndSync(f, raw); err != nil {
+		_ = os.Remove(dst)
 		return err
 	}
-	return f.Close()
+	return nil
 }
 
 func readCredentialsFile(path string) (*Credentials, error) {
@@ -283,7 +335,7 @@ func readCredentialsFile(path string) (*Credentials, error) {
 	if err := json.Unmarshal(raw, &parsed); err != nil {
 		return nil, fmt.Errorf("%w: %v", errCorrupt, err)
 	}
-	out := &Credentials{Version: 1, UpdatedAt: parsed.UpdatedAt}
+	out := &Credentials{Version: 1, UpdatedAt: parsed.UpdatedAt, LegacyMigrated: parsed.LegacyMigrated}
 	for _, w := range parsed.Workspaces {
 		// A workspace whose URL is not a Slack origin is dropped: its
 		// credentials must never be sent there.
@@ -305,34 +357,45 @@ func readCredentialsFile(path string) (*Credentials, error) {
 	return out, nil
 }
 
-// hasLegacy reports whether there are predecessor credentials to migrate.
-func (s *Store) hasLegacy() bool {
-	if s.LegacyPath == "" || s.LegacyPath == s.Path {
-		return false
-	}
-	_, err := os.Stat(s.LegacyPath)
-	return err == nil
-}
-
-// migrateLegacy imports the predecessor's credentials (file + keychain
-// service) into this store. It returns nil when there is nothing to import.
-// Workspaces whose secrets are gone are left behind; if the keychain cannot
-// be read at all, nothing is migrated, so that the next run tries again
-// instead of dropping workspaces for good.
-func (s *Store) migrateLegacy() (*Credentials, error) {
-	if !s.hasLegacy() {
-		return nil, nil
+// legacyPending returns the predecessor's workspaces that are still to be
+// imported into cur, and the predecessor's default workspace. There are
+// none once the migration was done, and a workspace that cur has already
+// is not one: what was saved since is newer.
+func (s *Store) legacyPending(cur *Credentials) (pending []Workspace, defaultURL string) {
+	if cur.LegacyMigrated || s.LegacyPath == "" || s.LegacyPath == s.Path {
+		return nil, ""
 	}
 	legacy, err := readCredentialsFile(s.LegacyPath)
-	if err != nil || len(legacy.Workspaces) == 0 {
-		return nil, err
+	if err != nil {
+		// No file: nothing to import. One that cannot be read may hold
+		// workspaces that are not imported: say so.
+		if !errors.Is(err, fs.ErrNotExist) {
+			s.warnLegacyUnreadable(err)
+		}
+		return nil, ""
 	}
-	next := &Credentials{Version: 1}
 	for _, w := range legacy.Workspaces {
+		if cur.Find(w.URL) == nil {
+			pending = append(pending, w)
+		}
+	}
+	return pending, legacy.DefaultWorkspaceURL
+}
+
+// migrateLegacy adds the predecessor's workspaces (file + keychain service)
+// to cur, marks the migration as done and saves. Workspaces whose secrets
+// are gone are left behind; if the keychain cannot be read at all, nothing
+// is migrated and the migration is not marked as done, so that a later run
+// tries again instead of dropping workspaces for good, whatever was saved
+// in between.
+func (s *Store) migrateLegacy(cur *Credentials, pending []Workspace, defaultURL string) error {
+	next := *cur
+	next.Workspaces = append([]Workspace(nil), cur.Workspaces...)
+	for _, w := range pending {
 		a, err := resolveAuth(s.Keychain, s.LegacyService, w)
 		var se *SecretsError
 		if errors.As(err, &se) && !se.Missing() {
-			return nil, err
+			return err
 		}
 		if err != nil {
 			continue
@@ -340,19 +403,43 @@ func (s *Store) migrateLegacy() (*Credentials, error) {
 		w.Auth = a
 		next.Workspaces = append(next.Workspaces, w)
 	}
-	if len(next.Workspaces) == 0 {
-		return nil, nil
+	if len(cur.Workspaces) == 0 && next.Find(defaultURL) != nil {
+		next.DefaultWorkspaceURL = defaultURL
 	}
-	if next.Find(legacy.DefaultWorkspaceURL) != nil {
-		next.DefaultWorkspaceURL = legacy.DefaultWorkspaceURL
+	next.LegacyMigrated = true
+	return s.save(&next)
+}
+
+// unmigratedStandard reports whether the predecessor's credentials, which
+// could not be imported yet, hold a standard token for the workspace.
+func (s *Store) unmigratedStandard(workspaceURL string) bool {
+	for _, w := range s.legacyUnmigrated {
+		if w.URL == workspaceURL {
+			return w.Auth.Type == slackapi.AuthStandard
+		}
 	}
-	if err := s.save(next); err != nil {
-		return nil, err
-	}
-	return s.loaded, nil
+	return false
 }
 
 func isSecret(v string) bool { return v != "" && v != keychainPlaceholder }
+
+// storedSecrets tells how many of the secrets that a's type needs are real
+// values (as opposed to keychain placeholders), and how many it needs.
+func storedSecrets(a slackapi.Auth) (real, needed int) {
+	var secrets []string
+	switch a.Type {
+	case slackapi.AuthStandard:
+		secrets = []string{a.Token}
+	case slackapi.AuthBrowser:
+		secrets = []string{a.XoxcToken, a.XoxdCookie}
+	}
+	for _, v := range secrets {
+		if isSecret(v) {
+			real++
+		}
+	}
+	return real, len(secrets)
+}
 
 // resolveAuth returns usable credentials for w, reading placeholders from
 // the keychain. The error is a *SecretsError: a secret is missing, or the
@@ -429,6 +516,7 @@ func (s *Store) save(creds *Credentials) error {
 		Version:             1,
 		UpdatedAt:           time.Now().UTC().Format("2006-01-02T15:04:05.000Z"),
 		DefaultWorkspaceURL: creds.DefaultWorkspaceURL,
+		LegacyMigrated:      creds.LegacyMigrated,
 		Workspaces:          make([]Workspace, len(creds.Workspaces)),
 	}
 	copy(out.Workspaces, creds.Workspaces)
@@ -439,28 +527,53 @@ func (s *Store) save(creds *Credentials) error {
 		out.DefaultWorkspaceURL = out.Workspaces[0].URL
 	}
 
-	stash := func(account string, secret *string) {
+	// refused collects, in order, the workspaces of which the keychain did
+	// not take a secret, and why (the first reason is enough).
+	var refused []string
+	var refusedWhy error
+	stash := func(workspaceURL, account string, secret *string) {
 		if s.Keychain == nil || !isSecret(*secret) {
 			return
 		}
-		if cur, err := s.Keychain.Get(s.Service, account); (err == nil && cur == *secret) || s.Keychain.Set(s.Service, account, *secret) {
+		if cur, err := s.Keychain.Get(s.Service, account); err == nil && cur == *secret {
 			*secret = keychainPlaceholder
+			return
+		}
+		err := s.Keychain.Set(s.Service, account, *secret)
+		if err == nil {
+			*secret = keychainPlaceholder
+			return
+		}
+		// The secret stays in the file: refusing to save would lock the
+		// user out. It is said below, once the file is written.
+		if len(refused) == 0 {
+			refusedWhy = err
+		}
+		if len(refused) == 0 || refused[len(refused)-1] != workspaceURL {
+			refused = append(refused, workspaceURL)
 		}
 	}
 	resolved := map[string]slackapi.Auth{}
 	for i := range out.Workspaces {
 		w := &out.Workspaces[i]
-		if a, ok := s.resolved[w.URL]; ok && !isSecret(w.Auth.BearerToken()) {
-			resolved[w.URL] = a
-		} else if isSecret(w.Auth.BearerToken()) {
+		// Only complete credentials are cached. An auth read back from a
+		// file that holds one secret and a placeholder for the other (the
+		// keychain refused one of them) is neither what is to be saved in
+		// full nor what was resolved earlier: resolveAuth sorts it out.
+		switch real, needed := storedSecrets(w.Auth); {
+		case needed > 0 && real == needed:
 			resolved[w.URL] = w.Auth
+		case real == 0:
+			if a, ok := s.resolved[w.URL]; ok {
+				resolved[w.URL] = a
+			}
 		}
 		switch w.Auth.Type {
 		case slackapi.AuthStandard:
-			stash("token:"+w.URL, &w.Auth.Token)
+			stash(w.URL, "token:"+w.URL, &w.Auth.Token)
 		case slackapi.AuthBrowser:
-			stash("xoxc:"+w.URL, &w.Auth.XoxcToken)
-			stash("xoxd:"+w.URL, &w.Auth.XoxdCookie)
+			stash(w.URL, "xoxc:"+w.URL, &w.Auth.XoxcToken)
+			stash(w.URL, "xoxd:"+w.URL, &w.Auth.XoxdCookie)
 		}
 	}
 
@@ -473,10 +586,73 @@ func (s *Store) save(creds *Credentials) error {
 	}
 	s.loaded = out
 	s.resolved = resolved
+	s.warnPlaintext(refused, refusedWhy)
 	return nil
 }
 
-func writeFileAtomic(path string, data []byte) error {
+// warnPlaintext says that secrets which belong in the keychain were written
+// to the credentials file instead, once per workspace: the next saves find
+// them there and try the keychain again, which need not be said each time.
+func (s *Store) warnPlaintext(workspaces []string, cause error) {
+	var fresh []string
+	for _, u := range workspaces {
+		if !s.warnedPlaintext[u] {
+			fresh = append(fresh, u)
+		}
+	}
+	if len(fresh) == 0 || s.Warnf == nil {
+		return
+	}
+	if s.warnedPlaintext == nil {
+		s.warnedPlaintext = map[string]bool{}
+	}
+	for _, u := range fresh {
+		s.warnedPlaintext[u] = true
+	}
+	s.Warnf(`warning: the secrets of %s were stored in plain text in the credentials file %s (readable by your user only) instead of the keychain: %v. They work from there. To move them into the keychain, make it usable (unlock it, answer its prompt, or raise %s), then save credentials again, e.g. with "%s auth import-desktop" or the same "auth add"`,
+		strings.Join(fresh, ", "), s.Path, cause, appinfo.EnvName("KEYCHAIN_TIMEOUT_MS"), appinfo.Name)
+}
+
+// SecretsStorage says where the secrets of a stored workspace are kept.
+type SecretsStorage string
+
+const (
+	// SecretsInKeychain means that the credentials file holds placeholders
+	// for the secrets of the workspace, which are expected in the keychain
+	// (Resolve tells whether they are still there).
+	SecretsInKeychain SecretsStorage = "keychain"
+	// SecretsInFile means that at least one secret of the workspace is in
+	// plain text in the credentials file. That is the rule where there is
+	// no keychain (Store.Keychain is nil); where there is one, the keychain
+	// did not take the secret, and the next save tries again.
+	SecretsInFile SecretsStorage = "file"
+)
+
+// SecretsStorage tells where the secrets of a workspace returned by Load
+// are kept, without reading the keychain.
+func (s *Store) SecretsStorage(w Workspace) SecretsStorage {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	// What was loaded or saved last says it, not a copy of the workspace
+	// whose placeholders the caller may have replaced.
+	if s.loaded != nil {
+		if cur := s.loaded.Find(w.URL); cur != nil {
+			w = *cur
+		}
+	}
+	if real, _ := storedSecrets(w.Auth); real > 0 {
+		return SecretsInFile
+	}
+	return SecretsInKeychain
+}
+
+// writeFileAtomic replaces path with a 0600 file holding data, so that a
+// reader sees either the old content or the new one, and a crash leaves one
+// of the two: the data is written to a temporary file in the same directory
+// (a rename does not cross file systems), flushed to disk, then renamed
+// over path. The temporary file is created 0600 before anything is written
+// to it, and removed if the replacement fails.
+func writeFileAtomic(path string, data []byte) (err error) {
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err
@@ -485,19 +661,53 @@ func writeFileAtomic(path string, data []byte) error {
 	if err != nil {
 		return err
 	}
-	defer os.Remove(tmp.Name())
-	if err := tmp.Chmod(0o600); err != nil {
-		tmp.Close()
+	defer func() {
+		if err != nil {
+			_ = os.Remove(tmp.Name())
+		}
+	}()
+	if err := writeAndSync(tmp, data); err != nil {
 		return err
 	}
-	if _, err := tmp.Write(data); err != nil {
-		tmp.Close()
-		return err
+	return renameOver(tmp.Name(), path, renameBlockedByReader)
+}
+
+// writeAndSync writes data to f, flushes it to disk and closes f, whatever
+// happens. Without the flush, a crash soon after the rename can leave the
+// new name on an empty file.
+func writeAndSync(f *os.File, data []byte) error {
+	_, err := f.Write(data)
+	if err == nil {
+		err = f.Sync()
 	}
-	if err := tmp.Close(); err != nil {
-		return err
+	if closeErr := f.Close(); err == nil {
+		err = closeErr
 	}
-	return os.Rename(tmp.Name(), path)
+	return err
+}
+
+// renameOver renames tmp over path, trying again for a short while as long
+// as transient says that the failure will pass.
+func renameOver(tmp, path string, transient func(error) bool) error {
+	const attempts, pause = 50, 10 * time.Millisecond
+	err := os.Rename(tmp, path)
+	for i := 1; err != nil && i < attempts && transient(err); i++ {
+		time.Sleep(pause)
+		err = os.Rename(tmp, path)
+	}
+	return err
+}
+
+// renameBlockedByReader reports whether a rename failed because another
+// process has the destination open, which only Windows minds: a command
+// that reads the credentials file does not take the lock, and for as long
+// as it has the file open the file cannot be replaced (ERROR_ACCESS_DENIED
+// or ERROR_SHARING_VIOLATION).
+func renameBlockedByReader(err error) bool {
+	const accessDenied, sharingViolation = syscall.Errno(5), syscall.Errno(32)
+	var errno syscall.Errno
+	return runtime.GOOS == "windows" && errors.As(err, &errno) &&
+		(errno == accessDenied || errno == sharingViolation)
 }
 
 // Upsert adds or replaces workspaces (matched by URL) and saves. Metadata
@@ -505,6 +715,9 @@ func writeFileAtomic(path string, data []byte) error {
 // the old one. Use it for what the user asked for explicitly, workspace by
 // workspace ("auth add", "auth parse-curl"); imports go through
 // UpsertImported.
+//
+// It saves even while the predecessor's credentials could not be migrated
+// (see migrateLegacy): they are merged into the file by a later run.
 //
 // The default workspace is only ever set implicitly when the store holds
 // exactly one workspace: the first one added on its own becomes the default
@@ -521,7 +734,8 @@ func (s *Store) Upsert(workspaces ...Workspace) error {
 // workspace stored with a standard token (xoxb-/xoxp-, saved by "auth add")
 // with a browser session, which would silently change the identity that
 // commands act as. Such workspaces are left untouched and their URLs
-// returned in kept.
+// returned in kept. That includes a standard token that is still in the
+// predecessor's credentials because they could not be migrated yet.
 func (s *Store) UpsertImported(workspaces ...Workspace) (kept []string, err error) {
 	return s.upsert(true, workspaces)
 }
@@ -542,6 +756,10 @@ func (s *Store) upsert(keepStandard bool, workspaces []Workspace) (kept []string
 			w.URL = u
 			old := next.Find(u)
 			if old == nil {
+				if keepStandard && w.Auth.IsBrowser() && s.unmigratedStandard(u) {
+					kept = append(kept, u)
+					continue
+				}
 				next.Workspaces = append(next.Workspaces, w)
 				continue
 			}

@@ -5,15 +5,9 @@ description: "Slack CLI for agents: read message URLs/threads/channel history/un
 
 # slackcli
 
-Use `slackcli` from `$PATH`. If it is missing, install it with:
+Use `slackcli` from `$PATH`. If it is missing, tell the user: it is installed from a checkout of its repository with `go install ./cmd/slackcli`.
 
-```bash
-curl -fsSL https://raw.githubusercontent.com/maelvls/slackcli/main/install.sh | sh
-```
-
-Fallback: `go install github.com/maelvls/slackcli/cmd/slackcli@latest`.
-
-`slackcli --help` and each subcommand's `--help` are authoritative: they document every flag and the JSON each command prints. Read the relevant help before guessing. If a capability named here is absent from the installed help, report version skew instead of guessing. Do not run `slackcli update` without explicit authorization.
+`slackcli --help` and each subcommand's `--help` are authoritative: they document every flag and the JSON each command prints. Read the relevant help before guessing. If a capability named here is absent from the installed help, report version skew instead of guessing.
 
 ## Safety
 
@@ -37,12 +31,12 @@ Fallback: `go install github.com/maelvls/slackcli/cmd/slackcli@latest`.
 - `search` without `--channel` uses Slack's search API (operators allowed; not available to bot tokens). With `--channel` (repeatable or comma-separated) the channels are scanned and matched locally: operators are rejected, thread replies are not seen, and it can be slow: bound it with `--after`. `--after`/`--before` are exclusive days.
 - `later`, `unreads`, `message draft` and `channel list --via-counts` need browser credentials (xoxc + cookie). `canvas edit` and `canvas create --channel` need a standard token with `canvases:write`; browser credentials can only create standalone canvases.
 - `message send` text is Slack mrkdwn; lists are converted to real Slack lists. Inside them write links as `<URL|label>`: CommonMark `[label](URL)` is not converted. `--blocks` replaces that conversion; with `--attach` the text is the files' plain comment. Several `--attach` flags make one message.
-- Text starting with `- ` is accepted by `message send` and `message edit`; for `message compose` and `message draft create/update` put it after `--`. Write the `-1` emoji as `:-1:`.
+- Text that starts with a dash: `message send`, `edit`, `compose` and `draft create/update` take it as text when it has several words (`- item`, `-1 for me`). A single dash-word (`-1`, `--force`) is read as a flag: put it after `--`. For `message react`, write the `-1` emoji as `:-1:`.
 - Scheduling: prefer `--schedule` with an ISO 8601 timestamp and explicit offset. `--schedule-in` day names, and `later remind --in` day names, use the local timezone of the machine running slackcli (9:00 by default): confirm it matches the user's intent or pass a Unix timestamp.
 - `message draft update --attach` adds files; it never removes any. Drafts with a scheduled time or several destinations are refused.
 - `canvas edit` applies one operation per call; the default `replace` without `--section-id` overwrites the whole canvas.
 - `channel invite` exits non-zero on partial failure but still prints which invites went through: read the JSON before retrying.
-- Commands are cut after 30 s (exit code 124; `SLACKCLI_COMMAND_TIMEOUT_MS`), except `message compose` and the uploading ones (`message send --attach`, `message draft create/update`). A rate-limited call fails at once unless `SLACKCLI_RATE_LIMIT_MAX_WAIT_MS` is set.
+- Commands are cut after 30 s (exit code 124; `SLACKCLI_COMMAND_TIMEOUT_MS`), except `message compose` and the uploading ones (`message send --attach`, `message draft create/update`). A rate-limited call fails at once unless `SLACKCLI_RATE_LIMIT_MAX_WAIT_MS` is set. After a timeout or an interrupt (exit code 130) of a write, the change may still have gone through: check before retrying.
 
 ## Conditional references
 

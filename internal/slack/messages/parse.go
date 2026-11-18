@@ -5,7 +5,6 @@ package messages
 import (
 	"cmp"
 	"context"
-	"errors"
 	"strings"
 	"sync"
 
@@ -90,7 +89,7 @@ func ParseFile(v any) (summary FileSummary, ok bool) {
 	if id == "" {
 		return FileSummary{}, false
 	}
-	size, _ := jsonx.Num(f["size"])
+	size, _ := jsonx.Int64(f["size"])
 	return FileSummary{
 		ID:                 id,
 		Name:               jsonx.Str(f["name"]),
@@ -101,7 +100,7 @@ func ParseFile(v any) (summary FileSummary, ok bool) {
 		Permalink:          jsonx.Str(f["permalink"]),
 		URLPrivate:         jsonx.Str(f["url_private"]),
 		URLPrivateDownload: jsonx.Str(f["url_private_download"]),
-		Size:               int64(size),
+		Size:               size,
 	}, true
 }
 
@@ -173,7 +172,7 @@ func enrichFiles(ctx context.Context, client *slackapi.Client, msgs []Message) e
 	}
 	if skipped, rateLimit := limited.Skipped(); skipped > 0 {
 		enrich.Warnf(ctx, "the details of %d of %d attached files could not be fetched (%v): snippets are shown without their content and some files without a download URL; %s",
-			skipped, len(ids), rateLimit, enrich.Hint())
+			skipped, len(ids), enrich.Cause(rateLimit), enrich.Hint())
 	}
 
 	for i := range msgs {
@@ -204,14 +203,4 @@ func mergeFileInfo(f FileSummary, info map[string]any) FileSummary {
 		f.Snippet = &FileSnippet{Content: content, Language: jsonx.Str(info["filetype"])}
 	}
 	return f
-}
-
-// isFatal reports whether err, from one of the calls that look for the
-// message asked for, must abort the fetch rather than be treated as "this
-// lookup found nothing": the command was cancelled, the credentials are
-// dead (the caller refreshes them and retries), or Slack is rate limiting
-// us (the message may well exist: saying "not found" would be wrong).
-func isFatal(ctx context.Context, err error) bool {
-	var rl *slackapi.RateLimitError
-	return err != nil && (ctx.Err() != nil || slackapi.IsAuthError(err) || errors.As(err, &rl))
 }

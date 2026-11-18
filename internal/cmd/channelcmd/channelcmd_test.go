@@ -510,7 +510,8 @@ func TestMark(t *testing.T) {
 			if got := h.only("conversations.mark"); !reflect.DeepEqual(got, wantCalls) {
 				t.Errorf("conversations.mark calls = %+v", got)
 			}
-			want := map[string]any{"ok": true, "channel": tt.wantChannel, "ts": tt.wantTS}
+			// "channel_id", as every other command names it.
+			want := map[string]any{"ok": true, "channel_id": tt.wantChannel, "ts": tt.wantTS}
 			if !reflect.DeepEqual(out, want) {
 				t.Errorf("printed %s", h.stdout)
 			}
@@ -554,13 +555,14 @@ func TestMarkErrors(t *testing.T) {
 	}
 }
 
-func TestMarkTruncatedURLHint(t *testing.T) {
+// A message URL with thread_ts and no cid is complete: no warning.
+func TestMarkURLWithoutCID(t *testing.T) {
 	h := newHarness(t)
 	if _, err := h.run("mark", messageURL+"?thread_ts=1234567000.000100"); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(h.stderr.String(), "truncated") {
-		t.Errorf("stderr = %q, want the truncated-URL hint", h.stderr)
+	if h.stderr.Len() != 0 {
+		t.Errorf("stderr = %q, want nothing", h.stderr)
 	}
 }
 
@@ -600,6 +602,9 @@ func TestHelp(t *testing.T) {
 	mark := find("mark")
 	contains("mark --workspace", mark("workspace"), "may repeat but not contradict")
 	contains("mark --ts", mark("ts"), "overrides a URL timestamp")
+	if sub, _, _ := cmd.Find([]string{"mark"}); !strings.Contains(sub.Long, `"channel_id": <channel ID>`) {
+		t.Errorf("mark help does not document channel_id:\n%s", sub.Long)
+	}
 
 	invite := find("invite")
 	for _, flag := range []string{"channel", "users", "external", "allow-external-user-invites", "workspace"} {

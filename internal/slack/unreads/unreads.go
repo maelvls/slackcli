@@ -249,12 +249,12 @@ func Fetch(ctx context.Context, client *slackapi.Client, opts Options) (Result, 
 	if n, err := messagesLimited.Skipped(); n > 0 {
 		result.Warnings = append(result.Warnings, fmt.Sprintf(
 			`the unread messages of %d of %d conversations were not fetched (%v): they are listed with "messages_error": %q; %s`,
-			n, len(entries), err, enrich.RateLimitedCode, enrich.Hint()))
+			n, len(entries), enrich.Cause(err), enrich.RateLimitedCode, enrich.Hint()))
 	}
 	if n, err := namesLimited.Skipped(); n > 0 {
 		result.Warnings = append(result.Warnings, fmt.Sprintf(
 			"the names of %d of %d conversations were not looked up (%v): they are listed by ID only; %s",
-			n, len(entries), err, enrich.Hint()))
+			n, len(entries), enrich.Cause(err), enrich.Hint()))
 	}
 
 	slices.SortStableFunc(result.Channels, func(a, b Channel) int {

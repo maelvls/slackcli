@@ -75,8 +75,9 @@ func (e cacheEntry) fresh(now time.Time) bool {
 // The error is non-nil only when the lookup must be abandoned: cancelled
 // context or expired credentials. Resolving users is an enrichment (see
 // package enrich): when users.info is rate limited, no further user is
-// asked for, the ones already known are returned without error, and the
-// collector of ctx ([enrich.Collect]) is told how many are missing.
+// asked for, the ones already known (a stale cache entry will do) are
+// returned without error, and the collector of ctx ([enrich.Collect]) is
+// told how many are missing, if any.
 func ResolveByID(ctx context.Context, client *slackapi.Client, userIDs []string, opts ResolveOptions) (map[string]CompactUser, error) {
 	ids := dedupeUserIDs(userIDs)
 	out := make(map[string]CompactUser, len(ids))
@@ -115,15 +116,21 @@ func ResolveByID(ctx context.Context, client *slackapi.Client, userIDs []string,
 	}
 	if skipped, rateLimit := limited.Skipped(); skipped > 0 {
 		// A stale entry beats a bare ID.
+		bare := 0
 		for _, id := range missing {
+			if _, fetched := out[id]; fetched {
+				continue
+			}
 			if e, ok := cached[id]; ok {
-				if _, fetched := out[id]; !fetched {
-					out[id] = e.User
-				}
+				out[id] = e.User
+			} else {
+				bare++
 			}
 		}
-		enrich.Warnf(ctx, "%d of the %d users referenced could not be resolved and are left as bare IDs (%v): %s",
-			skipped, len(ids), rateLimit, enrich.Hint())
+		if bare > 0 {
+			enrich.Warnf(ctx, "%d of the %d users referenced could not be resolved and are left as bare IDs (%v): %s",
+				bare, len(ids), enrich.Cause(rateLimit), enrich.Hint())
+		}
 	}
 	return out, nil
 }

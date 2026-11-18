@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -17,6 +18,7 @@ import (
 	"github.com/maelvls/slackcli/internal/appinfo"
 	"github.com/maelvls/slackcli/internal/slack/enrich"
 	"github.com/maelvls/slackcli/internal/slackapi"
+	"github.com/maelvls/slackcli/internal/testenv"
 )
 
 var t0 = time.Date(2026, 3, 1, 12, 0, 0, 0, time.UTC)
@@ -75,11 +77,14 @@ func TestResolveByIDCachesUsers(t *testing.T) {
 	if len(files) != 1 || !strings.HasPrefix(files[0], "users-cache-") || !strings.HasSuffix(files[0], ".json") {
 		t.Fatalf("cache dir = %v", files)
 	}
-	if info, _ := os.Stat(filepath.Join(dir, files[0])); info.Mode().Perm() != 0o600 {
-		t.Errorf("file mode = %v", info.Mode().Perm())
-	}
-	if info, _ := os.Stat(dir); info.Mode().Perm() != 0o700 {
-		t.Errorf("dir mode = %v", info.Mode().Perm())
+	// Windows has no permission bits: os.Stat makes them up there.
+	if runtime.GOOS != "windows" {
+		if info, _ := os.Stat(filepath.Join(dir, files[0])); info.Mode().Perm() != 0o600 {
+			t.Errorf("file mode = %v", info.Mode().Perm())
+		}
+		if info, _ := os.Stat(dir); info.Mode().Perm() != 0o700 {
+			t.Errorf("dir mode = %v", info.Mode().Perm())
+		}
 	}
 
 	// Served from the cache, with every field intact. (The TypeScript
@@ -223,13 +228,16 @@ func TestResolveByIDWithoutWorkspaceDoesNotCache(t *testing.T) {
 }
 
 func TestResolveByIDDefaultsToTheAppCacheDir(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("XDG_CACHE_HOME", filepath.Join(home, "cache"))
+	// Every per-user directory, on every OS: HOME alone leaves the real
+	// cache directory in use on Windows.
+	home := testenv.Isolate(t)
 	if _, err := ResolveByID(context.Background(), infoServer().client(), []string{"U11111111"}, ResolveOptions{Now: at(t0)}); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.HasPrefix(appinfo.CacheDir(), home) || len(cacheFiles(t, appinfo.CacheDir())) != 1 {
+	if rel, err := filepath.Rel(home, appinfo.CacheDir()); err != nil || !filepath.IsLocal(rel) {
+		t.Fatalf("cache dir %s is not below the test's home %s", appinfo.CacheDir(), home)
+	}
+	if len(cacheFiles(t, appinfo.CacheDir())) != 1 {
 		t.Errorf("cache dir %s holds %v", appinfo.CacheDir(), cacheFiles(t, appinfo.CacheDir()))
 	}
 }
@@ -498,8 +506,19 @@ func TestResolveByIDRateLimitedReturnsWhatItHas(t *testing.T) {
 	if n := len(rec.calls); n > fetchConcurrency {
 		t.Errorf("%d calls after being rate limited", n)
 	}
-	if list := warnings.List(); len(list) != 1 || !strings.Contains(list[0], "41 of the 42 users") || !strings.Contains(list[0], "rate limited") {
+	// U22222222 came from its stale entry: it is not a bare ID.
+	if list := warnings.List(); len(list) != 1 || !strings.Contains(list[0], "40 of the 42 users") || !strings.Contains(list[0], "rate limited") {
 		t.Errorf("warnings = %q", list)
+	}
+
+	// Nobody is left as a bare ID when stale entries cover every user.
+	ctx, warnings = enrich.Collect(context.Background())
+	got, err = ResolveByID(ctx, rec.client(), []string{"U11111111", "U22222222"}, ResolveOptions{CacheDir: dir, WorkspaceURL: "https://test.slack.com", Now: at(t0.Add(10 * time.Hour))})
+	if err != nil || len(got) != 2 {
+		t.Errorf("got %+v, %v, want both cached users", got, err)
+	}
+	if list := warnings.List(); len(list) != 0 {
+		t.Errorf("warnings = %q, want none: no user is left as a bare ID", list)
 	}
 
 	// Some answers, then the rate limit: the answers are kept and cached.

@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/maelvls/slackcli/internal/jsonx"
+	"github.com/maelvls/slackcli/internal/slack/enrich"
 )
 
 // filesPageSize is the files.list page size.
@@ -32,9 +33,9 @@ type fileHit struct {
 // parseFileHit reads a raw Slack file object. ok is false when it has no
 // ID.
 func parseFileHit(f map[string]any) (hit fileHit, ok bool) {
-	created, ok := jsonx.Num(f["timestamp"])
+	created, ok := jsonx.Int64(f["timestamp"])
 	if !ok {
-		created, _ = jsonx.Num(f["created"])
+		created, _ = jsonx.Int64(f["created"])
 	}
 	hit = fileHit{
 		id:        jsonx.Str(f["id"]),
@@ -45,7 +46,7 @@ func parseFileHit(f map[string]any) (hit fileHit, ok bool) {
 		mode:      jsonx.Str(f["mode"]),
 		url:       cmp.Or(jsonx.Str(f["url_private_download"]), jsonx.Str(f["url_private"])),
 		permalink: jsonx.Str(f["permalink"]),
-		created:   int64(created),
+		created:   created,
 	}
 	return hit, hit.id != ""
 }
@@ -75,7 +76,7 @@ func (s *searcher) searchFiles(ctx context.Context) ([]fileHit, *More, error) {
 	for len(hits) < s.limit && !p.done {
 		matches, err := p.next(ctx)
 		if err != nil {
-			if len(hits) > 0 && isRateLimit(err) {
+			if len(hits) > 0 && enrich.IsRateLimit(err) {
 				reason = fmt.Sprintf("The search stopped early: %v", err)
 				break
 			}
@@ -168,7 +169,7 @@ func (s *searcher) scanChannelFiles(ctx context.Context, channelID string) (out 
 		}
 		resp, err := s.client.API(ctx, "files.list", params)
 		if err != nil {
-			if page > 1 && isRateLimit(err) {
+			if page > 1 && enrich.IsRateLimit(err) {
 				s.warnf("the listing of the files of channel %s stopped early: %v", channelID, err)
 				return out, true, nil
 			}

@@ -4,10 +4,11 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -26,11 +27,33 @@ func (k fakeKeychain) Get(service, account string) (string, error) {
 	}
 	return k[service+"|"+account], nil
 }
-func (k fakeKeychain) Set(service, account, value string) bool {
+func (k fakeKeychain) Set(service, account, value string) error {
 	k[service+"|"+account] = value
-	return true
+	return nil
 }
 func (k fakeKeychain) Delete(service, account string) { delete(k, service+"|"+account) }
+
+// wantMode checks that path exists and, where there are Unix permission
+// bits (not on Windows), that they are want.
+func wantMode(t *testing.T, path string, want os.FileMode) {
+	t.Helper()
+	fi, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if runtime.GOOS == "windows" {
+		return
+	}
+	if got := fi.Mode().Perm(); got != want {
+		t.Errorf("%s has mode %v, want %v", path, got, want)
+	}
+}
+
+// collectWarnings returns a Store.Warnf and the warnings it received.
+func collectWarnings() (warnf func(format string, args ...any), warnings *[]string) {
+	warnings = new([]string)
+	return func(format string, args ...any) { *warnings = append(*warnings, fmt.Sprintf(format, args...)) }, warnings
+}
 
 func browserWS(u, xoxc, xoxd string) Workspace {
 	return Workspace{URL: u, Auth: slackapi.Auth{Type: slackapi.AuthBrowser, XoxcToken: xoxc, XoxdCookie: xoxd}}
@@ -59,9 +82,8 @@ func TestStoreRoundTripWithKeychain(t *testing.T) {
 			t.Fatalf("secret %q written to disk:\n%s", secret, raw)
 		}
 	}
-	if fi, _ := os.Stat(path); fi.Mode().Perm() != 0o600 {
-		t.Fatalf("mode = %v", fi.Mode().Perm())
-	}
+	wantMode(t, path, 0o600)
+	wantMode(t, filepath.Dir(path), 0o700)
 	if _, err := os.Stat(path + ".lock"); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("the lock file was left behind: %v", err)
 	}
@@ -129,31 +151,6 @@ func TestResolveDistinguishesMissingFromUnavailable(t *testing.T) {
 	delete(kc, unavailableKey)
 	if a, err := fresh.Resolve(creds.Workspaces[0]); err != nil || a.XoxcToken != "xoxc-a" {
 		t.Fatalf("resolve = %+v, %v", a, err)
-	}
-}
-
-func TestKeychainGetResult(t *testing.T) {
-	exit := func(code int) error {
-		err := exec.Command("sh", "-c", fmt.Sprintf("exit %d", code)).Run()
-		if err == nil {
-			t.Fatal("expected an exit error")
-		}
-		return err
-	}
-	if _, err := exec.LookPath("sh"); err != nil {
-		t.Skip("no sh")
-	}
-	if v, err := keychainGetResult([]byte(" xoxc-1\n"), nil, false, time.Second); v != "xoxc-1" || err != nil {
-		t.Errorf("found: %q, %v", v, err)
-	}
-	if v, err := keychainGetResult(nil, exit(securityItemNotFound), false, time.Second); v != "" || err != nil {
-		t.Errorf("not found: %q, %v", v, err)
-	}
-	if _, err := keychainGetResult(nil, exit(36), false, time.Second); err == nil || !strings.Contains(err.Error(), "status 36") {
-		t.Errorf("locked: %v", err)
-	}
-	if _, err := keychainGetResult(nil, exit(1), true, 3*time.Second); err == nil || !strings.Contains(err.Error(), "did not answer within 3s") {
-		t.Errorf("timeout: %v", err)
 	}
 }
 
@@ -346,52 +343,204 @@ func TestUpsertImportedKeepsStandardTokens(t *testing.T) {
 	}
 }
 
-func TestMigrateLegacy(t *testing.T) {
-	dir := t.TempDir()
+// legacyFixture writes a predecessor's credentials file and returns its path
+// and the keychain that holds its secrets under the service "old".
+func legacyFixture(t *testing.T, dir string) (string, fakeKeychain) {
+	t.Helper()
 	legacy := filepath.Join(dir, "legacy.json")
-	_ = os.WriteFile(legacy, []byte(`{"version":1,"default_workspace_url":"https://b.slack.com","workspaces":[
+	if err := os.WriteFile(legacy, []byte(`{"version":1,"default_workspace_url":"https://b.slack.com","workspaces":[
 	  {"workspace_url":"https://a.slack.com","workspace_name":"A","auth":{"auth_type":"browser","xoxc_token":"__KEYCHAIN__","xoxd_cookie":"__KEYCHAIN__"}},
 	  {"workspace_url":"https://b.slack.com","auth":{"auth_type":"browser","xoxc_token":"__KEYCHAIN__","xoxd_cookie":"__KEYCHAIN__"}},
+	  {"workspace_url":"https://bot.slack.com","auth":{"auth_type":"standard","token":"__KEYCHAIN__"}},
 	  {"workspace_url":"https://gone.slack.com","auth":{"auth_type":"browser","xoxc_token":"__KEYCHAIN__","xoxd_cookie":"__KEYCHAIN__"}},
 	  {"workspace_url":"not a url","auth":{"auth_type":"browser","xoxc_token":"x","xoxd_cookie":"y"}},
 	  {"workspace_url":"https://attacker.example","auth":{"auth_type":"browser","xoxc_token":"x","xoxd_cookie":"y"}}
-	]}`), 0o600)
-	kc := fakeKeychain{
-		"old|xoxc:https://a.slack.com": "xoxc-a",
-		"old|xoxc:https://b.slack.com": "xoxc-b",
-		"old|xoxd":                     "xoxd-shared",
+	]}`), 0o600); err != nil {
+		t.Fatal(err)
 	}
-	newPath := filepath.Join(dir, "new", "credentials.json")
+	return legacy, fakeKeychain{
+		"old|xoxc:https://a.slack.com":    "xoxc-a",
+		"old|xoxc:https://b.slack.com":    "xoxc-b",
+		"old|token:https://bot.slack.com": "xoxb-bot",
+		"old|xoxd":                        "xoxd-shared",
+	}
+}
 
-	// While the keychain cannot be read nothing is migrated, so that no
-	// workspace is dropped for good.
+func workspaceURLs(creds *Credentials) string {
+	var urls []string
+	for _, w := range creds.Workspaces {
+		urls = append(urls, strings.TrimPrefix(w.URL, "https://"))
+	}
+	return strings.Join(urls, " ")
+}
+
+func TestMigrateLegacy(t *testing.T) {
+	dir := t.TempDir()
+	legacy, kc := legacyFixture(t, dir)
+	s := &Store{Path: filepath.Join(dir, "new", "credentials.json"), Keychain: kc, Service: "new", LegacyPath: legacy, LegacyService: "old"}
+	creds, err := s.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The workspace whose secrets are gone and the invalid ones are left
+	// behind.
+	if got := workspaceURLs(creds); got != "a.slack.com b.slack.com bot.slack.com" {
+		t.Fatalf("workspaces = %s", got)
+	}
+	if creds.DefaultWorkspaceURL != "https://b.slack.com" || creds.Workspaces[0].Name != "A" {
+		t.Fatalf("creds = %+v", creds)
+	}
+	if kc["new|xoxc:https://a.slack.com"] != "xoxc-a" || kc["new|xoxd:https://b.slack.com"] != "xoxd-shared" {
+		t.Fatalf("keychain = %v", kc)
+	}
+	a, err := s.Resolve(creds.Workspaces[0])
+	if err != nil || a.XoxdCookie != "xoxd-shared" {
+		t.Fatalf("resolve = %+v, %v", a, err)
+	}
+
+	// The migration happens once: a workspace removed afterwards does not
+	// come back from the predecessor's file.
+	if removed, err := s.Remove("https://a.slack.com"); err != nil || !removed {
+		t.Fatal(removed, err)
+	}
+	fresh := &Store{Path: s.Path, Keychain: kc, Service: "new", LegacyPath: legacy, LegacyService: "old"}
+	creds, err = fresh.Load()
+	if err != nil || workspaceURLs(creds) != "b.slack.com bot.slack.com" {
+		t.Fatalf("after a removal: %s, %v", workspaceURLs(creds), err)
+	}
+}
+
+// While the keychain cannot be read nothing is migrated, and a save made in
+// that state (an automatic import) must not end the migration: the next run
+// with a readable keychain imports the predecessor's workspaces into the
+// file that exists by then.
+func TestMigrateLegacyAfterKeychainFailure(t *testing.T) {
+	dir := t.TempDir()
+	legacy, kc := legacyFixture(t, dir)
+	newPath := filepath.Join(dir, "new", "credentials.json")
+	var warnings []string
+	newStore := func() *Store {
+		return &Store{Path: newPath, Keychain: kc, Service: "new", LegacyPath: legacy, LegacyService: "old",
+			Warnf: func(format string, args ...any) { warnings = append(warnings, fmt.Sprintf(format, args...)) }}
+	}
+
 	kc[unavailableKey] = "locked"
-	locked := &Store{Path: newPath, Keychain: kc, Service: "new", LegacyPath: legacy, LegacyService: "old"}
+	locked := newStore()
 	if creds, err := locked.Load(); err != nil || len(creds.Workspaces) != 0 {
 		t.Fatalf("creds = %+v, err = %v", creds, err)
 	}
 	if _, err := os.Stat(newPath); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("a credentials file was written while the keychain was locked: %v", err)
 	}
-	delete(kc, unavailableKey)
+	if len(warnings) != 1 || !strings.Contains(warnings[0], legacy) || !strings.Contains(warnings[0], "locked") {
+		t.Fatalf("warnings = %q", warnings)
+	}
 
-	s := &Store{Path: newPath, Keychain: kc, Service: "new", LegacyPath: legacy, LegacyService: "old"}
+	// An import in that state writes the credentials file. It must not
+	// take the place of a standard token that is still to be migrated.
+	kept, err := locked.UpsertImported(
+		browserWS("https://c.slack.com", "xoxc-c", "xoxd-c"),
+		browserWS("https://bot.slack.com", "xoxc-human", "xoxd-c"),
+	)
+	if err != nil || len(kept) != 1 || kept[0] != "https://bot.slack.com" {
+		t.Fatalf("kept = %v, err = %v", kept, err)
+	}
+	if _, err := os.Stat(newPath); err != nil {
+		t.Fatalf("the import was not saved: %v", err)
+	}
+	if len(warnings) != 1 {
+		t.Fatalf("the warning was repeated: %q", warnings)
+	}
+
+	delete(kc, unavailableKey)
+	s := newStore()
 	creds, err := s.Load()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(creds.Workspaces) != 2 || creds.DefaultWorkspaceURL != "https://b.slack.com" || creds.Workspaces[0].Name != "A" {
-		t.Fatalf("creds = %+v", creds)
+	if got := workspaceURLs(creds); got != "c.slack.com a.slack.com b.slack.com bot.slack.com" {
+		t.Fatalf("legacy workspaces were dropped: %s", got)
 	}
-	if kc["new|xoxc:https://a.slack.com"] != "xoxc-a" || kc["new|xoxd:https://b.slack.com"] != "xoxd-shared" {
-		t.Fatalf("keychain = %v", kc)
+	// The file had a default already: the predecessor's does not replace it.
+	if creds.DefaultWorkspaceURL != "https://c.slack.com" {
+		t.Fatalf("default = %q", creds.DefaultWorkspaceURL)
 	}
-	if _, err := os.Stat(s.Path); err != nil {
-		t.Fatal("new credentials file not written")
+	bot, err := s.Resolve(*creds.Find("https://bot.slack.com"))
+	if err != nil || bot.Type != slackapi.AuthStandard || bot.Token != "xoxb-bot" {
+		t.Fatalf("bot = %+v, %v", bot, err)
 	}
-	a, err := s.Resolve(creds.Workspaces[0])
-	if err != nil || a.XoxdCookie != "xoxd-shared" {
-		t.Fatalf("resolve = %+v", a)
+	if c, err := s.Resolve(*creds.Find("https://c.slack.com")); err != nil || c.XoxcToken != "xoxc-c" {
+		t.Fatalf("c = %+v, %v", c, err)
+	}
+	if len(warnings) != 1 {
+		t.Fatalf("warnings = %q", warnings)
+	}
+}
+
+// A command that only reads must not fail, or wait for a lock, because the
+// migration cannot write.
+func TestLoadWithLegacyInUnwritableDir(t *testing.T) {
+	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+		t.Skip("needs a directory that cannot be written to")
+	}
+	dir := t.TempDir()
+	legacy, kc := legacyFixture(t, dir)
+	newDir := filepath.Join(dir, "new")
+	if err := os.Mkdir(newDir, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	var warnings []string
+	s := &Store{Path: filepath.Join(newDir, "credentials.json"), Keychain: kc, Service: "new", LegacyPath: legacy, LegacyService: "old",
+		Warnf: func(format string, args ...any) { warnings = append(warnings, fmt.Sprintf(format, args...)) }}
+	start := time.Now()
+	creds, err := s.Load()
+	if err != nil || len(creds.Workspaces) != 0 {
+		t.Fatalf("creds = %+v, err = %v", creds, err)
+	}
+	if elapsed := time.Since(start); elapsed > lockWait/2 {
+		t.Fatalf("Load waited %s for a lock it could never take", elapsed)
+	}
+	if len(warnings) != 1 || !strings.Contains(warnings[0], legacy) || strings.Contains(warnings[0], "locked by another") {
+		t.Fatalf("warnings = %q", warnings)
+	}
+}
+
+// xoxcRefusingKeychain is a keychain that fails to store xoxc tokens.
+type xoxcRefusingKeychain struct{ fakeKeychain }
+
+func (k xoxcRefusingKeychain) Set(service, account, value string) error {
+	if strings.HasPrefix(account, "xoxc:") {
+		return errors.New("refused")
+	}
+	return k.fakeKeychain.Set(service, account, value)
+}
+
+// A workspace saved half in the file and half in the keychain must not be
+// resolved to the placeholder of the half that is in the keychain.
+func TestResolveAfterPartialKeychainSave(t *testing.T) {
+	kc := xoxcRefusingKeychain{fakeKeychain{}}
+	path := filepath.Join(t.TempDir(), "credentials.json")
+	s := &Store{Path: path, Keychain: kc, Service: "svc"}
+	if err := s.Upsert(browserWS("https://a.slack.com", "xoxc-a", "xoxd-a")); err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := os.ReadFile(path)
+	if !strings.Contains(string(raw), "xoxc-a") || strings.Contains(string(raw), "xoxd-a") {
+		t.Fatalf("expected the token in the file and the cookie in the keychain:\n%s", raw)
+	}
+	// A second save in the same process starts from the file.
+	if err := s.Upsert(browserWS("https://b.slack.com", "xoxc-b", "xoxd-b")); err != nil {
+		t.Fatal(err)
+	}
+	creds, err := s.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, store := range []*Store{s, {Path: path, Keychain: kc, Service: "svc"}} {
+		a, err := store.Resolve(*creds.Find("https://a.slack.com"))
+		if err != nil || a.XoxcToken != "xoxc-a" || a.XoxdCookie != "xoxd-a" {
+			t.Fatalf("resolve = %+v, %v", a, err)
+		}
 	}
 }
 
@@ -418,9 +567,7 @@ func TestCorruptFileIsPreserved(t *testing.T) {
 	if raw, _ := os.ReadFile(backups[0]); string(raw) != "{nope" {
 		t.Errorf("backup content = %q", raw)
 	}
-	if fi, _ := os.Stat(backups[0]); fi.Mode().Perm()&0o077 != 0 {
-		t.Errorf("backup mode = %v", fi.Mode().Perm())
-	}
+	wantMode(t, backups[0], 0o600)
 	if len(warnings) != 1 || !strings.Contains(warnings[0], backups[0]) || !strings.Contains(warnings[0], "auth import-desktop") {
 		t.Errorf("warnings = %q", warnings)
 	}
@@ -477,37 +624,168 @@ func TestConcurrentStoresDoNotLoseUpdates(t *testing.T) {
 }
 
 func TestLockFile(t *testing.T) {
-	oldWait, oldStale := lockWait, lockStale
-	t.Cleanup(func() { lockWait, lockStale = oldWait, oldStale })
+	oldWait, oldStale, oldPoll := lockWait, lockStale, lockPoll
+	t.Cleanup(func() { lockWait, lockStale, lockPoll = oldWait, oldStale, oldPoll })
 	path := filepath.Join(t.TempDir(), "credentials.json")
-
-	// A live lock makes a second writer wait, then fail with advice.
-	unlock, err := lockFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	lockWait = 60 * time.Millisecond
-	if _, err := lockFile(path); err == nil || !strings.Contains(err.Error(), path+".lock") || !strings.Contains(err.Error(), "locked by another") {
-		t.Fatalf("err = %v", err)
-	}
-	unlock()
-	if _, err := os.Stat(path + ".lock"); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("unlock left the lock file: %v", err)
+	lock := path + ".lock"
+	makeStale := func(t *testing.T, content string) {
+		t.Helper()
+		if err := os.WriteFile(lock, []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		old := time.Now().Add(-time.Hour)
+		if err := os.Chtimes(lock, old, old); err != nil {
+			t.Fatal(err)
+		}
 	}
 
-	// A lock left by a process that died is taken over.
-	if err := os.WriteFile(path+".lock", []byte("1\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	old := time.Now().Add(-time.Hour)
-	if err := os.Chtimes(path+".lock", old, old); err != nil {
-		t.Fatal(err)
-	}
-	unlock, err = lockFile(path)
-	if err != nil {
-		t.Fatalf("a stale lock was not taken over: %v", err)
-	}
-	unlock()
+	t.Run("a live lock makes a second writer wait, then fail with advice", func(t *testing.T) {
+		unlock, err := lockFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		lockWait = 60 * time.Millisecond
+		defer func() { lockWait = oldWait }()
+		_, err = lockFile(path)
+		if err == nil {
+			t.Fatal("a held lock was taken")
+		}
+		for _, want := range []string{lock, "locked by another", fmt.Sprintf("PID %d", os.Getpid())} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("error %q does not contain %q", err, want)
+			}
+		}
+		unlock()
+		if _, err := os.Stat(lock); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("unlock left the lock file: %v", err)
+		}
+		unlock() // releasing twice is harmless
+	})
+
+	t.Run("a lock left by a process that died is taken over", func(t *testing.T) {
+		makeStale(t, "1\n")
+		unlock, err := lockFile(path)
+		if err != nil {
+			t.Fatalf("a stale lock was not taken over: %v", err)
+		}
+		unlock()
+		leftovers, _ := filepath.Glob(path + ".*")
+		if len(leftovers) != 0 {
+			t.Errorf("left behind: %v", leftovers)
+		}
+	})
+
+	t.Run("only one of several waiters takes a stale lock over", func(t *testing.T) {
+		lockWait, lockPoll = 30*time.Second, time.Millisecond
+		defer func() { lockWait, lockPoll = oldWait, oldPoll }()
+		const rounds, waiters = 200, 8
+		var holders, violations atomic.Int32
+		for round := 0; round < rounds; round++ {
+			makeStale(t, "1\n")
+			var wg sync.WaitGroup
+			errs := make(chan error, waiters)
+			start := make(chan struct{})
+			for i := 0; i < waiters; i++ {
+				wg.Add(1)
+				go func() {
+					defer wg.Done()
+					<-start
+					unlock, err := lockFile(path)
+					if err != nil {
+						errs <- err
+						return
+					}
+					if holders.Add(1) != 1 {
+						violations.Add(1)
+					}
+					runtime.Gosched()
+					holders.Add(-1)
+					unlock()
+				}()
+			}
+			close(start)
+			wg.Wait()
+			close(errs)
+			for err := range errs {
+				t.Fatal(err)
+			}
+		}
+		if n := violations.Load(); n != 0 {
+			t.Fatalf("the lock was held by two waiters at once %d times in %d rounds", n, rounds)
+		}
+		leftovers, _ := filepath.Glob(path + ".*")
+		if len(leftovers) != 0 {
+			t.Errorf("left behind: %v", leftovers)
+		}
+	})
+
+	t.Run("unlock leaves the lock of a successor alone", func(t *testing.T) {
+		unlock, err := lockFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		// This holder was taken for dead, and another process holds the
+		// lock now.
+		if err := os.WriteFile(lock, []byte("1 someone-else\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		unlock()
+		if raw, err := os.ReadFile(lock); err != nil || string(raw) != "1 someone-else\n" {
+			t.Fatalf("unlock removed a lock that was not its own: %q, %v", raw, err)
+		}
+		if err := os.Remove(lock); err != nil {
+			t.Fatal(err)
+		}
+	})
+
+	t.Run("a lock held for longer than the staleness is not taken over", func(t *testing.T) {
+		lockStale, lockWait = time.Second, 100*time.Millisecond
+		defer func() { lockStale, lockWait = oldStale, oldWait }()
+		unlock, err := lockFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		time.Sleep(lockStale * 3 / 2)
+		if other, err := lockFile(path); err == nil {
+			other()
+			t.Fatal("the lock of a live holder was taken over")
+		}
+		unlock()
+		if _, err := os.Stat(lock); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("unlock left the lock file: %v", err)
+		}
+	})
+
+	// Only a lock that is held is worth waiting for.
+	t.Run("other errors are returned at once", func(t *testing.T) {
+		dir := t.TempDir()
+		notADir := filepath.Join(dir, "file")
+		if err := os.WriteFile(notADir, nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		targets := map[string]string{"parent is a file": filepath.Join(notADir, "credentials.json")}
+		if runtime.GOOS != "windows" && os.Geteuid() != 0 {
+			readOnly := filepath.Join(dir, "readonly")
+			if err := os.Mkdir(readOnly, 0o500); err != nil {
+				t.Fatal(err)
+			}
+			targets["directory not writable"] = filepath.Join(readOnly, "credentials.json")
+		}
+		for name, target := range targets {
+			start := time.Now()
+			unlock, err := lockFile(target)
+			if err == nil {
+				unlock()
+				t.Fatalf("%s: lockFile succeeded", name)
+			}
+			if elapsed := time.Since(start); elapsed > lockWait/2 {
+				t.Errorf("%s: waited %s for a lock that nobody holds", name, elapsed)
+			}
+			if strings.Contains(err.Error(), "locked by another") {
+				t.Errorf("%s: misreported as a held lock: %v", name, err)
+			}
+		}
+	})
 }
 
 func TestSelectWorkspace(t *testing.T) {

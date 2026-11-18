@@ -20,6 +20,7 @@ import (
 	"github.com/maelvls/slackcli/internal/clictx"
 	"github.com/maelvls/slackcli/internal/cmd/composecmd"
 	"github.com/maelvls/slackcli/internal/slackapi"
+	"github.com/maelvls/slackcli/internal/testenv"
 )
 
 const (
@@ -58,7 +59,7 @@ type harness struct {
 	// serve answers non-API HTTP requests (downloads, upload bytes).
 	serve func(req *http.Request) *http.Response
 	// composeResult is what the fake compose editor returns.
-	composeResult map[string]any
+	composeResult composecmd.Result
 
 	mu       sync.Mutex
 	calls    []call
@@ -69,9 +70,7 @@ type harness struct {
 func newHarness(t *testing.T) *harness {
 	t.Helper()
 	// Nothing may leak in from, or out to, the developer's environment.
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("XDG_CACHE_HOME", filepath.Join(home, "cache"))
+	testenv.Isolate(t)
 	for _, env := range []string{
 		"SLACK_TOKEN", "SLACK_COOKIE_D", "SLACK_COOKIE", "SLACK_WORKSPACE_URL", "CI",
 		"SLACKCLI_SAFE_MODE", "AGENT_SLACK_SAFE_MODE",
@@ -118,7 +117,7 @@ func newHarness(t *testing.T) *harness {
 		rt:           h.rt,
 		now:          time.Now,
 		downloadsDir: filepath.Join(t.TempDir(), "downloads"),
-		compose: func(_ context.Context, _ *clictx.Context, target, text string, opts composecmd.Options) (map[string]any, error) {
+		compose: func(_ context.Context, _ *clictx.Context, target, text string, opts composecmd.Options) (composecmd.Result, error) {
 			h.mu.Lock()
 			defer h.mu.Unlock()
 			h.composed = append(h.composed, composeCall{target, text, opts})
@@ -276,6 +275,29 @@ func wantJSON(t *testing.T, got map[string]any, want string) {
 		g, _ := json.MarshalIndent(got, "", "  ")
 		t.Errorf("output =\n%s\nwant\n%s", g, want)
 	}
+}
+
+// jsonKeys returns the keys of the JSON object doc in the order they are
+// written, which decoding into a map loses.
+func jsonKeys(t *testing.T, doc string) []string {
+	t.Helper()
+	dec := json.NewDecoder(strings.NewReader(doc))
+	if tok, err := dec.Token(); err != nil || tok != json.Delim('{') {
+		t.Fatalf("not a JSON object (%v): %s", err, doc)
+	}
+	var keys []string
+	for dec.More() {
+		tok, err := dec.Token()
+		if err != nil {
+			t.Fatal(err)
+		}
+		keys = append(keys, tok.(string))
+		var skip json.RawMessage
+		if err := dec.Decode(&skip); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return keys
 }
 
 // writeFile creates a file in a fresh temporary directory.
