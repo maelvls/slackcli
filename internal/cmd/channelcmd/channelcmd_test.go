@@ -41,6 +41,9 @@ type harness struct {
 	failOnce map[string]string
 	// empty makes the workspace have no conversation at all.
 	empty bool
+	// listing, when set, answers users.conversations and
+	// conversations.list instead of the single channel "general".
+	listing func(params map[string]any) map[string]any
 }
 
 func newHarness(t *testing.T) *harness {
@@ -111,6 +114,9 @@ func (h *harness) serve(method string, params map[string]any) map[string]any {
 	case "conversations.mark", "conversations.invite", "conversations.inviteShared":
 		return nil
 	}
+	if h.listing != nil {
+		return h.listing(params)
+	}
 	return map[string]any{
 		"channels":          []any{map[string]any{"id": "C000000001", "name": "general"}},
 		"response_metadata": map[string]any{"next_cursor": "n1"},
@@ -172,6 +178,119 @@ func TestListDefaultsToUsersConversations(t *testing.T) {
 	want := map[string]any{"channels": []any{map[string]any{"id": "C000000001", "name": "general"}}, "next_cursor": "n1"}
 	if !reflect.DeepEqual(out, want) {
 		t.Errorf("printed %s", h.stdout)
+	}
+}
+
+// A conversation is printed in a compact shape: Slack's object is some
+// twenty times larger, and --raw prints it.
+func TestListPrintsCompactConversations(t *testing.T) {
+	h := newHarness(t)
+	h.listing = func(map[string]any) map[string]any {
+		return map[string]any{"channels": []any{
+			map[string]any{
+				"id": "C000000001", "name": "general", "name_normalized": "general", "is_channel": true, "is_private": false,
+				"is_im": false, "is_mpim": false, "is_archived": false, "num_members": 42, "creator": "U000000001",
+				"topic":      map[string]any{"value": "the topic"},
+				"purpose":    map[string]any{"value": "the purpose"},
+				"properties": map[string]any{"tabs": []any{map[string]any{"id": "files"}}},
+			},
+			map[string]any{"id": "G000000001", "name": "secret", "is_private": true, "is_archived": true},
+			map[string]any{"id": "D000000001", "is_im": true, "user": "U000000123"},
+			map[string]any{"id": "G000000002", "name": "mpdm-alice--bob-1", "is_mpim": true, "is_private": true},
+		}}
+	}
+	out, err := h.run("list")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]any{"channels": []any{
+		map[string]any{"id": "C000000001", "name": "general", "num_members": float64(42)},
+		map[string]any{"id": "G000000001", "name": "secret", "is_private": true, "is_archived": true},
+		map[string]any{"id": "D000000001", "user": "U000000123", "is_im": true},
+		map[string]any{"id": "G000000002", "name": "mpdm-alice--bob-1", "is_private": true, "is_mpim": true},
+	}}
+	if !reflect.DeepEqual(out, want) {
+		t.Errorf("printed %s", h.stdout)
+	}
+
+	out, err = h.run("list", "--raw")
+	if err != nil {
+		t.Fatal(err)
+	}
+	first := out["channels"].([]any)[0].(map[string]any)
+	if first["creator"] != "U000000001" || first["topic"] == nil || first["properties"] == nil || first["is_channel"] != true {
+		t.Errorf("--raw printed %s", h.stdout)
+	}
+}
+
+// --name reads the whole listing, with the largest pages, and keeps the
+// conversations whose name contains the text.
+func TestListName(t *testing.T) {
+	h := newHarness(t)
+	h.listing = func(params map[string]any) map[string]any {
+		if params["cursor"] == nil {
+			return map[string]any{
+				"channels": []any{
+					map[string]any{"id": "C000000001", "name": "general"},
+					map[string]any{"id": "C000000002", "name": "cert-manager"},
+					map[string]any{"id": "D000000001", "is_im": true, "user": "U000000123"},
+				},
+				"response_metadata": map[string]any{"next_cursor": "page-2"},
+			}
+		}
+		return map[string]any{"channels": []any{
+			map[string]any{"id": "C000000003", "name": "cert-manager-dev"},
+			map[string]any{"id": "C000000004", "name": "sig-auth"},
+		}}
+	}
+	out, err := h.run("list", "--name", "#Cert-Man")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]any{"channels": []any{
+		map[string]any{"id": "C000000002", "name": "cert-manager"},
+		map[string]any{"id": "C000000003", "name": "cert-manager-dev"},
+	}}
+	if !reflect.DeepEqual(out, want) || h.stderr.Len() != 0 {
+		t.Errorf("printed %s, stderr %s", h.stdout, h.stderr)
+	}
+	calls := h.only("users.conversations")
+	if len(calls) != 2 || calls[0].params["limit"] != 1000 || calls[0].params["cursor"] != nil || calls[1].params["cursor"] != "page-2" {
+		t.Errorf("calls = %+v", h.calls)
+	}
+
+	// --limit bounds what is printed, and stderr says that more match.
+	out, err = h.run("list", "--name", "cert", "--limit", "1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := out["channels"].([]any); len(got) != 1 || !strings.Contains(h.stderr.String(), `2 conversations match --name "cert", the first 1 are listed`) {
+		t.Errorf("--limit 1 printed %s, stderr %s", h.stdout, h.stderr)
+	}
+
+	// Nothing matches: "channels" is [] and stderr says where else to look.
+	out, err = h.run("list", "--name", "nothing")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, ok := out["channels"].([]any); !ok || len(got) != 0 || !strings.Contains(h.stderr.String(), "add --all") {
+		t.Errorf("no match printed %s, stderr %s", h.stdout, h.stderr)
+	}
+	if _, err = h.run("list", "--all", "--name", "nothing"); err != nil || strings.Contains(h.stderr.String(), "add --all") || len(h.only("conversations.list")) != 2 {
+		t.Errorf("--all, no match: err = %v, stderr %s, calls %v", err, h.stderr, h.methods())
+	}
+
+	for _, tc := range []struct {
+		args []string
+		want string
+	}{
+		{[]string{"list", "--name", "cert", "--cursor", "page-2"}, "--name cannot be used with --cursor"},
+		{[]string{"list", "--name", " # "}, "--name is empty"},
+	} {
+		out, err := h.run(tc.args...)
+		if err == nil || !strings.Contains(err.Error(), tc.want) || out != nil || len(h.calls) != 0 {
+			t.Errorf("%v: printed %v, err = %v, calls = %+v", tc.args, out, err, h.calls)
+		}
 	}
 }
 
