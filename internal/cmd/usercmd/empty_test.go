@@ -12,7 +12,7 @@ func TestListWithNoUsers(t *testing.T) {
 	if _, err := h.run("list"); err != nil {
 		t.Fatal(err)
 	}
-	if got, want := h.stdout.String(), "{\n  \"users\": []\n}\n"; got != want {
+	if got, want := h.stdout.String(), "{\"users\":[]}\n"; got != want {
 		t.Errorf("printed %s, want %s", got, want)
 	}
 }

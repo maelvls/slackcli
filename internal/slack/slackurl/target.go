@@ -72,6 +72,11 @@ func ParseTarget(input string) (Target, error) {
 	switch {
 	case slackid.IsUserID(trimmed):
 		return Target{Kind: TargetUser, UserID: trimmed}, nil
+	case strings.HasPrefix(trimmed, "@"):
+		// No channel name starts with "@": this is a user handle, and
+		// looking up a channel called "#@handle" would only say that it
+		// does not exist.
+		return Target{}, fmt.Errorf(`%q is a user handle, not a target: pass the user's ID (U…), which "user get %s" prints, to designate the DM with that user`, trimmed, trimmed)
 	case strings.HasPrefix(trimmed, "#"), slackid.IsChannelID(trimmed):
 		return Target{Kind: TargetChannel, Channel: trimmed}, nil
 	}

@@ -38,7 +38,8 @@ Prints JSON:
                                  than unread_count (see messages_truncated)
     mention_count                unread mentions of you, from Slack
     messages                     the unread messages fetched, oldest first:
-                                 ts, author {user_id, bot_id}, content (as
+                                 ts, time (ts as a local date and time),
+                                 author {user_id, bot_id}, content (as
                                  Markdown), thread_ts, reply_count
     system_messages_hidden       number of fetched unread messages left out
                                  of messages because they are system

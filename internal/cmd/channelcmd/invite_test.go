@@ -163,7 +163,7 @@ func TestListWithNoChannels(t *testing.T) {
 		if _, err := h.run(args...); err != nil {
 			t.Fatal(err)
 		}
-		if got, want := h.stdout.String(), "{\n  \"channels\": []\n}\n"; got != want {
+		if got, want := h.stdout.String(), "{\"channels\":[]}\n"; got != want {
 			t.Errorf("%v printed %s, want %s", args, got, want)
 		}
 	}

@@ -16,9 +16,9 @@ func TestNoMatchPrintsEmptyLists(t *testing.T) {
 		return map[string]any{"files": map[string]any{"matches": []any{}}}, nil
 	})
 	for kind, want := range map[string]string{
-		"messages": "{\n  \"messages\": []\n}\n",
-		"files":    "{\n  \"files\": []\n}\n",
-		"all":      "{\n  \"messages\": [],\n  \"files\": []\n}\n",
+		"messages": "{\"messages\":[]}\n",
+		"files":    "{\"files\":[]}\n",
+		"all":      "{\"messages\":[],\"files\":[]}\n",
 	} {
 		got, err := h.run(kind, "nothing like this")
 		if err != nil {

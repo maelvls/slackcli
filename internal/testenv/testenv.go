@@ -3,6 +3,8 @@
 package testenv
 
 import (
+	"bytes"
+	"encoding/json"
 	"path/filepath"
 	"testing"
 )
@@ -32,4 +34,16 @@ func Isolate(t testing.TB) (home string) {
 		t.Setenv(name, dir)
 	}
 	return home
+}
+
+// CompactJSON returns an indented JSON document the way a command prints
+// it when its output is not a terminal: on one line, followed by a
+// newline. Tests write the output they expect indented, for the reader.
+func CompactJSON(t testing.TB, indented string) string {
+	t.Helper()
+	var out bytes.Buffer
+	if err := json.Compact(&out, []byte(indented)); err != nil {
+		t.Fatalf("the expected output is not valid JSON: %v\n%s", err, indented)
+	}
+	return out.String() + "\n"
 }

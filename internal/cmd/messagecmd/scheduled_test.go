@@ -3,6 +3,8 @@ package messagecmd
 import (
 	"reflect"
 	"testing"
+
+	"github.com/maelvls/slackcli/internal/testenv"
 )
 
 func scheduledListFixture(h *harness) {
@@ -62,7 +64,7 @@ func TestScheduledListFieldOrder(t *testing.T) {
   "next_cursor": "next-1"
 }
 `
-	if out != want {
+	if want := testenv.CompactJSON(t, want); out != want {
 		t.Errorf("output:\n%s\nwant:\n%s", out, want)
 	}
 }
@@ -109,7 +111,7 @@ func TestScheduledListWithNothingScheduled(t *testing.T) {
 	h := newHarness(t)
 	for _, args := range [][]string{{"scheduled", "list"}, {"scheduled"}, {"scheduled", "list", "--channel", testChannel}} {
 		h.mustRun(args...)
-		if want := "{\n  \"ok\": true,\n  \"scheduled_messages\": []\n}\n"; h.stdout.String() != want {
+		if want := "{\"ok\":true,\"scheduled_messages\":[]}\n"; h.stdout.String() != want {
 			t.Errorf("%v printed %s, want %s", args, h.stdout, want)
 		}
 	}

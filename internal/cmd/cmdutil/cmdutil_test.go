@@ -257,7 +257,7 @@ func TestParseMessageTarget(t *testing.T) {
 	}
 	_, _, err = ParseMessageTarget(e.rt, "app later save", "U12345678", "", messageTS)
 	wantErr(t, err, `"app later save" does not support user ID targets`)
-	wantErr(t, err, "user dm-open U12345678")
+	wantErr(t, err, "message list U12345678")
 	_, _, err = ParseMessageTarget(e.rt, "app later save", "#general", "", "")
 	wantErr(t, err, "--ts is required")
 	_, _, err = ParseMessageTarget(e.rt, "app later save", "not/a/target", "", "")
@@ -431,24 +431,24 @@ func TestPrintList(t *testing.T) {
 		want string
 	}{
 		{"empty collection is kept in field order", printed{OK: true}, []string{"items"},
-			"{\n  \"ok\": true,\n  \"items\": []\n}\n"},
+			"{\"ok\":true,\"items\":[]}\n"},
 		{"between its neighbours, omitempty included", &printed{OK: true, Cursor: "c1"}, []string{"items", "files"},
-			"{\n  \"ok\": true,\n  \"items\": [],\n  \"files\": [],\n  \"next_cursor\": \"c1\"\n}\n"},
+			"{\"ok\":true,\"items\":[],\"files\":[],\"next_cursor\":\"c1\"}\n"},
 		{"a collection whose entries all prune away", printed{OK: true, Items: []map[string]any{{"a": ""}}}, []string{"items"},
-			"{\n  \"ok\": true,\n  \"items\": []\n}\n"},
+			"{\"ok\":true,\"items\":[]}\n"},
 		{"non-empty output is untouched", printed{OK: true, Items: []map[string]any{{"id": "1", "tags": []string{"<b>&"}, "blank": ""}}}, []string{"items"},
-			"{\n  \"ok\": true,\n  \"items\": [\n    {\n      \"id\": \"1\",\n      \"tags\": [\n        \"<b>&\"\n      ]\n    }\n  ]\n}\n"},
-		{"nested values keep their indentation", printed{OK: true, Items: []map[string]any{{"id": "1"}}}, []string{"files"},
-			"{\n  \"ok\": true,\n  \"items\": [\n    {\n      \"id\": \"1\"\n    }\n  ],\n  \"files\": []\n}\n"},
+			"{\"ok\":true,\"items\":[{\"id\":\"1\",\"tags\":[\"<b>&\"]}]}\n"},
+		{"nested values are left as they are", printed{OK: true, Items: []map[string]any{{"id": "1"}}}, []string{"files"},
+			"{\"ok\":true,\"items\":[{\"id\":\"1\"}],\"files\":[]}\n"},
 		{"everything pruned", struct {
 			Channels []string `json:"channels"`
-		}{}, []string{"channels"}, "{\n  \"channels\": []\n}\n"},
+		}{}, []string{"channels"}, "{\"channels\":[]}\n"},
 		{"map: sorted position", map[string]any{"ok": true, "zebra": 1, "items": nil}, []string{"items"},
-			"{\n  \"items\": [],\n  \"ok\": true,\n  \"zebra\": 1\n}\n"},
+			"{\"items\":[],\"ok\":true,\"zebra\":1}\n"},
 		{"map without the key: last", map[string]any{"ok": true}, []string{"items"},
-			"{\n  \"ok\": true,\n  \"items\": []\n}\n"},
-		{"no keys: plain Print", printed{OK: true}, nil, "{\n  \"ok\": true\n}\n"},
-		{"not an object", []string{"a"}, []string{"items"}, "[\n  \"a\"\n]\n"},
+			"{\"ok\":true,\"items\":[]}\n"},
+		{"no keys: plain Print", printed{OK: true}, nil, "{\"ok\":true}\n"},
+		{"not an object", []string{"a"}, []string{"items"}, "[\"a\"]\n"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			e := newEnv(t, acme)

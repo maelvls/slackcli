@@ -2,7 +2,9 @@ package messages
 
 import (
 	"net/url"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/maelvls/slackcli/internal/jsonx"
 	"github.com/maelvls/slackcli/internal/slack/files"
@@ -19,9 +21,15 @@ const DefaultMaxBodyChars = 8000
 type CompactMessage struct {
 	ChannelID string `json:"channel_id"`
 	TS        string `json:"ts"`
+	// Time is TS as a date and time (see FormatTime): TS identifies the
+	// message, Time says when it was posted.
+	Time string `json:"time,omitempty"`
 	// ThreadTS is set for replies and for roots that have replies.
-	ThreadTS string  `json:"thread_ts,omitempty"`
-	Author   *Author `json:"author,omitempty"`
+	ThreadTS string `json:"thread_ts,omitempty"`
+	// ReplyCount is the number of replies of a thread root, which tells
+	// whether the thread is worth listing; 0 for the other messages.
+	ReplyCount int     `json:"reply_count,omitempty"`
+	Author     *Author `json:"author,omitempty"`
 	// Content is the message rendered as Markdown.
 	Content          string            `json:"content,omitempty"`
 	Files            []CompactFile     `json:"files,omitempty"`
@@ -33,6 +41,28 @@ type CompactMessage struct {
 type Author struct {
 	UserID string `json:"user_id,omitempty"`
 	BotID  string `json:"bot_id,omitempty"`
+	// Name is a name to call the author by, when one is known without
+	// asking Slack for it: search results come with the author's handle,
+	// and --resolve-users fills in the display name.
+	Name string `json:"name,omitempty"`
+}
+
+// FormatTime renders a Slack ts ("1770165109.628379") as an RFC 3339 date
+// and time to the second, in loc (time.Local when nil):
+// "2026-02-04T01:31:49+01:00". It returns "" when ts is not a timestamp.
+//
+// A ts is a Unix time, which neither a person nor a model reads: asked
+// what was said yesterday, either would have to convert every one of them.
+func FormatTime(ts string, loc *time.Location) string {
+	sec, _, _ := strings.Cut(strings.TrimSpace(ts), ".")
+	n, err := strconv.ParseInt(sec, 10, 64)
+	if err != nil || n <= 0 {
+		return ""
+	}
+	if loc == nil {
+		loc = time.Local
+	}
+	return time.Unix(n, 0).In(loc).Format(time.RFC3339)
 }
 
 // CompactFile is a downloaded (or failed to download) attachment.
@@ -73,14 +103,19 @@ type CompactOptions struct {
 	// Downloads maps file IDs to download outcomes. Only files with an
 	// entry are listed.
 	Downloads map[string]files.DownloadResult
+	// Location is the time zone of CompactMessage.Time; nil means
+	// time.Local.
+	Location *time.Location
 }
 
 // ToCompact converts a fetched message to the shape the CLI prints.
 func ToCompact(msg Message, opts CompactOptions) CompactMessage {
 	out := CompactMessage{
-		ChannelID: msg.ChannelID,
-		TS:        msg.TS,
-		ThreadTS:  msg.ThreadTS,
+		ChannelID:  msg.ChannelID,
+		TS:         msg.TS,
+		Time:       FormatTime(msg.TS, opts.Location),
+		ThreadTS:   msg.ThreadTS,
+		ReplyCount: msg.ReplyCount,
 		Content: truncate(slacktext.RenderMessageContent(map[string]any{
 			"text":        msg.Text,
 			"blocks":      msg.Blocks,

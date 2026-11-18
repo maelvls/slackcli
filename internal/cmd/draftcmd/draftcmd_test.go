@@ -727,7 +727,7 @@ func TestListWithNoDrafts(t *testing.T) {
 	h := newHarness(t)
 	out := h.mustRun("list")
 	// "drafts" is present although empty: jq '.drafts[]' must not fail.
-	if want := "{\n  \"ok\": true,\n  \"drafts\": [],\n  \"count\": 0\n}\n"; out != want {
+	if want := "{\"ok\":true,\"drafts\":[],\"count\":0}\n"; out != want {
 		t.Errorf("output = %s, want %s", out, want)
 	}
 }

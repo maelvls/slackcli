@@ -39,6 +39,7 @@ func TestGetByURL(t *testing.T) {
 	wantJSON(t, got, `{"message": {
 		"channel_id": "C12345678",
 		"ts": "1770165109.628379",
+		"time": "2026-02-04T00:31:49Z",
 		"author": {"user_id": "U05BRPTKL6A"},
 		"content": "hello *world*"
 	}}`)
@@ -109,7 +110,8 @@ func TestGetValidation(t *testing.T) {
 		{"truncated ts", []string{"get", testChannel, "--ts", "1770165109"}, "invalid --ts"},
 		{"ts contradicting URL", []string{"get", testURL, "--ts", "1770160000.000001"}, "contradicts the message URL"},
 		{"garbage thread ts", []string{"get", testURL, "--thread-ts", "x"}, "invalid --thread-ts"},
-		{"user target", []string{"get", "U05BRPTKL6A"}, "does not support user ID targets"},
+		{"user target without ts", []string{"get", "U05BRPTKL6A"}, `--ts is required when the target is a user ID: pass --ts "<seconds>.<micros>"`},
+		{"user handle", []string{"get", "@alice", "--ts", testTS}, `"@alice" is a user handle, not a target`},
 		{"non-numeric max-body-chars", []string{"get", testURL, "--max-body-chars", "abc"}, `invalid argument "abc" for "--max-body-chars"`},
 		{"fractional max-body-chars", []string{"get", testURL, "--max-body-chars", "3.5"}, "--max-body-chars"},
 		{"zero max-body-chars", []string{"get", testURL, "--max-body-chars", "0"}, "must be a positive integer, or -1 for unlimited"},
@@ -281,6 +283,7 @@ func TestGetDownloadsFiles(t *testing.T) {
 	wantJSON(t, got, fmt.Sprintf(`{"message": {
 		"channel_id": "C12345678",
 		"ts": "1770165109.628379",
+		"time": "2026-02-04T00:31:49Z",
 		"content": "see attached",
 		"files": [
 			{"name": "notes.txt", "mimetype": "text/plain", "path": %q},
@@ -304,11 +307,12 @@ func threadFixture(h *harness) {
 }
 
 // A thread is printed in the shape of channel history: channel_id at the
-// top, and on every message its channel_id and thread_ts.
+// top, and on every message its channel_id and thread_ts; the root says
+// how many replies it has.
 const wantThread = `{"channel_id": "C12345678", "messages": [
-	{"channel_id": "C12345678", "ts": "1770160000.000001", "thread_ts": "1770160000.000001", "author": {"user_id": "U05BRPTKL6A"}, "content": "root"},
-	{"channel_id": "C12345678", "ts": "1770160500.000100", "thread_ts": "1770160000.000001", "author": {"user_id": "U0AAAAAAAAA"}, "content": "first"},
-	{"channel_id": "C12345678", "ts": "1770160600.000200", "thread_ts": "1770160000.000001", "author": {"user_id": "U05BRPTKL6A"}, "content": "second"}
+	{"channel_id": "C12345678", "ts": "1770160000.000001", "time": "2026-02-03T23:06:40Z", "thread_ts": "1770160000.000001", "reply_count": 2, "author": {"user_id": "U05BRPTKL6A"}, "content": "root"},
+	{"channel_id": "C12345678", "ts": "1770160500.000100", "time": "2026-02-03T23:15:00Z", "thread_ts": "1770160000.000001", "author": {"user_id": "U0AAAAAAAAA"}, "content": "first"},
+	{"channel_id": "C12345678", "ts": "1770160600.000200", "time": "2026-02-03T23:16:40Z", "thread_ts": "1770160000.000001", "author": {"user_id": "U05BRPTKL6A"}, "content": "second"}
 ]}`
 
 func TestListThread(t *testing.T) {
@@ -379,8 +383,8 @@ func TestListHistory(t *testing.T) {
 	wantJSON(t, got, `{
 		"channel_id": "C12345678",
 		"messages": [
-			{"channel_id": "C12345678", "ts": "1770160000.000001", "thread_ts": "1770160000.000001", "author": {"user_id": "U0AAAAAAAAA"}, "content": "older"},
-			{"channel_id": "C12345678", "ts": "1770160600.000200", "author": {"user_id": "U05BRPTKL6A"}, "content": "newer"}
+			{"channel_id": "C12345678", "ts": "1770160000.000001", "time": "2026-02-03T23:06:40Z", "thread_ts": "1770160000.000001", "reply_count": 2, "author": {"user_id": "U0AAAAAAAAA"}, "content": "older"},
+			{"channel_id": "C12345678", "ts": "1770160600.000200", "time": "2026-02-03T23:16:40Z", "author": {"user_id": "U05BRPTKL6A"}, "content": "newer"}
 		]
 	}`)
 	want := map[string]any{"channel": testChannel, "limit": 50, "oldest": "1770100000", "latest": "1770170000.000000"}
@@ -389,12 +393,195 @@ func TestListHistory(t *testing.T) {
 	}
 }
 
+// --oldest and --latest take a day or a date and time, in the local time
+// zone (UTC in these tests), as well as a ts.
+func TestListHistoryDateBounds(t *testing.T) {
+	for _, tc := range []struct {
+		oldest, latest         string
+		wantOldest, wantLatest string
+	}{
+		{"2026-02-03", "2026-02-04", "1770076800", "1770163200"},
+		{"2026-02-04T12:30", "2026-02-04T12:30:15", "1770208200", "1770208215"},
+		{"2026-02-04 12:30", "2026-02-04 12:30:15", "1770208200", "1770208215"},
+		{"2026-02-04T01:00:00+01:00", "2026-02-04T00:31:49Z", "1770163200", "1770165109"},
+		{"1770100000", "1770170000.000000", "1770100000", "1770170000.000000"},
+	} {
+		h := newHarness(t)
+		h.history(map[string]any{"ts": "1770165109.628379", "user": "U05BRPTKL6A", "text": "hello"})
+		h.mustRun("list", testChannel, "--oldest", tc.oldest, "--latest", tc.latest)
+		if p := h.callsTo("conversations.history")[0].params; p["oldest"] != tc.wantOldest || p["latest"] != tc.wantLatest {
+			t.Errorf("--oldest %s --latest %s: conversations.history params = %v", tc.oldest, tc.latest, p)
+		}
+	}
+
+	h := newHarness(t)
+	h.mustFail("--oldest 1770163200 is not before --latest 1770076800", "list", testChannel, "--oldest", "2026-02-04", "--latest", "2026-02-03")
+	err := h.mustFail(`invalid --oldest value "last week"`, "list", testChannel, "--oldest", "last week")
+	for _, want := range []string{"a day (2026-01-31)", "2026-01-31T14:30", "a Slack ts"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q does not mention %q", err, want)
+		}
+	}
+	h.wantCalls()
+
+	// The hint about an empty window says when its bounds are.
+	h.history()
+	h.mustRun("list", testChannel, "--oldest", "2026-02-03")
+	if want := "No messages matched in the channel after 1770076800 (2026-02-03T00:00:00Z)."; !strings.Contains(h.stderr.String(), want) {
+		t.Errorf("stderr = %q, want %q", h.stderr, want)
+	}
+}
+
+// Joins and the like are left out of a channel's history, and counted.
+func TestListHistoryHidesSystemMessages(t *testing.T) {
+	h := newHarness(t)
+	h.history(
+		map[string]any{"ts": "1770160600.000200", "user": "U05BRPTKL6A", "text": "<@U05BRPTKL6A> has joined the channel", "subtype": "channel_join"},
+		map[string]any{"ts": "1770160500.000100", "user": "U0AAAAAAAAA", "text": "set the channel topic: x", "subtype": "channel_topic"},
+		map[string]any{"ts": "1770160000.000001", "user": "U0AAAAAAAAA", "text": "hello"},
+	)
+	got := h.mustRun("list", testChannel)
+	wantJSON(t, got, `{
+		"channel_id": "C12345678",
+		"messages": [
+			{"channel_id": "C12345678", "ts": "1770160000.000001", "time": "2026-02-03T23:06:40Z", "author": {"user_id": "U0AAAAAAAAA"}, "content": "hello"}
+		],
+		"system_messages_hidden": 2
+	}`)
+	if h.stderr.Len() != 0 {
+		t.Errorf("stderr = %q", h.stderr)
+	}
+
+	got = h.mustRun("list", testChannel, "--include-system")
+	if msgs := got["messages"].([]any); len(msgs) != 3 || got["system_messages_hidden"] != nil {
+		t.Errorf("--include-system printed %s", h.stdout)
+	}
+
+	// Nothing but system messages: stderr says why "messages" is empty.
+	h.history(map[string]any{"ts": "1770160600.000200", "user": "U05BRPTKL6A", "text": "<@U05BRPTKL6A> has joined the channel", "subtype": "channel_join"})
+	got = h.mustRun("list", testChannel)
+	wantJSON(t, got, `{"channel_id": "C12345678", "messages": [], "system_messages_hidden": 1}`)
+	if want := "other than 1 system messages (joins, leaves, topic changes …): pass --include-system to see them."; !strings.Contains(h.stderr.String(), want) {
+		t.Errorf("stderr = %q, want %q", h.stderr, want)
+	}
+}
+
+// --expand-threads lists the replies of each thread after its root: one
+// call for what would otherwise take one per thread.
+func TestListHistoryExpandThreads(t *testing.T) {
+	h := newHarness(t)
+	h.history(
+		map[string]any{"ts": "1770160700.000300", "user": "U05BRPTKL6A", "text": "newer"},
+		map[string]any{"ts": "1770160000.000001", "thread_ts": "1770160000.000001", "reply_count": 2, "user": "U05BRPTKL6A", "text": "root"},
+	)
+	threadFixture(h)
+	got := h.mustRun("list", testChannel, "--expand-threads")
+	wantJSON(t, got, `{"channel_id": "C12345678", "messages": [
+		{"channel_id": "C12345678", "ts": "1770160000.000001", "time": "2026-02-03T23:06:40Z", "thread_ts": "1770160000.000001", "reply_count": 2, "author": {"user_id": "U05BRPTKL6A"}, "content": "root"},
+		{"channel_id": "C12345678", "ts": "1770160500.000100", "time": "2026-02-03T23:15:00Z", "thread_ts": "1770160000.000001", "author": {"user_id": "U0AAAAAAAAA"}, "content": "first"},
+		{"channel_id": "C12345678", "ts": "1770160600.000200", "time": "2026-02-03T23:16:40Z", "thread_ts": "1770160000.000001", "author": {"user_id": "U05BRPTKL6A"}, "content": "second"},
+		{"channel_id": "C12345678", "ts": "1770160700.000300", "time": "2026-02-03T23:18:20Z", "author": {"user_id": "U05BRPTKL6A"}, "content": "newer"}
+	]}`)
+	if calls := h.callsTo("conversations.replies"); len(calls) != 1 || calls[0].params["ts"] != "1770160000.000001" {
+		t.Errorf("conversations.replies calls = %v", calls)
+	}
+
+	// Without the flag, the root alone, with its reply_count.
+	got = h.mustRun("list", testChannel)
+	if msgs := got["messages"].([]any); len(msgs) != 2 || msgs[0].(map[string]any)["reply_count"] != float64(2) || len(h.callsTo("conversations.replies")) != 0 {
+		t.Errorf("without --expand-threads: %s", h.stdout)
+	}
+
+	// A thread listing has its replies already.
+	h.mustFail("--expand-threads only applies to channel history", "list", testURL, "--expand-threads")
+	h.mustFail("--include-system only applies to channel history", "list", testChannel, "--thread-ts", "1770160000.000001", "--include-system")
+}
+
+// A user ID is the DM with that user. Reading it opens no DM: the one
+// that exists is looked for among the DMs, and when there is none, there
+// is nothing to read.
+func TestReadTheDMWithAUser(t *testing.T) {
+	h := newHarness(t)
+	h.history(map[string]any{"ts": testTS, "user": "U05BRPTKL6A", "text": "hello"})
+	h.fixtures["users.conversations"] = func(p map[string]any) (map[string]any, error) {
+		if p["cursor"] == nil {
+			return map[string]any{
+				"ok":                true,
+				"channels":          []any{map[string]any{"id": "D00000001", "is_im": true, "user": "U0AAAAAAAAA"}},
+				"response_metadata": map[string]any{"next_cursor": "page-2"},
+			}, nil
+		}
+		return map[string]any{"ok": true, "channels": []any{map[string]any{"id": "D12345678", "is_im": true, "user": "U05BRPTKL6A"}}}, nil
+	}
+	got := h.mustRun("list", "U05BRPTKL6A", "--limit", "5")
+	wantJSON(t, got, `{"channel_id": "D12345678", "messages": [
+		{"channel_id": "D12345678", "ts": "1770165109.628379", "time": "2026-02-04T00:31:49Z", "author": {"user_id": "U05BRPTKL6A"}, "content": "hello"}
+	]}`)
+	h.wantCalls(
+		call{"users.conversations", map[string]any{"types": "im", "limit": 1000, "exclude_archived": false}},
+		call{"users.conversations", map[string]any{"types": "im", "limit": 1000, "exclude_archived": false, "cursor": "page-2"}},
+		call{"conversations.history", map[string]any{"channel": "D12345678", "limit": 5}},
+	)
+
+	got = h.mustRun("get", "U05BRPTKL6A", "--ts", testTS)
+	if got["message"].(map[string]any)["channel_id"] != "D12345678" {
+		t.Errorf("get printed %s", h.stdout)
+	}
+
+	// No DM with that user: an error, and none is opened.
+	h.mustFail("there is no direct message with user U0BBBBBBBBB", "list", "U0BBBBBBBBB")
+	if n := len(h.callsTo("conversations.history")); n != 0 {
+		t.Errorf("%d conversations.history calls for a DM that does not exist", n)
+	}
+	h.mustFail("there is no direct message with user U0BBBBBBBBB", "get", "U0BBBBBBBBB", "--ts", testTS)
+
+	// Credentials that cannot list DMs: the error says what to pass.
+	h.fixtures["users.conversations"] = func(map[string]any) (map[string]any, error) {
+		return map[string]any{"ok": false, "error": "enterprise_is_restricted"}, nil
+	}
+	h.mustFail("pass the DM's channel ID (D…) or a message URL instead", "list", "U05BRPTKL6A")
+
+	if n := len(h.callsTo("conversations.open")); n != 0 {
+		t.Errorf("%d conversations.open calls: reading must not open a DM", n)
+	}
+}
+
+// --resolve-users names the author on the message itself.
+func TestResolveUsersNamesTheAuthor(t *testing.T) {
+	h := newHarness(t)
+	h.history(
+		map[string]any{"ts": "1770160600.000200", "user": "U05BRPTKL6A", "text": "newer"},
+		map[string]any{"ts": "1770160000.000001", "bot_id": "B0AAAAAAAAA", "text": "from a bot"},
+	)
+	h.fixtures["users.info"] = func(p map[string]any) (map[string]any, error) {
+		return map[string]any{"ok": true, "user": map[string]any{
+			"id": p["user"], "name": "alice", "real_name": "Alice Martin", "profile": map[string]any{"display_name": "ali"},
+		}}, nil
+	}
+	got := h.mustRun("list", testChannel, "--resolve-users")
+	msgs := got["messages"].([]any)
+	if author := msgs[1].(map[string]any)["author"]; !reflect.DeepEqual(author, map[string]any{"user_id": "U05BRPTKL6A", "name": "ali"}) {
+		t.Errorf("author = %v", author)
+	}
+	if author := msgs[0].(map[string]any)["author"]; !reflect.DeepEqual(author, map[string]any{"bot_id": "B0AAAAAAAAA"}) {
+		t.Errorf("bot author = %v", author)
+	}
+	if got["referenced_users"] == nil {
+		t.Error("referenced_users is gone")
+	}
+
+	got = h.mustRun("list", testChannel)
+	if author := got["messages"].([]any)[1].(map[string]any)["author"]; !reflect.DeepEqual(author, map[string]any{"user_id": "U05BRPTKL6A"}) {
+		t.Errorf("without --resolve-users: author = %v", author)
+	}
+}
+
 func TestListHistoryDefaultLimitAndEmptyResult(t *testing.T) {
 	h := newHarness(t)
 	got := h.mustRun("list", testChannel)
 	wantJSON(t, got, `{"channel_id": "C12345678", "messages": []}`)
 	// "messages" is there although empty: jq '.messages[]' must not fail.
-	if want := "{\n  \"channel_id\": \"C12345678\",\n  \"messages\": []\n}\n"; h.stdout.String() != want {
+	if want := "{\"channel_id\":\"C12345678\",\"messages\":[]}\n"; h.stdout.String() != want {
 		t.Errorf("printed %s, want %s", h.stdout, want)
 	}
 	if limit := h.callsTo("conversations.history")[0].params["limit"]; limit != 25 {
@@ -446,12 +633,12 @@ func TestListValidation(t *testing.T) {
 		{"limit above the maximum", []string{testChannel, "--limit", "1001"}, "must be between 1 and 1000"},
 		{"oldest garbage", []string{testChannel, "--oldest", "yesterday"}, "invalid --oldest"},
 		{"latest garbage", []string{testChannel, "--latest", "now"}, "invalid --latest"},
-		{"reaction filter without oldest", []string{testChannel, "--with-reaction", "dart"}, `reaction filters require --oldest "<seconds>.<micros>" to bound scan size.`},
+		{"reaction filter without oldest", []string{testChannel, "--with-reaction", "dart"}, "reaction filters require --oldest (a day such as 2026-01-31, or a ts such as 1770165109.628379) to bound scan size"},
 		{"negative filter without oldest", []string{testChannel, "--without-reaction", "dart"}, "reaction filters require --oldest"},
 		{"reaction filter with blank oldest", []string{testChannel, "--with-reaction", "dart", "--oldest", " "}, "reaction filters require --oldest"},
 		{"unknown emoji", []string{testChannel, "--oldest", "1770100000", "--with-reaction", "not an emoji"}, "--with-reaction: unsupported emoji"},
 		{"contradictory filters", []string{testChannel, "--oldest", "1770100000", "--with-reaction", "dart", "--without-reaction", "🎯"}, "both --with-reaction and --without-reaction"},
-		{"user target", []string{"U05BRPTKL6A"}, "does not support user ID targets"},
+		{"user handle", []string{"@alice"}, `"@alice" is a user handle, not a target: pass the user's ID (U…), which "user get @alice" prints`},
 		{"bad thread ts", []string{testChannel, "--thread-ts", "abc"}, "invalid --thread-ts"},
 		{"bad ts", []string{testChannel, "--ts", "abc"}, "invalid --ts"},
 		{"zero max-body-chars", []string{testChannel, "--max-body-chars", "0"}, "--max-body-chars"},

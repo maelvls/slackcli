@@ -1,9 +1,11 @@
 package channels
 
 import (
+	"cmp"
 	"context"
 	"fmt"
 	"strconv"
+	"strings"
 	"sync"
 
 	"github.com/maelvls/slackcli/internal/jsonx"
@@ -35,6 +37,83 @@ type ConversationsPage struct {
 	// limited the lookups (ListViaCounts), for the caller to show on
 	// stderr.
 	Warnings []string `json:"-"`
+}
+
+// Conversation is what `channel list` prints of a conversation by
+// default: enough to recognise it and to target it. Slack's own object is
+// some twenty times larger (tabs, canvas properties, a dozen booleans that
+// are false).
+type Conversation struct {
+	ID string `json:"id"`
+	// Name is empty for a DM, which has User instead.
+	Name string `json:"name,omitempty"`
+	// User is the other member of a DM.
+	User       string `json:"user,omitempty"`
+	IsPrivate  bool   `json:"is_private,omitempty"`
+	IsIM       bool   `json:"is_im,omitempty"`
+	IsMPIM     bool   `json:"is_mpim,omitempty"`
+	IsArchived bool   `json:"is_archived,omitempty"`
+	// NumMembers is 0 when Slack did not say.
+	NumMembers int `json:"num_members,omitempty"`
+}
+
+// Compact converts raw Slack conversation objects to the shape printed by
+// default.
+func Compact(raw []map[string]any) []Conversation {
+	out := make([]Conversation, len(raw))
+	for i, ch := range raw {
+		members, _ := jsonx.Int(ch["num_members"])
+		out[i] = Conversation{
+			ID:         jsonx.Str(ch["id"]),
+			Name:       cmp.Or(jsonx.Str(ch["name"]), jsonx.Str(ch["name_normalized"])),
+			User:       jsonx.Str(ch["user"]),
+			IsPrivate:  jsonx.Bool(ch["is_private"]),
+			IsIM:       jsonx.Bool(ch["is_im"]),
+			IsMPIM:     jsonx.Bool(ch["is_mpim"]),
+			IsArchived: jsonx.Bool(ch["is_archived"]),
+			NumMembers: members,
+		}
+	}
+	return out
+}
+
+// Lister returns one page of conversations: ListUser, ListAll or
+// ListViaCounts.
+type Lister func(ctx context.Context, client *slackapi.Client, opts ListOptions) (ConversationsPage, error)
+
+// FindByName pages through a whole listing and returns the conversations
+// whose name contains text, ignoring case (a leading "#" is ignored). DMs
+// have no name and never match. opts.Limit and opts.Cursor are not used:
+// the largest page is asked for, as the list methods are rate limited per
+// call.
+//
+// A rate limit after the first page ends the scan with what was found and
+// a warning (ConversationsPage.Warnings).
+func FindByName(ctx context.Context, client *slackapi.Client, list Lister, opts ListOptions, text string) (ConversationsPage, error) {
+	text = strings.ToLower(strings.TrimPrefix(strings.TrimSpace(text), "#"))
+	opts.Limit, opts.Cursor = maxListLimit, ""
+	var out ConversationsPage
+	for pages := 0; ; pages++ {
+		page, err := list(ctx, client, opts)
+		if err != nil {
+			if pages > 0 && enrich.IsRateLimit(err) {
+				out.Warnings = append(out.Warnings, fmt.Sprintf("the listing stopped early, the rest of the conversations were not looked at: %v", err))
+				return out, nil
+			}
+			return ConversationsPage{}, err
+		}
+		out.Warnings = append(out.Warnings, page.Warnings...)
+		for _, ch := range page.Channels {
+			name := strings.ToLower(cmp.Or(jsonx.Str(ch["name"]), jsonx.Str(ch["name_normalized"])))
+			if name != "" && strings.Contains(name, text) {
+				out.Channels = append(out.Channels, ch)
+			}
+		}
+		if page.NextCursor == "" || page.NextCursor == opts.Cursor {
+			return out, nil
+		}
+		opts.Cursor = page.NextCursor
+	}
 }
 
 // ListOptions selects a page of conversations.

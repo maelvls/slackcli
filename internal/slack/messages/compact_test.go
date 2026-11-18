@@ -4,6 +4,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 	"unicode/utf8"
 
 	"github.com/maelvls/slackcli/internal/output"
@@ -188,6 +189,7 @@ func TestCompactMessageJSON(t *testing.T) {
 	compact := ToCompact(msg, CompactOptions{
 		IncludeReactions: true,
 		Downloads:        map[string]files.DownloadResult{"F1": {OK: true, Path: "/tmp/F1.png"}},
+		Location:         time.UTC,
 	})
 	got, err := output.Marshal(compact)
 	if err != nil {
@@ -196,7 +198,9 @@ func TestCompactMessageJSON(t *testing.T) {
 	want := `{
   "channel_id": "C123",
   "ts": "5.000001",
+  "time": "1970-01-01T00:00:05Z",
   "thread_ts": "5.000001",
+  "reply_count": 2,
   "author": {
     "user_id": "U11111111"
   },

@@ -13,7 +13,8 @@ import (
 )
 
 // PrintList prints the result of a list-style command like
-// clictx.Context.Print (pruned JSON on stdout), except that the top-level
+// clictx.Context.Print (pruned JSON on stdout, indented on a terminal),
+// except that the top-level
 // collections named by keys are always present: an empty one is printed
 // as [] instead of being pruned, so that a consumer iterating over it
 // (jq '.messages[]') sees "nothing found" rather than a missing field.
@@ -21,7 +22,7 @@ import (
 // A key put back keeps the place it has in v: the position of its struct
 // field, or its sorted position in a map.
 func PrintList(rt *clictx.Context, v any, keys ...string) error {
-	pruned, err := output.Marshal(v)
+	pruned, err := output.MarshalCompact(v)
 	if err != nil {
 		return err
 	}
@@ -29,12 +30,17 @@ func PrintList(rt *clictx.Context, v any, keys ...string) error {
 	if err != nil {
 		return err
 	}
+	if output.Indented(rt.Stdout) {
+		if out, err = output.Indent(out); err != nil {
+			return err
+		}
+	}
 	_, err = fmt.Fprintf(rt.Stdout, "%s\n", out)
 	return err
 }
 
-// withEmptyLists returns pruned, the output.Marshal rendering of v, with
-// the missing keys put back as empty arrays.
+// withEmptyLists returns pruned, the output.MarshalCompact rendering of v,
+// with the missing keys put back as empty arrays.
 func withEmptyLists(v any, pruned []byte, keys []string) ([]byte, error) {
 	present, values, ok := topLevel(pruned)
 	if !ok {
@@ -56,8 +62,7 @@ func withEmptyLists(v any, pruned []byte, keys []string) ([]byte, error) {
 	}
 
 	var buf bytes.Buffer
-	buf.WriteString("{")
-	sep := "\n  "
+	sep := "{"
 	for _, k := range order {
 		value, kept := values[k]
 		switch {
@@ -71,12 +76,10 @@ func withEmptyLists(v any, pruned []byte, keys []string) ([]byte, error) {
 		if err != nil {
 			return nil, err
 		}
-		// value was rendered one level deep already: its own indentation
-		// still fits.
-		fmt.Fprintf(&buf, "%s%s: %s", sep, name, value)
-		sep = ",\n  "
+		fmt.Fprintf(&buf, "%s%s:%s", sep, name, value)
+		sep = ","
 	}
-	buf.WriteString("\n}")
+	buf.WriteString("}")
 	return buf.Bytes(), nil
 }
 

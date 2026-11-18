@@ -84,7 +84,10 @@ func TestHelpContracts(t *testing.T) {
 	wantContains(t, "message help", root.Long, "not covered  message react, message draft *, channel mark, later *,")
 
 	// What a command prints is part of its help.
-	wantContains(t, "list help", list.Long, "Prints {channel_id, messages: [{channel_id, ts, thread_ts, author: {user_id,")
+	wantContains(t, "list help", list.Long, "Prints {channel_id, messages: [{channel_id, ts, time, thread_ts, reply_count,")
+	wantContains(t, "list help", list.Long, "system_messages_hidden")
+	wantContains(t, "list --oldest", flagUsage(t, list, "oldest"), "a day (2026-01-31")
+	wantContains(t, "list --expand-threads", flagUsage(t, list, "expand-threads"), "replies of each thread")
 	wantContains(t, "list help", list.Long, `"messages" is [] when there are none`)
 	wantContains(t, "send help", send.Long, `must come after "--"`)
 	if usage := flagUsage(t, send, "blocks"); strings.Contains(usage, "<text>") {
