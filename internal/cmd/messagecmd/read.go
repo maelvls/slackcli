@@ -9,10 +9,10 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 
-	"github.com/maelvls/slackcli/internal/appinfo"
 	"github.com/maelvls/slackcli/internal/cmd/cmdutil"
 	"github.com/maelvls/slackcli/internal/slack/messages"
 	"github.com/maelvls/slackcli/internal/slack/slacktext"
@@ -39,6 +39,8 @@ type listOptions struct {
 	latest          string
 	withReaction    []string
 	withoutReaction []string
+	includeSystem   bool
+	expandThreads   bool
 }
 
 // getResult is the output of "get".
@@ -53,9 +55,12 @@ type getResult struct {
 // when it belongs to a thread), so that a message taken out of the list
 // still has the documented message shape.
 type listResult struct {
-	ChannelID       string                       `json:"channel_id"`
-	Messages        []messages.CompactMessage    `json:"messages"`
-	ReferencedUsers map[string]users.CompactUser `json:"referenced_users"`
+	ChannelID string                    `json:"channel_id"`
+	Messages  []messages.CompactMessage `json:"messages"`
+	// SystemMessagesHidden is the number of system messages (joins,
+	// leaves, topic changes …) left out of a channel's history.
+	SystemMessagesHidden int                          `json:"system_messages_hidden,omitempty"`
+	ReferencedUsers      map[string]users.CompactUser `json:"referenced_users"`
 }
 
 func addReadFlags(cmd *cobra.Command, o *readOptions) {
@@ -63,7 +68,7 @@ func addReadFlags(cmd *cobra.Command, o *readOptions) {
 	f.StringVar(&o.workspace, "workspace", "", cmdutil.TargetWorkspaceUsage)
 	f.IntVar(&o.maxBodyChars, "max-body-chars", messages.DefaultMaxBodyChars, "Max characters of each message's content to include; longer content is cut (-1 for unlimited)")
 	f.BoolVar(&o.includeReactions, "include-reactions", false, "Include reactions and the IDs of the users who reacted")
-	f.BoolVar(&o.resolveUsers, "resolve-users", false, `Add "referenced_users": the profiles of the user IDs appearing in the output (cached for 24h)`)
+	f.BoolVar(&o.resolveUsers, "resolve-users", false, `Name the users: add "name" to each author, and "referenced_users", the profiles of the user IDs appearing in the output (cached for 24h)`)
 	f.BoolVar(&o.refreshUsers, "refresh-users", false, "Like --resolve-users, but fetch the profiles again instead of using the cache")
 }
 
@@ -81,12 +86,13 @@ func (c *command) newGet() *cobra.Command {
 		Long: `Fetch a single Slack message (with thread summary if any).
 
 <target> is a Slack message URL, or a channel (#name, name, channel ID or
-channel URL) combined with --ts.
+channel URL) or a user ID (U…: the DM with that user) combined with --ts.
 
-Prints {message, thread, referenced_users}. "thread" ({ts, length}) is present
-when the message belongs to a thread: use "list" on the same target to read
-it. Attached files are downloaded and listed with their local path; a file
-that cannot be downloaded is listed with an "error" instead.`,
+Prints {message, thread, referenced_users}; see "list" for the fields of a
+message. "thread" ({ts, length}) is present when the message belongs to a
+thread: use "list" on the same target to read it. Attached files are
+downloaded and listed with their local path; a file that cannot be
+downloaded is listed with an "error" instead.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return c.runGet(cmd, args[0], opts)
@@ -98,8 +104,14 @@ that cannot be downloaded is listed with an "error" instead.`,
 
 func (c *command) runGet(cmd *cobra.Command, targetInput string, opts readOptions) error {
 	ctx := cmd.Context()
-	// "message <target>" is "message get <target>".
-	target, ts, err := cmdutil.ParseMessageTarget(c.rt, appinfo.Name+" message get", targetInput, opts.workspace, opts.ts)
+	// "message <target>" is "message get <target>". Reading opens no DM:
+	// a user target is the DM that exists with that user.
+	target, err := cmdutil.ParseTarget(c.rt, targetInput, opts.workspace)
+	if err != nil {
+		return err
+	}
+	target.ReadOnly = true
+	ts, err := target.MessageTS(opts.ts)
 	if err != nil {
 		return err
 	}
@@ -165,6 +177,15 @@ func (c *command) present(ctx context.Context, loc cmdutil.Located, msgs []messa
 	if err != nil {
 		return nil, nil, fmt.Errorf("resolving users: %w", err)
 	}
+	// Who wrote what is read off each message, without a detour through
+	// referenced_users.
+	for i := range compact {
+		if a := compact[i].Author; a != nil {
+			if u, ok := byID[a.UserID]; ok {
+				a.Name = cmp.Or(u.DisplayName, u.RealName, u.Name)
+			}
+		}
+	}
 	return compact, users.ToReferencedUsers(ids, byID), nil
 }
 
@@ -177,25 +198,34 @@ func (c *command) newList() *cobra.Command {
 
   list <channel>                   the most recent top-level messages of the
                                    channel, oldest first (--limit, --oldest,
-                                   --latest, --with-reaction, --without-reaction)
+                                   --latest, --expand-threads, --include-system,
+                                   --with-reaction, --without-reaction)
   list <message-url>               the whole thread that message belongs to
   list <channel> --ts <ts>         same, for the message with that ts
   list <channel> --thread-ts <ts>  the whole thread with that root
 
-<channel> is #name, name, a channel ID or a channel URL. Channel history does
-not include thread replies: a message with "thread_ts" has a thread, list it
-to read the replies. At most %d messages are returned per call; to page back,
-pass the ts of the oldest message received as --latest.
+<channel> is #name, name, a channel ID or a channel URL; a user ID (U…) is
+the DM with that user (none is opened: it is an error when there is none).
 
-Prints {channel_id, messages: [{channel_id, ts, thread_ts, author: {user_id,
-bot_id}, content, files, reactions, forwarded_threads}], referenced_users},
-oldest message first, in the same shape for a channel and for a thread.
-"messages" is [] when there are none, with a hint on stderr. "content" is
-Markdown. "thread_ts" is the root of the thread a message belongs to: every
-message of a listed thread has it, and in channel history only the messages
-that started a thread. "reactions" needs --include-reactions and
-"referenced_users" --resolve-users. Attached files are downloaded and listed
-with their local path, as by "get".`, messages.MaxHistoryLimit),
+Channel history has top-level messages only: a message with "reply_count"
+started a thread, whose replies are not listed. List that thread to read
+them, or pass --expand-threads to get the replies of every thread listed,
+each after its first message. System messages (joins, leaves, topic changes …)
+are left out and counted in "system_messages_hidden", unless
+--include-system is given. At most %d messages are returned per call; to page
+back, pass the ts of the oldest message received as --latest.
+
+Prints {channel_id, messages: [{channel_id, ts, time, thread_ts, reply_count,
+author: {user_id, bot_id, name}, content, files, reactions,
+forwarded_threads}], system_messages_hidden, referenced_users}, oldest
+message first, in the same shape for a channel and for a thread.
+"messages" is [] when there are none, with a hint on stderr. "time" is "ts"
+as a local date and time. "content" is Markdown. "thread_ts" is the root of
+the thread a message belongs to: every message of a listed thread has it,
+and in channel history only the messages that started a thread, which also
+have "reply_count". "reactions" needs --include-reactions; "author.name"
+and "referenced_users" need --resolve-users. Attached files are downloaded
+and listed with their local path, as by "get".`, messages.MaxHistoryLimit),
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return c.runList(cmd, args[0], opts)
@@ -206,15 +236,17 @@ with their local path, as by "get".`, messages.MaxHistoryLimit),
 	f.StringVar(&opts.threadTS, "thread-ts", "", "Thread root ts: list that thread (root and replies) instead of the channel history. Cannot be combined with a different --ts")
 	f.StringVar(&opts.ts, "ts", "", "Message ts: list the thread that message belongs to. Cannot be combined with a different --thread-ts")
 	f.IntVar(&opts.limit, "limit", messages.DefaultHistoryLimit, fmt.Sprintf("Max messages to return (channel history mode; 1 to %d)", messages.MaxHistoryLimit))
-	f.StringVar(&opts.oldest, "oldest", "", "Only messages after this ts or Unix time, exclusive (channel history mode)")
-	f.StringVar(&opts.latest, "latest", "", "Only messages before this ts or Unix time, exclusive (channel history mode)")
+	f.StringVar(&opts.oldest, "oldest", "", "Only messages after this moment, exclusive: a day (2026-01-31, which starts at 00:00 local time), a date and time (2026-01-31T14:30 local time, or with an offset: 2026-01-31T14:30:00Z), a Slack ts or a Unix time (channel history mode)")
+	f.StringVar(&opts.latest, "latest", "", "Only messages before this moment, exclusive, written like --oldest: --oldest 2026-01-30 --latest 2026-01-31 is the whole of January 30 (channel history mode)")
+	f.BoolVar(&opts.expandThreads, "expand-threads", false, "Also list the replies of each thread, after its first message: one call instead of one per thread (channel history mode)")
+	f.BoolVar(&opts.includeSystem, "include-system", false, `Include system messages (joins, leaves, topic changes, etc.) instead of only counting them in "system_messages_hidden" (channel history mode)`)
 	f.StringArrayVar(&opts.withReaction, "with-reaction", nil, "Only messages carrying this reaction (:eyes:, eyes or 👀; repeatable, all must be present; channel history mode; requires --oldest)")
 	f.StringArrayVar(&opts.withoutReaction, "without-reaction", nil, "Only messages not carrying this reaction (repeatable; channel history mode; requires --oldest)")
 	return cmd
 }
 
 // historyOnlyFlags only make sense when listing a channel's history.
-var historyOnlyFlags = []string{"limit", "oldest", "latest", "with-reaction", "without-reaction"}
+var historyOnlyFlags = []string{"limit", "oldest", "latest", "with-reaction", "without-reaction", "expand-threads", "include-system"}
 
 // parseReactionFilters normalises repeatable reaction flags to bare
 // reaction names, without duplicates.
@@ -237,7 +269,7 @@ func parseReactionFilters(flag string, raw []string) ([]string, error) {
 // the whole channel.
 func requireOldestForReactionFilters(oldest string, hasFilters bool) error {
 	if hasFilters && oldest == "" {
-		return errors.New(`reaction filters require --oldest "<seconds>.<micros>" to bound scan size. Example: --oldest "1770165109.628379"`)
+		return errors.New(`reaction filters require --oldest (a day such as 2026-01-31, or a ts such as 1770165109.628379) to bound scan size`)
 	}
 	return nil
 }
@@ -248,9 +280,9 @@ func (c *command) runList(cmd *cobra.Command, targetInput string, opts listOptio
 	if err != nil {
 		return err
 	}
-	if err := target.NoUser(cmd.CommandPath()); err != nil {
-		return err
-	}
+	// Reading opens no DM: a user target is the DM that exists with that
+	// user.
+	target.ReadOnly = true
 	if err := cmdutil.CheckMaxChars("--max-body-chars", opts.maxBodyChars); err != nil {
 		return err
 	}
@@ -352,27 +384,39 @@ func (c *command) listHistory(ctx context.Context, target cmdutil.Target, opts l
 	}
 
 	result, err := cmdutil.WithTarget(ctx, c.rt, target, func(loc cmdutil.Located) (listResult, error) {
-		msgs, err := messages.FetchChannelHistory(ctx, loc.Client, loc.ChannelID, messages.HistoryOptions{
+		history, err := messages.FetchChannelHistory(ctx, loc.Client, loc.ChannelID, messages.HistoryOptions{
 			Limit:            opts.limit,
 			Latest:           latest,
 			Oldest:           oldest,
 			IncludeReactions: opts.includeReactions,
 			WithReactions:    with,
 			WithoutReactions: without,
+			IncludeSystem:    opts.includeSystem,
 		})
 		if err != nil {
 			return listResult{}, err
+		}
+		msgs := history.Messages
+		if opts.expandThreads {
+			if msgs, err = messages.ExpandThreads(ctx, loc.Client, loc.ChannelID, msgs, opts.includeReactions); err != nil {
+				return listResult{}, err
+			}
 		}
 		compact, referenced, err := c.present(ctx, loc, msgs, opts.readOptions)
 		if err != nil {
 			return listResult{}, err
 		}
-		return listResult{ChannelID: loc.ChannelID, Messages: compact, ReferencedUsers: referenced}, nil
+		return listResult{ChannelID: loc.ChannelID, Messages: compact, SystemMessagesHidden: history.SystemHidden, ReferencedUsers: referenced}, nil
 	})
 	if err != nil {
 		return err
 	}
-	if len(result.Messages) == 0 {
+	switch {
+	case len(result.Messages) > 0:
+	case result.SystemMessagesHidden > 0:
+		c.rt.Hintf("No messages matched in %s, other than %d system messages (joins, leaves, topic changes …): pass --include-system to see them.",
+			describeRange(oldest, latest), result.SystemMessagesHidden)
+	default:
 		c.rt.Hintf("No messages matched in %s.", describeRange(oldest, latest))
 	}
 	return cmdutil.PrintList(c.rt, result, "messages")
@@ -380,14 +424,28 @@ func (c *command) listHistory(ctx context.Context, target cmdutil.Target, opts l
 
 var historyBoundRe = regexp.MustCompile(`^\d+(\.\d+)?$`)
 
-// parseHistoryBound validates --oldest / --latest: a message ts or a Unix
-// time in seconds.
+// historyBoundLayouts are the dates and times --oldest and --latest take,
+// read in the local time zone: that is the one "yesterday" is meant in.
+var historyBoundLayouts = []string{"2006-01-02", "2006-01-02T15:04", "2006-01-02T15:04:05", "2006-01-02 15:04", "2006-01-02 15:04:05"}
+
+// parseHistoryBound turns --oldest / --latest into what Slack takes: a
+// message ts or a Unix time in seconds, which are passed as they are, or a
+// day or a date and time, which are converted. A day is its first instant
+// in the local time zone, so that --oldest D --latest D+1 is the day D.
 func parseHistoryBound(flag, raw string) (string, error) {
 	v := strings.TrimSpace(raw)
-	if v != "" && !historyBoundRe.MatchString(v) {
-		return "", fmt.Errorf("invalid %s value %q: expected a Slack ts (1770165109.628379) or a Unix time in seconds", flag, raw)
+	if v == "" || historyBoundRe.MatchString(v) {
+		return v, nil
 	}
-	return v, nil
+	if t, err := time.Parse(time.RFC3339, v); err == nil {
+		return strconv.FormatInt(t.Unix(), 10), nil
+	}
+	for _, layout := range historyBoundLayouts {
+		if t, err := time.ParseInLocation(layout, v, time.Local); err == nil {
+			return strconv.FormatInt(t.Unix(), 10), nil
+		}
+	}
+	return "", fmt.Errorf("invalid %s value %q: expected a day (2026-01-31), a date and time (2026-01-31T14:30, local time, or with an offset: 2026-01-31T14:30:00Z), a Slack ts (1770165109.628379) or a Unix time in seconds", flag, raw)
 }
 
 // boundBefore reports whether the history bound a (validated by
@@ -399,15 +457,24 @@ func boundBefore(a, b string) bool {
 	return errA == nil && errB == nil && x < y
 }
 
+// describeBound words a history bound: the ts Slack was given, and when
+// that is.
+func describeBound(ts string) string {
+	if t := messages.FormatTime(ts, nil); t != "" {
+		return ts + " (" + t + ")"
+	}
+	return ts
+}
+
 // describeRange words the --oldest/--latest window for the "no messages"
 // hint, which says why "messages" is empty.
 func describeRange(oldest, latest string) string {
 	var parts []string
 	if oldest != "" {
-		parts = append(parts, "after "+oldest)
+		parts = append(parts, "after "+describeBound(oldest))
 	}
 	if latest != "" {
-		parts = append(parts, "before "+latest)
+		parts = append(parts, "before "+describeBound(latest))
 	}
 	if len(parts) == 0 {
 		return "the channel"

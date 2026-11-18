@@ -126,11 +126,6 @@ type Result struct {
 	Warnings []string `json:"-"`
 }
 
-var systemSubtypes = []string{
-	"channel_join", "channel_leave", "channel_topic", "channel_purpose", "channel_name", "channel_archive", "channel_unarchive",
-	"group_join", "group_leave", "group_topic", "group_purpose", "group_name", "group_archive", "group_unarchive",
-}
-
 // entry is a conversation with unreads, as listed by client.counts.
 type entry struct {
 	id       string
@@ -302,7 +297,7 @@ func fetchMessages(ctx context.Context, client *slackapi.Client, e entry, opts O
 	ch.MessagesTruncated = jsonx.Bool(history["has_more"])
 	ch.Messages = []Message{}
 	for _, m := range fetched {
-		if !opts.IncludeSystem && slices.Contains(systemSubtypes, jsonx.Str(m["subtype"])) {
+		if !opts.IncludeSystem && messages.IsSystem(jsonx.Str(m["subtype"])) {
 			ch.SystemMessagesHidden++
 			continue
 		}

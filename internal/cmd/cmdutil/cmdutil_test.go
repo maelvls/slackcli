@@ -257,7 +257,7 @@ func TestParseMessageTarget(t *testing.T) {
 	}
 	_, _, err = ParseMessageTarget(e.rt, "app later save", "U12345678", "", messageTS)
 	wantErr(t, err, `"app later save" does not support user ID targets`)
-	wantErr(t, err, "user dm-open U12345678")
+	wantErr(t, err, "message list U12345678")
 	_, _, err = ParseMessageTarget(e.rt, "app later save", "#general", "", "")
 	wantErr(t, err, "--ts is required")
 	_, _, err = ParseMessageTarget(e.rt, "app later save", "not/a/target", "", "")

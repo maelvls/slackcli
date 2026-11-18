@@ -65,6 +65,10 @@ type Target struct {
 	// Workspace is the selector to pass to clictx.Context.Client ("" for
 	// the default workspace).
 	Workspace string
+	// ReadOnly says that the command only reads. A user target then
+	// designates the DM that exists with that user: none is opened, and
+	// the absence of one is an error (channels.NoDMError).
+	ReadOnly bool
 }
 
 // ParseTarget parses a <target> argument (a Slack message or channel URL,
@@ -123,14 +127,15 @@ func ParseMessageTarget(rt *clictx.Context, command, arg, workspaceFlag, tsFlag 
 	return t, ts, nil
 }
 
-// NoUser rejects a user-ID target, for commands that designate a message
-// or a channel rather than somewhere to write to. command names the
-// command in the error.
+// NoUser rejects a user-ID target, for the commands that change a message
+// or a read cursor: those take a message URL or a channel, so that what is
+// about to be changed is named exactly. command names the command in the
+// error. (The commands that read accept a user ID, see Target.ReadOnly.)
 func (t Target) NoUser(command string) error {
 	if t.Kind != slackurl.TargetUser {
 		return nil
 	}
-	return fmt.Errorf(`%q does not support user ID targets: pass a Slack message URL, or the DM's channel ID (D…, see "%s user dm-open %s") with --ts`, command, appinfo.Name, t.UserID)
+	return fmt.Errorf(`%q does not support user ID targets: pass a Slack message URL, or the DM's channel ID with --ts (D…: it is the channel_id of the messages "%s message list %s" prints)`, command, appinfo.Name, t.UserID)
 }
 
 // MessageTS returns the ts of the message the target designates: the one
@@ -147,7 +152,11 @@ func (t Target) MessageTS(tsFlag string) (string, error) {
 		}
 		return t.Ref.MessageTS, nil
 	}
-	if ts == "" {
+	switch {
+	case ts != "":
+	case t.Kind == slackurl.TargetUser:
+		return "", fmt.Errorf(`--ts is required when the target is a user ID: pass --ts "<seconds>.<micros>" (e.g. 1770165109.628379; "%s message list %s" prints the ts of the messages of that DM), or a Slack message URL as the target`, appinfo.Name, t.UserID)
+	default:
 		return "", errors.New(`--ts is required when the target is a channel: pass --ts "<seconds>.<micros>" (e.g. 1770165109.628379), or a Slack message URL as the target`)
 	}
 	return ts, nil
@@ -155,12 +164,15 @@ func (t Target) MessageTS(tsFlag string) (string, error) {
 
 // ConversationID returns the ID of the conversation the target designates:
 // the channel of a URL, the channel a name resolves to, or the DM with a
-// user (opened if need be).
+// user (opened if need be, unless the target is ReadOnly).
 func (t Target) ConversationID(ctx context.Context, client *slackapi.Client) (string, error) {
 	switch t.Kind {
 	case slackurl.TargetURL:
 		return t.Ref.ChannelID, nil
 	case slackurl.TargetUser:
+		if t.ReadOnly {
+			return channels.FindDM(ctx, client, t.UserID)
+		}
 		return channels.OpenDM(ctx, client, t.UserID)
 	}
 	return channels.ResolveID(ctx, client, t.Channel)

@@ -138,6 +138,10 @@ func (h *harness) handle(_ context.Context, method string, params map[string]any
 	return map[string]any{"ok": true}, nil
 }
 
+// Messages are printed with the local time they were posted at ("time"):
+// the tests run in UTC, whatever the time zone of the machine.
+func init() { time.Local = time.UTC }
+
 type roundTripper func(req *http.Request) (*http.Response, error)
 
 func (f roundTripper) RoundTrip(req *http.Request) (*http.Response, error) { return f(req) }

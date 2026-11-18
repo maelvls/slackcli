@@ -47,6 +47,52 @@ func OpenDM(ctx context.Context, client *slackapi.Client, userID string) (string
 	return id, nil
 }
 
+// NoDMError says that no DM exists with a user.
+type NoDMError struct {
+	UserID string
+}
+
+func (e *NoDMError) Error() string {
+	return fmt.Sprintf("there is no direct message with user %s: nothing was ever written there, so there is nothing to read", e.UserID)
+}
+
+// FindDM returns the channel ID of the DM that exists with a user, by
+// looking for it among the caller's DMs (users.conversations). The error
+// is a *NoDMError when there is none.
+//
+// It never opens a DM: reading must not leave an empty conversation
+// behind. conversations.open cannot be used for that, even with
+// prevent_creation, which Slack ignores for browser credentials: the call
+// creates the DM.
+func FindDM(ctx context.Context, client *slackapi.Client, userID string) (string, error) {
+	cursor := ""
+	for {
+		params := map[string]any{"types": "im", "limit": scanPageSize, "exclude_archived": false}
+		if cursor != "" {
+			params["cursor"] = cursor
+		}
+		resp, err := client.API(ctx, "users.conversations", params)
+		if slackapi.IsErrorCode(err, listingDeniedCodes...) {
+			// Typically enterprise_is_restricted (browser tokens on
+			// Enterprise Grid) or a token without im:read.
+			return "", fmt.Errorf("looking for the DM with %s: %w (these credentials cannot list DMs: pass the DM's channel ID (D…) or a message URL instead)", userID, err)
+		}
+		if err != nil {
+			return "", fmt.Errorf("looking for the DM with %s: %w", userID, err)
+		}
+		for _, ch := range jsonx.Maps(resp["channels"]) {
+			if id := jsonx.Str(ch["id"]); id != "" && jsonx.Str(ch["user"]) == userID {
+				return id, nil
+			}
+		}
+		next := jsonx.GetStr(resp, "response_metadata", "next_cursor")
+		if next == "" || next == cursor {
+			return "", &NoDMError{UserID: userID}
+		}
+		cursor = next
+	}
+}
+
 // ResolveID turns a channel reference ("#general", "general" or an ID)
 // into a conversation ID. IDs are returned as-is without any API call.
 //

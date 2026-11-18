@@ -1,11 +1,13 @@
 package messages
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
 	"slices"
 	"strings"
+	"sync"
 
 	"github.com/maelvls/slackcli/internal/jsonx"
 	"github.com/maelvls/slackcli/internal/slack/enrich"
@@ -174,12 +176,25 @@ type HistoryOptions struct {
 	// match.
 	WithReactions    []string
 	WithoutReactions []string
+	// IncludeSystem keeps the system messages (see IsSystem), which are
+	// otherwise skipped and counted in History.SystemHidden: they do not
+	// count towards Limit.
+	IncludeSystem bool
+}
+
+// History is the result of FetchChannelHistory.
+type History struct {
+	// Messages are in chronological order (oldest first).
+	Messages []Message
+	// SystemHidden is the number of system messages that were skipped
+	// while collecting Messages.
+	SystemHidden int
 }
 
 // FetchChannelHistory returns the most recent messages of a channel that
 // match opts, in chronological order (oldest first). Thread replies are
 // not included, only top-level messages.
-func FetchChannelHistory(ctx context.Context, client *slackapi.Client, channelID string, opts HistoryOptions) ([]Message, error) {
+func FetchChannelHistory(ctx context.Context, client *slackapi.Client, channelID string, opts HistoryOptions) (History, error) {
 	limit := opts.Limit
 	if limit <= 0 {
 		limit = DefaultHistoryLimit
@@ -188,10 +203,15 @@ func FetchChannelHistory(ctx context.Context, client *slackapi.Client, channelID
 	filtered := len(opts.WithReactions) > 0 || len(opts.WithoutReactions) > 0
 
 	var out []Message
+	hidden := 0
 	latest, cursor := opts.Latest, ""
 	for {
 		params := map[string]any{"channel": channelID, "limit": pageSize}
-		if !filtered {
+		// Ask for what is missing, no more. Once system messages have
+		// been skipped, how many messages a page must hold to yield that
+		// many is anyone's guess (joins can outnumber the rest five to
+		// one): full pages then, rather than a call per handful.
+		if !filtered && hidden == 0 {
 			params["limit"] = min(limit-len(out), pageSize)
 		}
 		if latest != "" {
@@ -206,13 +226,17 @@ func FetchChannelHistory(ctx context.Context, client *slackapi.Client, channelID
 		metadataParam(params, opts.IncludeReactions || filtered)
 		resp, err := client.API(ctx, "conversations.history", params)
 		if err != nil {
-			return nil, fmt.Errorf("fetching the history of %s: %w", channelID, err)
+			return History{}, fmt.Errorf("fetching the history of %s: %w", channelID, err)
 		}
 		page := jsonx.Maps(resp["messages"])
 		if len(page) == 0 {
 			break
 		}
 		for _, m := range page {
+			if !opts.IncludeSystem && IsSystem(jsonx.Str(m["subtype"])) {
+				hidden++
+				continue
+			}
 			if filtered && !PassesReactionFilters(m, opts.WithReactions, opts.WithoutReactions) {
 				continue
 			}
@@ -242,10 +266,89 @@ func FetchChannelHistory(ctx context.Context, client *slackapi.Client, channelID
 	}
 
 	if err := enrichFiles(ctx, client, out); err != nil {
-		return nil, fmt.Errorf("fetching the history of %s: %w", channelID, err)
+		return History{}, fmt.Errorf("fetching the history of %s: %w", channelID, err)
 	}
 	// conversations.history returns newest first.
 	sortChronologically(out)
+	return History{Messages: out, SystemHidden: hidden}, nil
+}
+
+// expandConcurrency bounds the conversations.replies calls of
+// ExpandThreads.
+const expandConcurrency = 4
+
+// ExpandThreads returns msgs, the top-level messages of a channel in
+// chronological order, with the replies of each thread inserted after its
+// root: what reading a channel and then each of its threads gives, in one
+// go. Messages without replies are left as they are.
+//
+// The replies are an enrichment (see package enrich): the error is only
+// for a cancelled context or dead credentials. When conversations.replies
+// is rate limited no further thread is fetched, the roots that are left
+// keep their ReplyCount for the reader to list them, and the collector of
+// ctx is told.
+func ExpandThreads(ctx context.Context, client *slackapi.Client, channelID string, msgs []Message, includeReactions bool) ([]Message, error) {
+	var roots []int
+	for i, m := range msgs {
+		if m.ReplyCount > 0 {
+			roots = append(roots, i)
+		}
+	}
+	if len(roots) == 0 {
+		return msgs, nil
+	}
+
+	var (
+		mu      sync.Mutex
+		wg      sync.WaitGroup
+		fatal   error
+		sem     = make(chan struct{}, expandConcurrency)
+		threads = map[int][]Message{}
+		// limited stops the lookups once Slack has refused one.
+		limited enrich.Gate
+	)
+	for _, i := range roots {
+		wg.Go(func() {
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			mu.Lock()
+			abort := fatal != nil
+			mu.Unlock()
+			if abort || limited.Closed() {
+				return
+			}
+			thread, err := FetchThread(ctx, client, channelID, msgs[i].TS, includeReactions)
+			mu.Lock()
+			defer mu.Unlock()
+			switch {
+			case err == nil:
+				threads[i] = thread
+			case enrich.MustAbort(ctx, err):
+				fatal = cmp.Or(fatal, err)
+			default:
+				limited.Failed(err)
+			}
+		})
+	}
+	wg.Wait()
+	if fatal != nil {
+		return nil, fatal
+	}
+	if skipped, rateLimit := limited.Skipped(); skipped > 0 {
+		enrich.Warnf(ctx, "the replies of %d of %d threads could not be fetched (%v): those threads are listed with their first message only, see its reply_count; %s",
+			skipped, len(roots), enrich.Cause(rateLimit), enrich.Hint())
+	}
+
+	out := make([]Message, 0, len(msgs))
+	for i, m := range msgs {
+		// A thread that could not be read, or that came back empty (the
+		// root was deleted meanwhile), leaves the message as it was.
+		if thread := threads[i]; len(thread) > 0 {
+			out = append(out, thread...)
+			continue
+		}
+		out = append(out, m)
+	}
 	return out, nil
 }
 

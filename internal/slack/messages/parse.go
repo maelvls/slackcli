@@ -5,6 +5,7 @@ package messages
 import (
 	"cmp"
 	"context"
+	"slices"
 	"strings"
 	"sync"
 
@@ -44,8 +45,11 @@ type Message struct {
 	// ThreadTS is the thread root ts, for thread roots and replies.
 	ThreadTS   string `json:"thread_ts,omitempty"`
 	ReplyCount int    `json:"reply_count,omitempty"`
-	User       string `json:"user,omitempty"`
-	BotID      string `json:"bot_id,omitempty"`
+	// Subtype is Slack's message subtype ("channel_join", "bot_message",
+	// …); "" for an ordinary message. See IsSystem.
+	Subtype string `json:"subtype,omitempty"`
+	User    string `json:"user,omitempty"`
+	BotID   string `json:"bot_id,omitempty"`
 	// Text is the raw mrkdwn text; Markdown is its Markdown conversion.
 	Text        string        `json:"text"`
 	Markdown    string        `json:"markdown"`
@@ -54,6 +58,19 @@ type Message struct {
 	Files       []FileSummary `json:"files,omitempty"`
 	Reactions   []any         `json:"reactions,omitempty"`
 }
+
+// systemSubtypes are the subtypes of the messages Slack writes itself
+// about a conversation: nobody said anything.
+var systemSubtypes = []string{
+	"channel_join", "channel_leave", "channel_topic", "channel_purpose", "channel_name", "channel_archive", "channel_unarchive",
+	"group_join", "group_leave", "group_topic", "group_purpose", "group_name", "group_archive", "group_unarchive",
+}
+
+// IsSystem reports whether a message subtype is that of a system message
+// (joins, leaves, topic, purpose and name changes, archiving). In a busy
+// public channel these outnumber what people wrote, so the commands that
+// read a conversation leave them out unless asked.
+func IsSystem(subtype string) bool { return slices.Contains(systemSubtypes, subtype) }
 
 // ParseMessage converts a raw Slack message object. Files are summarised
 // as-is: no files.info lookup is made (the Fetch functions do that).
@@ -65,6 +82,7 @@ func ParseMessage(channelID string, raw map[string]any) Message {
 		TS:          jsonx.Str(raw["ts"]),
 		ThreadTS:    jsonx.Str(raw["thread_ts"]),
 		ReplyCount:  replyCount,
+		Subtype:     jsonx.Str(raw["subtype"]),
 		User:        jsonx.Str(raw["user"]),
 		BotID:       jsonx.Str(raw["bot_id"]),
 		Text:        text,

@@ -328,7 +328,7 @@ func (c *channel) recorder() *recorder {
 
 func TestFetchChannelHistoryDefaults(t *testing.T) {
 	rec := newChannel(60, true).recorder()
-	msgs, err := FetchChannelHistory(context.Background(), rec.client(), "C12345678", HistoryOptions{})
+	msgs, err := historyMessages(context.Background(), rec.client(), "C12345678", HistoryOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -347,7 +347,7 @@ func TestFetchChannelHistoryDefaults(t *testing.T) {
 
 func TestFetchChannelHistoryForwardsBounds(t *testing.T) {
 	rec := newChannel(60, true).recorder()
-	msgs, err := FetchChannelHistory(context.Background(), rec.client(), "C12345678",
+	msgs, err := historyMessages(context.Background(), rec.client(), "C12345678",
 		HistoryOptions{Limit: 5, Oldest: tsOf(10), Latest: tsOf(14), IncludeReactions: true})
 	if err != nil {
 		t.Fatal(err)
@@ -366,7 +366,7 @@ func TestFetchChannelHistoryForwardsBounds(t *testing.T) {
 func TestFetchChannelHistoryPagesBeyondOnePage(t *testing.T) {
 	for _, useCursors := range []bool{true, false} {
 		rec := newChannel(700, useCursors).recorder()
-		msgs, err := FetchChannelHistory(context.Background(), rec.client(), "C12345678", HistoryOptions{Limit: 450})
+		msgs, err := historyMessages(context.Background(), rec.client(), "C12345678", HistoryOptions{Limit: 450})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -392,20 +392,20 @@ func TestFetchChannelHistoryPagesBeyondOnePage(t *testing.T) {
 
 func TestFetchChannelHistoryLimitClamping(t *testing.T) {
 	rec := newChannel(1500, true).recorder()
-	msgs, err := FetchChannelHistory(context.Background(), rec.client(), "C12345678", HistoryOptions{Limit: 5000})
+	msgs, err := historyMessages(context.Background(), rec.client(), "C12345678", HistoryOptions{Limit: 5000})
 	if err != nil || len(msgs) != MaxHistoryLimit {
 		t.Errorf("got %d messages, err = %v", len(msgs), err)
 	}
 
 	rec = newChannel(60, true).recorder()
-	msgs, err = FetchChannelHistory(context.Background(), rec.client(), "C12345678", HistoryOptions{Limit: -3})
+	msgs, err = historyMessages(context.Background(), rec.client(), "C12345678", HistoryOptions{Limit: -3})
 	if err != nil || len(msgs) != DefaultHistoryLimit {
 		t.Errorf("got %d messages, err = %v", len(msgs), err)
 	}
 
 	// Fewer messages than asked for: one call, no spinning.
 	rec = newChannel(3, true).recorder()
-	msgs, err = FetchChannelHistory(context.Background(), rec.client(), "C12345678", HistoryOptions{Limit: 100})
+	msgs, err = historyMessages(context.Background(), rec.client(), "C12345678", HistoryOptions{Limit: 100})
 	if err != nil || len(msgs) != 3 || len(rec.calls) != 1 {
 		t.Errorf("got %d messages in %d calls, err = %v", len(msgs), len(rec.calls), err)
 	}
@@ -425,7 +425,7 @@ func TestFetchChannelHistoryReactionFilters(t *testing.T) {
 			}
 		}
 		rec := ch.recorder()
-		msgs, err := FetchChannelHistory(context.Background(), rec.client(), "C12345678", HistoryOptions{
+		msgs, err := historyMessages(context.Background(), rec.client(), "C12345678", HistoryOptions{
 			Limit: 3, Oldest: tsOf(50), WithReactions: []string{"dart"}, WithoutReactions: []string{"eyes"},
 		})
 		if err != nil {
@@ -448,7 +448,7 @@ func TestFetchChannelHistoryReactionFilters(t *testing.T) {
 
 		// Not enough matches: the scan ends at Oldest.
 		rec = ch.recorder()
-		msgs, err = FetchChannelHistory(context.Background(), rec.client(), "C12345678", HistoryOptions{
+		msgs, err = historyMessages(context.Background(), rec.client(), "C12345678", HistoryOptions{
 			Limit: 10, Oldest: tsOf(250), WithReactions: []string{"dart"},
 		})
 		if err != nil {
@@ -832,7 +832,7 @@ func TestFetchKeepsMessagesWhenFileLookupIsRateLimited(t *testing.T) {
 		return map[string]any{"messages": anys(raw(tsOf(5), "hi", "files", anys(files...)))}, nil
 	}}
 	ctx, warnings := enrich.Collect(context.Background())
-	msgs, err := FetchChannelHistory(ctx, rec.client(), "C12345678", HistoryOptions{})
+	msgs, err := historyMessages(ctx, rec.client(), "C12345678", HistoryOptions{})
 	if err != nil {
 		t.Fatalf("err = %v, want the messages without the file details", err)
 	}
