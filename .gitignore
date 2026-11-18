@@ -2,9 +2,8 @@
 .env
 .env.*
 
-# go build outputs (make build, go build ./cmd/...) and goreleaser
+# go build outputs
 /build/
-/dist/
 *.exe
 *.test
 *.out

@@ -25,12 +25,10 @@ import (
 	"github.com/maelvls/slackcli/internal/cmd/messagecmd"
 	"github.com/maelvls/slackcli/internal/cmd/searchcmd"
 	"github.com/maelvls/slackcli/internal/cmd/unreadscmd"
-	"github.com/maelvls/slackcli/internal/cmd/updatecmd"
 	"github.com/maelvls/slackcli/internal/cmd/usercmd"
 	"github.com/maelvls/slackcli/internal/cmd/workflowcmd"
 	"github.com/maelvls/slackcli/internal/slack/enrich"
 	"github.com/maelvls/slackcli/internal/slackapi"
-	"github.com/maelvls/slackcli/internal/update"
 )
 
 // Exit codes.
@@ -70,7 +68,6 @@ func commands(rt *clictx.Context) []*cobra.Command {
 		usercmd.New(rt),
 		channelcmd.New(rt),
 		workflowcmd.New(rt),
-		updatecmd.New(rt),
 	}
 }
 
@@ -98,8 +95,7 @@ empty, 0, false, no or off turns it on.`,
 		// extra" is a mistake, not a request for the version.
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if version || shortVersion {
-				// Without the "v" of the git tag, like "update --check"
-				// and the User-Agent.
+				// Without the "v" of a version tag, like the User-Agent.
 				_, err := fmt.Fprintln(cmd.OutOrStdout(), appinfo.BareVersion())
 				return err
 			}
@@ -237,7 +233,6 @@ func (r runner) run(args []string, stdout, stderr io.Writer) int {
 	// ran is the command cobra selected, once its command line was
 	// accepted.
 	var ran *cobra.Command
-	finishUpdateCheck := func(io.Writer) {}
 	cmd.PersistentPreRunE = func(c *cobra.Command, _ []string) error {
 		// cobra checks these itself, later; doing it here words the
 		// failure like the other usage errors.
@@ -249,9 +244,6 @@ func (r runner) run(args []string, stdout, stderr io.Writer) int {
 			return nil
 		}
 		watchdog = time.AfterFunc(timeout, func() { close(timedOut) })
-		if !isUpdateCommand(c) && c.HasParent() {
-			finishUpdateCheck = update.StartBackgroundCheck(c.Context())
-		}
 		return nil
 	}
 
@@ -309,7 +301,6 @@ func (r runner) run(args []string, stdout, stderr io.Writer) int {
 	for _, w := range incomplete.List() {
 		fmt.Fprintln(stderr, "Warning: "+w)
 	}
-	finishUpdateCheck(stderr)
 	return ExitOK
 }
 
@@ -348,15 +339,6 @@ func warnAboutEnvironment(stderr io.Writer) {
 	if err := slackapi.CheckLegacyAPITimeout(); err != nil {
 		fmt.Fprintf(stderr, ignored, err)
 	}
-}
-
-func isUpdateCommand(c *cobra.Command) bool {
-	for ; c != nil; c = c.Parent() {
-		if c.Name() == "update" && c.Parent() != nil && !c.Parent().HasParent() {
-			return true
-		}
-	}
-	return false
 }
 
 // ErrorMessage renders an error for the user on a single line.

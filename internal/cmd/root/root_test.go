@@ -33,7 +33,6 @@ func runWith(t *testing.T, grace time.Duration, build func(rt *clictx.Context) [
 	for _, name := range []string{"SLACK_TOKEN", "SLACK_COOKIE_D", "SLACK_WORKSPACE_URL"} {
 		t.Setenv(name, "")
 	}
-	t.Setenv(appinfo.EnvName("NO_UPDATE_CHECK"), "1")
 	// The real commands must not find the developer's configuration.
 	testenv.Isolate(t)
 	var stdout, stderr bytes.Buffer
@@ -227,7 +226,7 @@ func TestRunSafeModeFlagCannotDisableTheEnvironment(t *testing.T) {
 }
 
 // -V and --version print the bare version, as the predecessor did, even
-// though release builds are stamped with the "v" of the git tag.
+// when the build is stamped with the "v" of a version tag.
 func TestVersionFlags(t *testing.T) {
 	old := appinfo.Version
 	t.Cleanup(func() { appinfo.Version = old })
@@ -253,22 +252,10 @@ func TestCommandTree(t *testing.T) {
 		names = append(names, c.Name())
 	}
 	// "completion" and "help" are cobra's, added up front (see newRoot).
-	want := "auth canvas channel completion help later message search unreads update user workflow"
+	want := "auth canvas channel completion help later message search unreads user workflow"
 	if got := strings.Join(names, " "); got != want {
 		t.Errorf("commands = %s, want %s", got, want)
 	}
-	if !isUpdateCommand(mustFind(t, cmd, "update")) || isUpdateCommand(mustFind(t, cmd, "auth", "test")) {
-		t.Error("isUpdateCommand is wrong")
-	}
-}
-
-func mustFind(t *testing.T, root *cobra.Command, path ...string) *cobra.Command {
-	t.Helper()
-	cmd, _, err := root.Find(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return cmd
 }
 
 func TestErrorMessage(t *testing.T) {

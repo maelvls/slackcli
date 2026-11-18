@@ -118,8 +118,7 @@ func AddWorkspaceFlag(cmd *cobra.Command, target *string) {
 const noTimeoutAnnotation = appinfo.Name + "/no-timeout"
 
 // NoTimeout exempts cmd from the global command timeout. Use it for
-// commands that wait on a human or legitimately run long (interactive
-// editor, self-update).
+// commands that wait on a human (the interactive editor).
 func NoTimeout(cmd *cobra.Command) *cobra.Command {
 	if cmd.Annotations == nil {
 		cmd.Annotations = map[string]string{}

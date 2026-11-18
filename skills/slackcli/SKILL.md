@@ -5,15 +5,9 @@ description: "Slack CLI for agents: read message URLs/threads/channel history/un
 
 # slackcli
 
-Use `slackcli` from `$PATH`. If it is missing, install it with:
+Use `slackcli` from `$PATH`. If it is missing, tell the user: it is installed from a checkout of its repository with `go install ./cmd/slackcli`.
 
-```bash
-curl -fsSL https://raw.githubusercontent.com/maelvls/slackcli/main/install.sh | sh
-```
-
-Fallback: `go install github.com/maelvls/slackcli/cmd/slackcli@latest`.
-
-`slackcli --help` and each subcommand's `--help` are authoritative: they document every flag and the JSON each command prints. Read the relevant help before guessing. If a capability named here is absent from the installed help, report version skew instead of guessing. Do not run `slackcli update` without explicit authorization.
+`slackcli --help` and each subcommand's `--help` are authoritative: they document every flag and the JSON each command prints. Read the relevant help before guessing. If a capability named here is absent from the installed help, report version skew instead of guessing.
 
 ## Safety
 

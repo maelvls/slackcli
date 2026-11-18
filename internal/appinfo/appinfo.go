@@ -19,8 +19,6 @@ const (
 	Name = "slackcli"
 	// EnvPrefix prefixes every tool-specific environment variable.
 	EnvPrefix = "SLACKCLI_"
-	// Repo is the GitHub "owner/name" used for releases and self-update.
-	Repo = "maelvls/slackcli"
 	// Description is the one-line summary shown in help output.
 	Description = "Slack automation CLI for AI agents"
 
@@ -34,44 +32,31 @@ const (
 // Version is set at build time with
 // -ldflags "-X github.com/maelvls/slackcli/internal/appinfo.Version=v1.2.3".
 //
-// A `go install module/cmd/name@v1.2.3` build carries no ldflags: it takes
-// the version from the module metadata instead (see StampedVersion).
+// A build that does not set it (or sets it to "dev")
+// takes the version from the module metadata instead, when the
+// Go toolchain recorded one.
 var Version = "dev"
 
 // unstamped is the value of Version in a build without ldflags (kept as a
 // literal above: the linker's -X only overrides plain string variables).
 const unstamped = "dev"
 
-// stamped records whether Version was set by the release tooling (ldflags)
-// rather than taken from the module metadata.
-var stamped bool
-
 func init() {
 	module := ""
 	if info, ok := debug.ReadBuildInfo(); ok {
 		module = info.Main.Version
 	}
-	Version, stamped = resolveVersion(Version, module)
+	Version = resolveVersion(Version, module)
 }
 
 // resolveVersion picks the version to display from the ldflags value and
-// the main module version, and says whether it came from ldflags.
-func resolveVersion(ldflags, module string) (version string, fromLDFlags bool) {
+// the main module version.
+func resolveVersion(ldflags, module string) string {
 	if ldflags != unstamped {
-		return ldflags, true
+		return ldflags
 	}
 	if module != "" && module != "(devel)" {
-		return module, false
-	}
-	return unstamped, false
-}
-
-// StampedVersion is the version set by the release tooling, or "dev" for
-// any other build. Unlike Version it is "dev" for a "go install …@v1.2.3"
-// build, which is not a release binary and must not self-update as one.
-func StampedVersion() string {
-	if stamped {
-		return Version
+		return module
 	}
 	return unstamped
 }
@@ -87,18 +72,9 @@ func UserAgent() string { return Name + "/" + BareVersion() }
 // e.g. EnvName("SAFE_MODE") == "SLACKCLI_SAFE_MODE".
 func EnvName(suffix string) string { return EnvPrefix + suffix }
 
-// Env reads a tool-specific environment variable (trimmed), falling back to
-// the legacy AGENT_SLACK_ prefix. It returns "" when unset or blank.
-func Env(suffix string) string {
-	if v := strings.TrimSpace(os.Getenv(EnvPrefix + suffix)); v != "" {
-		return v
-	}
-	return strings.TrimSpace(os.Getenv(LegacyEnvPrefix + suffix))
-}
-
-// EnvSource returns the name and the (trimmed) value of the variable Env
-// reads for suffix: the current name, else the legacy AGENT_SLACK_ one.
-// Both are "" when neither is set.
+// EnvSource reads a tool-specific environment variable: it returns the name
+// and the (trimmed) value of the one that is set, the current name first,
+// else the legacy AGENT_SLACK_ one. Both are "" when neither is set.
 func EnvSource(suffix string) (name, value string) {
 	for _, prefix := range []string{EnvPrefix, LegacyEnvPrefix} {
 		if v := strings.TrimSpace(os.Getenv(prefix + suffix)); v != "" {
@@ -164,24 +140,13 @@ func ParseDurationMS(raw string, allowZero bool) (time.Duration, error) {
 // far below what a time.Duration can hold.
 const maxDurationMS = 10 * 365 * 24 * 60 * 60 * 1000
 
-// EnvBool reports whether a tool-specific variable is set to a truthy value
-// ("1", "true", "yes", "on"; case-insensitive). Anything else is false: do
-// not use it for a safety switch, see EnvOnUnlessOff.
-func EnvBool(suffix string) bool {
-	switch strings.ToLower(Env(suffix)) {
-	case "1", "true", "yes", "on":
-		return true
-	}
-	return false
-}
-
 // EnvOnUnlessOff reports whether a safety switch is on: it is on when the
 // variable, under the current OR the legacy prefix, is set to anything but
 // an explicit off value ("", "0", "false", "no", "off"; case-insensitive).
 //
-// It fails closed, unlike EnvBool: a value it does not recognise ("enabled",
-// "y", "2"…) turns the switch on, and one name saying "false" cannot
-// override the other saying "1".
+// It fails closed: a value it does not recognise ("enabled", "y", "2"…)
+// turns the switch on, and one name saying "false" cannot override the
+// other saying "1".
 func EnvOnUnlessOff(suffix string) bool {
 	for _, prefix := range []string{EnvPrefix, LegacyEnvPrefix} {
 		if !isOffValue(os.Getenv(prefix + suffix)) {
@@ -237,8 +202,8 @@ func ConfigDir() string {
 // LegacyConfigDir is the predecessor's config directory.
 func LegacyConfigDir() string { return filepath.Join(home(), ".config", LegacyName) }
 
-// CacheDir holds regenerable state (user cache, update-check stamp,
-// downloads): the OS user cache directory + "/slackcli".
+// CacheDir holds regenerable state (user cache, downloads): the OS user
+// cache directory + "/slackcli".
 func CacheDir() string {
 	if d, err := os.UserCacheDir(); err == nil && d != "" {
 		return filepath.Join(d, Name)
