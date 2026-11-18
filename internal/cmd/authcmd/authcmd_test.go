@@ -16,6 +16,7 @@ import (
 	"github.com/maelvls/slackcli/internal/authextract"
 	"github.com/maelvls/slackcli/internal/clictx"
 	"github.com/maelvls/slackcli/internal/slackapi"
+	"github.com/maelvls/slackcli/internal/testenv"
 )
 
 // fakeKeychain is an in-memory keychain. The key unavailableKey makes every
@@ -214,7 +215,7 @@ func TestWhoamiEmptyAndEnvironment(t *testing.T) {
 	// Nothing configured: "workspaces" is there, empty, and stderr says
 	// how to add credentials.
 	out := h.mustRun("", "whoami")
-	if want := "{\n  \"version\": 1,\n  \"workspaces\": []\n}\n"; out != want {
+	if want := "{\"version\":1,\"workspaces\":[]}\n"; out != want {
 		t.Errorf("empty store: output %q, want %q", out, want)
 	}
 	for _, want := range []string{"No Slack credentials are configured", "slackcli auth import-desktop", "slackcli auth add", "SLACK_TOKEN"} {
@@ -486,7 +487,7 @@ func TestImportDesktop(t *testing.T) {
   ]
 }
 `
-	if out != want {
+	if want := testenv.CompactJSON(t, want); out != want {
 		t.Errorf("output:\n%s\nwant:\n%s", out, want)
 	}
 	w, a := h.stored("https://zeta.slack.com")

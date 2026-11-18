@@ -12,14 +12,14 @@ func TestListWithNothingSaved(t *testing.T) {
 		}
 		return apiError("unknown_method")
 	}
-	counts := "  \"counts\": {\n    \"in_progress\": 0,\n    \"archived\": 0,\n    \"completed\": 0,\n    \"total\": 0\n  }"
+	counts := `"counts":{"in_progress":0,"archived":0,"completed":0,"total":0}`
 	for _, tc := range []struct {
 		args []string
 		want string
 	}{
-		{[]string{"list"}, "{\n" + counts + ",\n  \"items\": []\n}\n"},
-		{nil, "{\n" + counts + ",\n  \"items\": []\n}\n"},
-		{[]string{"list", "--counts-only"}, "{\n" + counts + "\n}\n"},
+		{[]string{"list"}, "{" + counts + `,"items":[]}` + "\n"},
+		{nil, "{" + counts + `,"items":[]}` + "\n"},
+		{[]string{"list", "--counts-only"}, "{" + counts + "}\n"},
 	} {
 		if _, err := h.run(tc.args...); err != nil {
 			t.Fatal(err)

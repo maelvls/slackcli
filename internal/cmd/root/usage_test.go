@@ -237,7 +237,7 @@ func TestInvalidDurationVariablesAreReported(t *testing.T) {
 		clear()
 		t.Setenv(tc.name, tc.value)
 		got := runWith(t, time.Second, ok, "ok")
-		if got.code != ExitOK || got.stderr != tc.want || !strings.Contains(got.stdout, `"ok": true`) {
+		if got.code != ExitOK || got.stderr != tc.want || !strings.Contains(got.stdout, `"ok":true`) {
 			t.Errorf("%s=%s: %+v", tc.name, tc.value, got)
 		}
 	}

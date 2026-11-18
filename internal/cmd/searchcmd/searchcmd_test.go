@@ -232,7 +232,7 @@ func TestSearchMessagesEndToEnd(t *testing.T) {
   }
 }
 `
-	if out != wantOut {
+	if wantOut := testenv.CompactJSON(t, wantOut); out != wantOut {
 		t.Errorf("output:\n%s\nwant:\n%s", out, wantOut)
 	}
 	if h.stderr.Len() != 0 {

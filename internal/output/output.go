@@ -1,7 +1,8 @@
 // Package output renders command results as token-efficient JSON: null,
 // blank strings, empty arrays and empty objects are pruned recursively, and
 // object keys keep the order in which they were produced (struct field
-// order; map keys sorted).
+// order; map keys sorted). The JSON is indented on a terminal and compact
+// everywhere else (see Indented).
 package output
 
 import (
@@ -10,6 +11,8 @@ import (
 	"fmt"
 	"io"
 	"strings"
+
+	"github.com/mattn/go-isatty"
 )
 
 type member struct {
@@ -23,6 +26,17 @@ type object []member
 // Marshal returns v as pruned, 2-space-indented JSON without a trailing
 // newline. A value that prunes to nothing is rendered as {}.
 func Marshal(v any) ([]byte, error) {
+	compact, err := MarshalCompact(v)
+	if err != nil {
+		return nil, err
+	}
+	return Indent(compact)
+}
+
+// MarshalCompact is Marshal without the indentation: the same pruned JSON
+// on one line, which is what a program (or a model, which pays for every
+// character) wants to read.
+func MarshalCompact(v any) ([]byte, error) {
 	var raw bytes.Buffer
 	enc := json.NewEncoder(&raw)
 	enc.SetEscapeHTML(false)
@@ -43,16 +57,40 @@ func Marshal(v any) ([]byte, error) {
 	if err := encode(&compact, pruned); err != nil {
 		return nil, err
 	}
+	return compact.Bytes(), nil
+}
+
+// Indent renders compact JSON the way Marshal does, with 2-space
+// indentation.
+func Indent(compact []byte) ([]byte, error) {
 	var out bytes.Buffer
-	if err := json.Indent(&out, compact.Bytes(), "", "  "); err != nil {
+	if err := json.Indent(&out, compact, "", "  "); err != nil {
 		return nil, err
 	}
 	return out.Bytes(), nil
 }
 
-// Write prints v to w as pruned JSON followed by a newline.
+// Indented reports whether results written to w are indented: they are
+// when w is a terminal, where a person reads them. Anything else (a pipe,
+// a file, the output captured by an agent) gets one line of compact JSON,
+// which is 10 to 30% shorter.
+func Indented(w io.Writer) bool {
+	f, ok := w.(interface{ Fd() uintptr })
+	return ok && (isatty.IsTerminal(f.Fd()) || isatty.IsCygwinTerminal(f.Fd()))
+}
+
+// Format returns v as pruned JSON for w, without a trailing newline:
+// indented when Indented(w), compact otherwise.
+func Format(w io.Writer, v any) ([]byte, error) {
+	if Indented(w) {
+		return Marshal(v)
+	}
+	return MarshalCompact(v)
+}
+
+// Write prints v to w as pruned JSON followed by a newline (see Format).
 func Write(w io.Writer, v any) error {
-	b, err := Marshal(v)
+	b, err := Format(w, v)
 	if err != nil {
 		return err
 	}

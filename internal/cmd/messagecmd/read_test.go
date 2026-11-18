@@ -394,7 +394,7 @@ func TestListHistoryDefaultLimitAndEmptyResult(t *testing.T) {
 	got := h.mustRun("list", testChannel)
 	wantJSON(t, got, `{"channel_id": "C12345678", "messages": []}`)
 	// "messages" is there although empty: jq '.messages[]' must not fail.
-	if want := "{\n  \"channel_id\": \"C12345678\",\n  \"messages\": []\n}\n"; h.stdout.String() != want {
+	if want := "{\"channel_id\":\"C12345678\",\"messages\":[]}\n"; h.stdout.String() != want {
 		t.Errorf("printed %s, want %s", h.stdout, want)
 	}
 	if limit := h.callsTo("conversations.history")[0].params["limit"]; limit != 25 {

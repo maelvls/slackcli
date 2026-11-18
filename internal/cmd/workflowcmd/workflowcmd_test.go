@@ -199,7 +199,7 @@ func TestListWithNoWorkflows(t *testing.T) {
 	h.responses["bookmarks.list"] = map[string]any{"ok": true, "bookmarks": []any{}}
 	h.responses["workflows.featured.list"] = map[string]any{"ok": true, "featured_workflows": []any{}}
 	h.output("list", "C12345678")
-	if got, want := h.stdout.String(), "{\n  \"channel_id\": \"C12345678\",\n  \"workflows\": []\n}\n"; got != want {
+	if got, want := h.stdout.String(), "{\"channel_id\":\"C12345678\",\"workflows\":[]}\n"; got != want {
 		t.Errorf("printed %s, want %s", got, want)
 	}
 }

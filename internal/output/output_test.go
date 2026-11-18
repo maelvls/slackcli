@@ -1,6 +1,9 @@
 package output
 
-import "testing"
+import (
+	"bytes"
+	"testing"
+)
 
 func TestMarshalPrunesAndKeepsOrder(t *testing.T) {
 	type inner struct {
@@ -52,5 +55,28 @@ func TestMarshalBigNumber(t *testing.T) {
 	want := "{\n  \"id\": 9007199254740993,\n  \"n\": 1700000000\n}"
 	if string(got) != want {
 		t.Fatalf("got %s", got)
+	}
+}
+
+// Anything but a terminal gets the same JSON on one line.
+func TestCompactOutsideATerminal(t *testing.T) {
+	v := map[string]any{"ok": true, "items": []any{map[string]any{"id": "1", "blank": ""}}, "url": "https://a?b=1&c=<2>"}
+	const want = `{"items":[{"id":"1"}],"ok":true,"url":"https://a?b=1&c=<2>"}`
+	got, err := MarshalCompact(v)
+	if err != nil || string(got) != want {
+		t.Fatalf("MarshalCompact = %s, %v; want %s", got, err, want)
+	}
+	var buf bytes.Buffer
+	if Indented(&buf) {
+		t.Fatal("a buffer is not a terminal")
+	}
+	if err := Write(&buf, v); err != nil || buf.String() != want+"\n" {
+		t.Fatalf("Write = %q, %v; want %q", buf.String(), err, want+"\n")
+	}
+	// Indenting the compact form gives what Marshal prints.
+	indented, err := Indent(got)
+	marshalled, _ := Marshal(v)
+	if err != nil || !bytes.Equal(indented, marshalled) {
+		t.Fatalf("Indent = %s, %v; want %s", indented, err, marshalled)
 	}
 }

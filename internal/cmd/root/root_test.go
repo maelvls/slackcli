@@ -67,7 +67,7 @@ func TestRunSuccessAndErrors(t *testing.T) {
 	}
 
 	got := runWith(t, time.Second, build, "ok")
-	if got.code != ExitOK || got.stdout != "{\n  \"ok\": true\n}\n" || got.stderr != "" {
+	if got.code != ExitOK || got.stdout != "{\"ok\":true}\n" || got.stderr != "" {
 		t.Errorf("ok: %+v", got)
 	}
 
@@ -218,7 +218,7 @@ func TestRunSafeModeFlagCannotDisableTheEnvironment(t *testing.T) {
 				return rt.Print(map[string]any{"safe_mode": rt.SafeMode(), "blocked": rt.CheckSafeMode("message delete") != nil})
 			}}}
 		}, tc.args...)
-		want := fmt.Sprintf("{\n  \"blocked\": %[1]v,\n  \"safe_mode\": %[1]v\n}\n", tc.want)
+		want := fmt.Sprintf("{\"blocked\":%[1]v,\"safe_mode\":%[1]v}\n", tc.want)
 		if got.code != ExitOK || got.stdout != want {
 			t.Errorf("SLACKCLI_SAFE_MODE=%q AGENT_SLACK_SAFE_MODE=%q %v: %+v, want safe mode %v", tc.env, tc.legacy, tc.args, got, tc.want)
 		}

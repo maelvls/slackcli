@@ -258,7 +258,7 @@ func TestUnreadsWithNothingUnread(t *testing.T) {
 		t.Fatal(err)
 	}
 	// "channels" is there although empty: jq '.channels[]' must not fail.
-	if got, want := h.stdout.String(), "{\n  \"channels\": []\n}\n"; got != want {
+	if got, want := h.stdout.String(), "{\"channels\":[]}\n"; got != want {
 		t.Errorf("printed %q, want %q", got, want)
 	}
 }
