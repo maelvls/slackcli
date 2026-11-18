@@ -169,6 +169,7 @@ func TestSearchMessagesEndToEnd(t *testing.T) {
 				map[string]any{
 					"ts":        "1767268800.000100",
 					"text":      "smoke tests failed",
+					"username":  "ci",
 					"channel":   map[string]any{"id": "C12345678", "name": "alerts"},
 					"permalink": "https://workspace.slack.com/archives/C12345678/p1767268800000100?thread_ts=1767268700.000100&cid=C12345678",
 				},
@@ -211,9 +212,12 @@ func TestSearchMessagesEndToEnd(t *testing.T) {
   "messages": [
     {
       "channel_id": "C12345678",
+      "channel_name": "alerts",
       "ts": "1767268800.000100",
+      "time": "` + time.Unix(1767268800, 0).Format(time.RFC3339) + `",
       "author": {
-        "user_id": "U11111111"
+        "user_id": "U11111111",
+        "name": "ci"
       },
       "content": "smoke tests *faile\n…",
       "files": [
@@ -237,6 +241,60 @@ func TestSearchMessagesEndToEnd(t *testing.T) {
 	}
 	if h.stderr.Len() != 0 {
 		t.Errorf("stderr = %q", h.stderr.String())
+	}
+}
+
+// A channel scanned by name is named on its results; --resolve-users puts
+// the author's display name on them.
+func TestScanNamesTheChannelAndTheAuthor(t *testing.T) {
+	h := newHarness(t)
+	h.general()
+	out := h.mustRun("messages", "hello", "--channel", "general", "--resolve-users")
+	msgs, _ := out["messages"].([]any)
+	if len(msgs) == 0 {
+		t.Fatalf("no messages: %v", out)
+	}
+	for _, m := range msgs {
+		m := m.(map[string]any)
+		author, _ := m["author"].(map[string]any)
+		users, _ := out["referenced_users"].(map[string]any)
+		u, _ := users[author["user_id"].(string)].(map[string]any)
+		if m["channel_name"] != "general" || m["time"] == nil || author["name"] == nil || author["name"] != u["display_name"] {
+			t.Errorf("message = %v, user = %v", m, u)
+		}
+	}
+
+	// Given by ID, the channel is not looked up for its name.
+	out = h.mustRun("messages", "hello", "--channel", "C12345678")
+	if m := out["messages"].([]any)[0].(map[string]any); m["channel_name"] != nil {
+		t.Errorf("channel_name = %v for a channel given by ID", m["channel_name"])
+	}
+}
+
+// An empty result says what the search did not look at.
+func TestNoMatchHint(t *testing.T) {
+	h := newHarness(t)
+	h.on("search.messages", func(map[string]any) (map[string]any, error) {
+		return map[string]any{"messages": map[string]any{"matches": []any{}}}, nil
+	})
+	if _, err := h.run("messages", "in:@alice"); err != nil {
+		t.Fatal(err)
+	}
+	if want := "Nothing matched. Slack's search requires every word of the query"; !strings.Contains(h.stderr.String(), want) {
+		t.Errorf("stderr = %q, want %q", h.stderr.String(), want)
+	}
+
+	h.general()
+	if _, err := h.run("messages", "no such words anywhere", "--channel", "general"); err != nil {
+		t.Fatal(err)
+	}
+	if want := "only top-level messages are looked at, not thread replies"; !strings.Contains(h.stderr.String(), want) {
+		t.Errorf("--channel: stderr = %q, want %q", h.stderr.String(), want)
+	}
+
+	// Something matched: nothing to say.
+	if _, err := h.run("messages", "hello", "--channel", "general"); err != nil || h.stderr.Len() != 0 {
+		t.Errorf("a match: err = %v, stderr = %q", err, h.stderr.String())
 	}
 }
 

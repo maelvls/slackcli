@@ -35,12 +35,14 @@ func New(rt *clictx.Context) *cobra.Command {
 		Short: "Search Slack messages and files (token-efficient JSON)",
 		Long: fmt.Sprintf(`Search Slack messages and files (token-efficient JSON).
 
-Results are sorted newest first. Message results have channel_id, ts, author,
-content (Markdown), files and permalink; file results have title, mimetype,
-mode, path (the local download) and permalink. A file that could not be
-downloaded keeps its entry, with "error" and a path to a file holding the
-reason. The list searched for ("messages", "files", or both for "search all")
-is always present: it is [] when nothing matches.
+Results are sorted newest first. Message results have channel_id,
+channel_name, ts, time (ts as a local date and time), author: {user_id,
+bot_id, name}, content (Markdown), files and permalink; file results have
+title, mimetype, mode, path (the local download) and permalink. A file that
+could not be downloaded keeps its entry, with "error" and a path to a file
+holding the reason. The list searched for ("messages", "files", or both for
+"search all") is always present: it is [] when nothing matches, with a hint
+on stderr.
 
 There are two ways of searching:
 
@@ -112,7 +114,7 @@ two ways of searching and how to get more results than --limit.`,
 	fl.BoolVar(&f.noDownload, "no-download", false,
 		"Do not download files: results list them without a local path (file results keep their permalink)")
 	fl.BoolVar(&f.resolveUsers, "resolve-users", false,
-		"Add referenced_users: the profiles of the authors and of the users mentioned in the messages found, keyed by user ID")
+		"Add referenced_users: the profiles of the authors and of the users mentioned in the messages found, keyed by user ID (the author's handle is on each result anyway, as author.name; this makes it the display name)")
 	fl.BoolVar(&f.refreshUsers, "refresh-users", false,
 		"Like --resolve-users, but fetch the profiles again instead of using the local user cache (implies --resolve-users)")
 	return cmd
@@ -168,6 +170,15 @@ func run(ctx context.Context, rt *clictx.Context, kind search.Kind, query string
 	}
 	if kind != search.KindMessages {
 		lists = append(lists, "files")
+	}
+	// Nothing at all: say what the search did not look at, which is the
+	// usual reason for an empty result that should not be.
+	if len(result.Messages) == 0 && len(result.Files) == 0 && result.MoreMessages == nil && result.MoreFiles == nil {
+		if len(f.channels) > 0 {
+			rt.Hintf("Nothing matched in the channels scanned. With --channel only top-level messages are looked at, not thread replies, and files are matched on their title and name: search without --channel (the channel can go in the query: in:#name) to use Slack's index, which has both.")
+		} else {
+			rt.Hintf("Nothing matched. Slack's search requires every word of the query, and each operator narrows it: in:@user is the DM with that user, from:@user what that user wrote. Fewer words or operators widen the search.")
+		}
 	}
 	return cmdutil.PrintList(rt, result, lists...)
 }

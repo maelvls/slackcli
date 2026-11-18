@@ -127,13 +127,13 @@ func TestFetch(t *testing.T) {
 	want := Result{
 		Channels: []Channel{
 			{ChannelID: "C3", ChannelName: "alerts", ChannelType: "channel", UnreadCount: intp(1), MentionCount: 2,
-				Messages: []Message{{TS: "301.000001", Author: &Author{UserID: "U3"}, Content: "@you"}}},
+				Messages: []Message{{TS: "301.000001", Time: at(301), Author: &Author{UserID: "U3"}, Content: "@you"}}},
 			{ChannelID: "D1", ChannelName: "user-U9", ChannelType: "dm", UnreadCount: intp(1), MentionCount: 1,
-				Messages: []Message{{TS: "11.000001", Author: &Author{UserID: "U9"}, Content: "hi"}}},
+				Messages: []Message{{TS: "11.000001", Time: at(11), Author: &Author{UserID: "U9"}, Content: "hi"}}},
 			{ChannelID: "C1", ChannelName: "general", ChannelType: "channel", UnreadCount: intp(3), SystemMessagesHidden: 1,
 				Messages: []Message{
-					{TS: "101.000009", Author: &Author{BotID: "B1"}, Content: "first", ThreadTS: "101.000009"},
-					{TS: "103.000002", Author: &Author{UserID: "U1"}, Content: "third"},
+					{TS: "101.000009", Time: at(101), Author: &Author{BotID: "B1"}, Content: "first", ThreadTS: "101.000009"},
+					{TS: "103.000002", Time: at(103), Author: &Author{UserID: "U1"}, Content: "third"},
 				}},
 			{ChannelID: "G1", ChannelName: "mpdm-a--b-1", ChannelType: "mpim", Messages: []Message{}},
 		},
@@ -522,3 +522,6 @@ func TestFetchPropagatesAuthErrorsOfNameLookups(t *testing.T) {
 		t.Errorf("err = %v, want an auth error", err)
 	}
 }
+
+// at is the "time" of a message posted at that Unix time.
+func at(sec int64) string { return time.Unix(sec, 0).Format(time.RFC3339) }

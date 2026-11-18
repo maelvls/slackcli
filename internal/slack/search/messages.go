@@ -30,6 +30,10 @@ const (
 type hit struct {
 	msg       messages.Message
 	permalink string
+	// channelName and authorName are what the search already knows about
+	// the match ("" when it does not): they save the reader a lookup.
+	channelName string
+	authorName  string
 }
 
 // ref points at a search.messages match to fetch in full.
@@ -91,7 +95,12 @@ func (s *searcher) searchMessages(ctx context.Context) ([]hit, *More, error) {
 		}
 		for i, msg := range fetched {
 			if passesMessage(msg, s.contentType) {
-				hits = append(hits, hit{msg: msg, permalink: batch[i].permalink})
+				hits = append(hits, hit{
+					msg:         msg,
+					permalink:   batch[i].permalink,
+					channelName: matchChannelName(batch[i].raw),
+					authorName:  strings.TrimSpace(jsonx.Str(batch[i].raw["username"])),
+				})
 			}
 		}
 	}
@@ -104,6 +113,16 @@ func (s *searcher) searchMessages(ctx context.Context) ([]hit, *More, error) {
 		newest, oldest = hits[0].msg.TS, hits[len(hits)-1].msg.TS
 	}
 	return hits, s.more("messages", p.total, newest, oldest, reason), nil
+}
+
+// matchChannelName returns the name of the channel of a search.messages
+// match. A DM has none: Slack puts the other user's ID there.
+func matchChannelName(match map[string]any) string {
+	ch := jsonx.Map(match["channel"])
+	if jsonx.Bool(ch["is_im"]) {
+		return ""
+	}
+	return jsonx.Str(ch["name"])
 }
 
 // refs turns a page of search.messages matches into messages to fetch,
@@ -212,6 +231,7 @@ func (s *searcher) scanMessages(ctx context.Context) ([]hit, *More, error) {
 	hits := make([]hit, len(all))
 	for i, msg := range all {
 		hits[i].msg = msg
+		hits[i].channelName = s.channelNames[msg.ChannelID]
 		if ws := s.client.WorkspaceURL(); ws != "" {
 			hits[i].permalink = slackurl.BuildMessageURL(ws, msg.ChannelID, msg.TS, msg.ThreadTS)
 		}
@@ -332,10 +352,16 @@ func (s *searcher) compactMessages(ctx context.Context, hits []hit) ([]Message, 
 	}
 	out := make([]Message, len(hits))
 	for i, h := range hits {
-		c := messages.ToCompact(h.msg, messages.CompactOptions{MaxBodyChars: maxChars, Downloads: results})
+		c := messages.ToCompact(h.msg, messages.CompactOptions{MaxBodyChars: maxChars, Downloads: results, Location: s.opts.Location})
+		// The handle the search index has for the author of the match.
+		if c.Author != nil && c.Author.UserID != "" {
+			c.Author.Name = h.authorName
+		}
 		out[i] = Message{
 			ChannelID:        c.ChannelID,
+			ChannelName:      h.channelName,
 			TS:               c.TS,
+			Time:             c.Time,
 			Author:           c.Author,
 			Content:          c.Content,
 			Files:            c.Files,

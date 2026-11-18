@@ -4,6 +4,7 @@
 package search
 
 import (
+	"cmp"
 	"context"
 	"fmt"
 	"strings"
@@ -15,6 +16,7 @@ import (
 	"github.com/maelvls/slackcli/internal/slack/messages"
 	"github.com/maelvls/slackcli/internal/slack/users"
 	"github.com/maelvls/slackcli/internal/slackapi"
+	"github.com/maelvls/slackcli/internal/slackid"
 )
 
 const (
@@ -89,10 +91,17 @@ type Options struct {
 }
 
 // Message is a message search result: the compact message shape without
-// thread_ts, plus the permalink (which carries the thread).
+// thread_ts, plus the permalink (which carries the thread) and the name
+// of the channel.
 type Message struct {
-	ChannelID        string                     `json:"channel_id"`
-	TS               string                     `json:"ts"`
+	ChannelID string `json:"channel_id"`
+	// ChannelName is the name of the channel, when the search knows it
+	// without asking: Slack's search API names the channel of each match,
+	// and a channel scanned by name has that name. It is empty for a DM.
+	ChannelName string `json:"channel_name,omitempty"`
+	TS          string `json:"ts"`
+	// Time is TS as a local date and time (messages.FormatTime).
+	Time             string                     `json:"time,omitempty"`
 	Author           *messages.Author           `json:"author,omitempty"`
 	Content          string                     `json:"content,omitempty"`
 	Files            []messages.CompactFile     `json:"files,omitempty"`
@@ -149,8 +158,10 @@ type searcher struct {
 
 	// Channel-scoped scan.
 	channelIDs []string
-	userID     string
-	match      matcher
+	// channelNames has the name of the channels that were given by name.
+	channelNames map[string]string
+	userID       string
+	match        matcher
 	// Search API.
 	query string
 
@@ -232,6 +243,14 @@ func Search(ctx context.Context, client *slackapi.Client, opts Options) (*Result
 			return nil, fmt.Errorf("resolving the users referenced by the results: %w", err)
 		}
 		res.ReferencedUsers = users.ToReferencedUsers(ids, byID)
+		// As "message list" does: the name is on the message itself.
+		for i := range res.Messages {
+			if a := res.Messages[i].Author; a != nil {
+				if u, ok := byID[a.UserID]; ok {
+					a.Name = cmp.Or(u.DisplayName, u.RealName, u.Name, a.Name)
+				}
+			}
+		}
 	}
 
 	if s.degraded > 0 {
@@ -297,7 +316,11 @@ func (s *searcher) prepare(ctx context.Context) error {
 		return err
 	}
 	seen := map[string]bool{}
-	for _, id := range ids {
+	s.channelNames = map[string]string{}
+	for i, id := range ids {
+		if in := slackid.ParseChannelInput(s.opts.Channels[i]); !in.IsID {
+			s.channelNames[id] = strings.ToLower(in.Value)
+		}
 		if !seen[id] {
 			seen[id] = true
 			s.channelIDs = append(s.channelIDs, id)

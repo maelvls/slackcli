@@ -68,7 +68,9 @@ type Author struct {
 
 // Message is one unread message.
 type Message struct {
-	TS     string  `json:"ts"`
+	TS string `json:"ts"`
+	// Time is TS as a local date and time (messages.FormatTime).
+	Time   string  `json:"time,omitempty"`
 	Author *Author `json:"author,omitempty"`
 	// Content is the message rendered as Markdown, possibly truncated.
 	Content    string `json:"content,omitempty"`
@@ -303,6 +305,7 @@ func fetchMessages(ctx context.Context, client *slackapi.Client, e entry, opts O
 		}
 		msg := Message{
 			TS:       jsonx.Str(m["ts"]),
+			Time:     messages.FormatTime(jsonx.Str(m["ts"]), nil),
 			Content:  truncate(slacktext.RenderMessageContent(m), opts.MaxBodyChars),
 			ThreadTS: jsonx.Str(m["thread_ts"]),
 		}

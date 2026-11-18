@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/maelvls/slackcli/internal/auth"
 	"github.com/maelvls/slackcli/internal/clictx"
@@ -135,8 +136,8 @@ func TestUnreads(t *testing.T) {
 				"channel_id": "C000000001", "channel_name": "general", "channel_type": "channel",
 				"unread_count": 3.0, "unread_count_is_lower_bound": true, "mention_count": 1.0,
 				"messages": []any{
-					map[string]any{"ts": "1700000003.000100", "author": map[string]any{"bot_id": "B000000001"}, "content": "first message"},
-					map[string]any{"ts": "1700000005.000100", "author": map[string]any{"user_id": "U000000002"}, "content": "second message", "thread_ts": "1700000005.000100", "reply_count": 2.0},
+					map[string]any{"ts": "1700000003.000100", "time": localTime(1700000003), "author": map[string]any{"bot_id": "B000000001"}, "content": "first message"},
+					map[string]any{"ts": "1700000005.000100", "time": localTime(1700000005), "author": map[string]any{"user_id": "U000000002"}, "content": "second message", "thread_ts": "1700000005.000100", "reply_count": 2.0},
 				},
 				"system_messages_hidden": 1.0,
 				"messages_truncated":     true,
@@ -144,7 +145,7 @@ func TestUnreads(t *testing.T) {
 			map[string]any{
 				"channel_id": "D000000001", "channel_name": "alice", "channel_type": "dm",
 				"unread_count": 1.0, "mention_count": 0.0,
-				"messages": []any{map[string]any{"ts": "1700000009.000100", "author": map[string]any{"user_id": "U000000009"}, "content": "ping"}},
+				"messages": []any{map[string]any{"ts": "1700000009.000100", "time": localTime(1700000009), "author": map[string]any{"user_id": "U000000009"}, "content": "ping"}},
 			},
 		},
 		"threads": map[string]any{"has_unreads": true, "mention_count": 2.0},
@@ -309,3 +310,6 @@ func TestUnreadsErrors(t *testing.T) {
 		t.Errorf("standard token: printed %v, made calls %+v", out, h.calls)
 	}
 }
+
+// localTime is the "time" of a message posted at that Unix time.
+func localTime(sec int64) string { return time.Unix(sec, 0).Format(time.RFC3339) }
