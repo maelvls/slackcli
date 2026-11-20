@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"reflect"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -63,6 +64,9 @@ type world struct {
 	replies            map[string][]map[string]any
 	// pages is the number of pages each search claims to have (0: one).
 	pages int
+	// replyPage is the page size of conversations.replies (0: whatever is
+	// asked for).
+	replyPage int
 	// fail answers a method with an error instead.
 	fail map[string]error
 
@@ -126,18 +130,37 @@ func (w *world) serve(method string, params map[string]any) map[string]any {
 		}
 		// Slack answers newest first.
 		slices.Reverse(out)
-		return map[string]any{"messages": toAny(out[:min(len(out), params["limit"].(int))])}
+		return page(out, params, params["limit"].(int))
 	case "conversations.replies":
 		msgs, ok := w.replies[id+":"+params["ts"].(string)]
 		if !ok {
 			return apiError("thread_not_found")
 		}
-		return map[string]any{"messages": toAny(msgs), "has_more": false}
+		size := params["limit"].(int)
+		if w.replyPage > 0 {
+			size = w.replyPage
+		}
+		return page(msgs, params, size)
 	case "users.info":
 		user := params["user"].(string)
 		return map[string]any{"user": map[string]any{"id": user, "name": "name-" + user, "profile": map[string]any{}}}
 	}
 	return apiError("unknown_method")
+}
+
+// page cuts a page of size messages out of msgs, as Slack does: the
+// cursor is where the next page starts.
+func page(msgs []map[string]any, params map[string]any, size int) map[string]any {
+	start := 0
+	if cursor, ok := params["cursor"].(string); ok {
+		start, _ = strconv.Atoi(cursor)
+	}
+	end := min(start+size, len(msgs))
+	resp := map[string]any{"messages": toAny(msgs[start:end]), "has_more": end < len(msgs)}
+	if end < len(msgs) {
+		resp["response_metadata"] = map[string]any{"next_cursor": strconv.Itoa(end)}
+	}
+	return resp
 }
 
 func toAny(msgs []map[string]any) []any {
@@ -341,6 +364,119 @@ func TestFetchNoThreads(t *testing.T) {
 			t.Error("my thread posts were searched")
 		}
 	}
+}
+
+// --no-threads leaves out every item of kind thread, also the one found
+// through a mention the caller answered and that got replies since.
+func TestFetchNoThreadsAfterAnsweredMention(t *testing.T) {
+	newWorld := func() *world {
+		return &world{
+			mentions: []map[string]any{match(channel("C6", "answered-then-more"), "U00000004", 1001, 1000)},
+			replies: map[string][]map[string]any{
+				"C6:1000.000000": {msg("U00000004", 1001, "text", "<@UMEMEMEME> ?"), msg(me, 1002), msg("U00000004", 1003)},
+			},
+		}
+	}
+	if got, want := kinds(newWorld().fetch(t, Options{})), []string{"thread C6"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("items = %q, want %q", got, want)
+	}
+	if got := kinds(newWorld().fetch(t, Options{NoThreads: true})); len(got) != 0 {
+		t.Errorf("items with NoThreads = %q, want none", got)
+	}
+}
+
+// burst is n messages of a user, one every millisecond from at on.
+func burst(user string, at float64, n int) []map[string]any {
+	out := make([]map[string]any, n)
+	for i := range out {
+		out[i] = msg(user, at+float64(i)/1000)
+	}
+	return out
+}
+
+// A long conversation is read page after page, as far back as the
+// caller's last message; one too long to be read whole says so.
+func TestFetchReadsLongConversations(t *testing.T) {
+	d1 := im("D1", "U00000001")
+	t.Run("history", func(t *testing.T) {
+		w := &world{
+			to:      []map[string]any{match(d1, "U00000001", 1100, -1)},
+			history: map[string][]map[string]any{"D1": slices.Concat(burst("U00000001", 1001, 100), []map[string]any{msg(me, 1002)}, burst("U00000001", 1003, 250))},
+		}
+		res := w.fetch(t, Options{})
+		if len(res.Items) != 1 || res.Items[0].Count != 250 || res.Items[0].FirstTS != ts(1003) || res.Truncated {
+			t.Errorf("result = %+v", res)
+		}
+		// The page that holds my message ends the reading.
+		if n := len(w.only("conversations.history")); n != 2 {
+			t.Errorf("history calls = %d, want 2", n)
+		}
+	})
+	t.Run("history too long", func(t *testing.T) {
+		w := &world{
+			to:      []map[string]any{match(d1, "U00000001", 1100, -1)},
+			history: map[string][]map[string]any{"D1": burst("U00000001", 1001, pageSize*maxPages+50)},
+		}
+		res := w.fetch(t, Options{})
+		if len(res.Items) != 1 || res.Items[0].Count != pageSize*maxPages || !res.Truncated {
+			t.Errorf("count, truncated = %d, %v", res.Items[0].Count, res.Truncated)
+		}
+		if n := len(w.only("conversations.history")); n != maxPages {
+			t.Errorf("history calls = %d, want %d", n, maxPages)
+		}
+	})
+
+	c1 := channel("C1", "long-thread")
+	thread := func(n int) *world {
+		return &world{
+			replyPage: 2,
+			mentions:  []map[string]any{match(c1, "U00000001", 1001, 1000)},
+			// My answer is the last message.
+			replies: map[string][]map[string]any{"C1:1000.000000": append(burst("U00000001", 1001, n-1), msg(me, 1900))},
+		}
+	}
+	t.Run("replies", func(t *testing.T) {
+		w := thread(2 * maxPages)
+		if res := w.fetch(t, Options{}); len(res.Items) != 0 || res.Truncated {
+			t.Errorf("result = %+v, want the thread answered", res)
+		}
+		if n := len(w.only("conversations.replies")); n != maxPages {
+			t.Errorf("replies calls = %d, want %d", n, maxPages)
+		}
+	})
+	t.Run("replies too long", func(t *testing.T) {
+		// My answer is past what is read: the item may be wrong, and the
+		// result says that not everything was read.
+		res := thread(2*maxPages+1).fetch(t, Options{})
+		if got := kinds(res); !reflect.DeepEqual(got, []string{"mention C1"}) || !res.Truncated {
+			t.Errorf("items, truncated = %q, %v", got, res.Truncated)
+		}
+	})
+
+	// A top-level mention is answered by a later message of mine in the
+	// channel, however many messages came after it.
+	mention := func(after []map[string]any) *world {
+		return &world{
+			mentions: []map[string]any{match(c1, "U00000001", 1010, -1)},
+			replies:  map[string][]map[string]any{"C1:1010.000000": {msg("U00000001", 1010)}},
+			history:  map[string][]map[string]any{"C1": append([]map[string]any{msg("U00000001", 1010)}, after...)},
+		}
+	}
+	t.Run("answer in the channel", func(t *testing.T) {
+		w := mention(slices.Concat([]map[string]any{msg(me, 1011)}, burst("U00000002", 1012, 250)))
+		if res := w.fetch(t, Options{}); len(res.Items) != 0 || res.Truncated {
+			t.Errorf("result = %+v, want the mention answered", res)
+		}
+		if n := len(w.only("conversations.history")); n != 2 {
+			t.Errorf("history calls = %d, want 2", n)
+		}
+	})
+	t.Run("channel too busy", func(t *testing.T) {
+		res := mention(slices.Concat([]map[string]any{msg(me, 1011)}, burst("U00000002", 1012, pageSize*maxPages))).fetch(t, Options{})
+		if got := kinds(res); !reflect.DeepEqual(got, []string{"mention C1"}) || !res.Truncated {
+			t.Errorf("items, truncated = %q, %v", got, res.Truncated)
+		}
+	})
 }
 
 func TestFetchMaxConversations(t *testing.T) {

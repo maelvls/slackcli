@@ -12,12 +12,14 @@ import (
 	"cmp"
 	"context"
 	"fmt"
+	"maps"
 	"net/url"
 	"regexp"
 	"slices"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/maelvls/slackcli/internal/jsonx"
@@ -39,17 +41,17 @@ const (
 	// inspected when Options.MaxConversations is 0.
 	DefaultMaxConversations = 60
 
-	// concurrency is the number of API calls in flight, searches included.
+	// concurrency is the number of searches and conversation reads in
+	// flight. The names are looked up once those are done, by package
+	// users, which has a bound of its own (5).
 	concurrency = 4
 
 	searchPages    = 2
 	searchPageSize = 100
-	historyLimit   = 30
-	repliesLimit   = 200
-	repliesPages   = 5
-	// channelAnswerLimit is how many messages after a top-level mention
-	// are looked at for an answer of the caller's in the channel.
-	channelAnswerLimit = 50
+	// pageSize and maxPages bound how much of one conversation or thread
+	// is read: 1000 messages. Past that, the result is marked truncated.
+	pageSize = 200
+	maxPages = 5
 )
 
 // Kinds of Item.
@@ -100,8 +102,10 @@ type Result struct {
 	// milliseconds).
 	Since string `json:"since"`
 	// Truncated is true when there was more to look at than was: a search
-	// with more pages than were read, or more candidates than
-	// Options.MaxConversations.
+	// with more pages than were read, more candidates than
+	// Options.MaxConversations, or a conversation or thread with more
+	// messages in the window than are read (1000): an item may then
+	// undercount, or be about something the caller answered since.
 	Truncated bool `json:"truncated"`
 	// Items are sorted by TS, newest first.
 	Items []Item `json:"items"`
@@ -117,7 +121,7 @@ type Options struct {
 	// MaxConversations caps the conversations and threads inspected, the
 	// most recently active first; 0 means DefaultMaxConversations.
 	MaxConversations int
-	// NoThreads leaves out the threads the caller only posted in.
+	// NoThreads leaves out the items of kind thread.
 	NoThreads bool
 	// CacheDir overrides where the user cache lives (tests).
 	CacheDir string
@@ -196,6 +200,10 @@ type fetcher struct {
 	oldest       string
 	baseURL      string
 	maxBodyChars int
+	noThreads    bool
+	// incomplete is set when a conversation or a thread had more messages
+	// than were read.
+	incomplete atomic.Bool
 }
 
 // Fetch lists what is waiting on the caller since opts.Since.
@@ -208,6 +216,11 @@ type fetcher struct {
 // top level, thread reply counts as answered, and a later message from a
 // person counts as waiting. Bots, Slackbot, system messages and the DM
 // with oneself are ignored.
+//
+// The searches only go back to two days before opts.Since, the caller's
+// own thread posts included: a thread whose last post by the caller is
+// older than that is not found, however recent its replies, unless one of
+// them mentions the caller.
 //
 // A candidate that cannot be read (skippableCodes: channel_not_found,
 // thread_not_found …) is left out. Everything else fails the command,
@@ -238,6 +251,7 @@ func Fetch(ctx context.Context, client *slackapi.Client, opts Options) (Result, 
 		oldest:       strconv.FormatFloat(sinceTS, 'f', 6, 64),
 		baseURL:      strings.TrimRight(cmp.Or(jsonx.Str(auth["url"]), client.WorkspaceURL()), "/"),
 		maxBodyChars: opts.MaxBodyChars,
+		noThreads:    opts.NoThreads,
 	}
 
 	// Slack's after: is an exclusive day in the user's timezone: two days
@@ -305,7 +319,7 @@ func Fetch(ctx context.Context, client *slackapi.Client, opts Options) (Result, 
 	result := Result{
 		UserID:    me,
 		Since:     opts.Since.UTC().Format("2006-01-02T15:04:05.000Z"),
-		Truncated: truncated,
+		Truncated: truncated || f.incomplete.Load(),
 		Items:     make([]Item, len(drafts)),
 	}
 	for i, d := range drafts {
@@ -472,9 +486,9 @@ func (f *fetcher) evaluate(ctx context.Context, c *candidate) (*draft, error) {
 	for _, m := range msgs {
 		ts := tsNum(jsonx.Str(m["ts"]))
 		switch {
-		case isHuman(m) && jsonx.Str(m["user"]) == f.me:
+		case f.wrote(m):
 			ack, posted = max(ack, ts), true
-		case reactedBy(m, f.me), c.root == "" && slices.Contains(jsonx.Slice(m["reply_users"]), any(f.me)):
+		case f.acknowledged(m, c.root == ""):
 			ack = max(ack, ts)
 		}
 	}
@@ -493,7 +507,8 @@ func (f *fetcher) evaluate(ctx context.Context, c *candidate) (*draft, error) {
 		switch {
 		case slices.ContainsFunc(c.mentionTS, func(ts string) bool { return tsNum(ts) > ack }):
 			kind = KindMention
-		case c.mine || posted:
+		case (c.mine || posted) && !f.noThreads:
+			// Also a mention the caller answered, with replies since.
 			kind = KindThread
 		default:
 			return nil, nil
@@ -504,18 +519,15 @@ func (f *fetcher) evaluate(ctx context.Context, c *candidate) (*draft, error) {
 		// A top-level mention nobody replied to: a later message of the
 		// caller's in the channel counts as the answer.
 		mention := slices.MaxFunc(c.mentionTS, func(a, b string) int { return cmp.Compare(tsNum(a), tsNum(b)) })
-		later, err := f.api(ctx, "conversations.history", map[string]any{
+		later, err := f.pages(ctx, "conversations.history", map[string]any{
 			"channel":   c.channelID,
 			"oldest":    mention,
 			"inclusive": false,
-			"limit":     channelAnswerLimit,
-		})
+		}, f.wrote)
 		if err != nil {
 			return nil, err
 		}
-		if slices.ContainsFunc(jsonx.Maps(later["messages"]), func(m map[string]any) bool {
-			return isHuman(m) && jsonx.Str(m["user"]) == f.me
-		}) {
+		if slices.ContainsFunc(later, f.wrote) {
 			return nil, nil
 		}
 	}
@@ -538,40 +550,34 @@ func (f *fetcher) evaluate(ctx context.Context, c *candidate) (*draft, error) {
 	return &draft{item: item, imUser: c.imUser, channelName: c.channelName}, nil
 }
 
-// history returns the newest top-level messages of a conversation since
-// the start of the window, oldest first.
-func (f *fetcher) history(ctx context.Context, channelID string) ([]map[string]any, error) {
-	resp, err := f.api(ctx, "conversations.history", map[string]any{
-		"channel":   channelID,
-		"oldest":    f.oldest,
-		"inclusive": true,
-		"limit":     historyLimit,
-	})
-	if err != nil {
-		return nil, err
-	}
-	return sortByTS(jsonx.Maps(resp["messages"])), nil
+// wrote reports whether m is a message of the caller's.
+func (f *fetcher) wrote(m map[string]any) bool {
+	return isHuman(m) && jsonx.Str(m["user"]) == f.me
 }
 
-// replies returns the messages of a thread from the start of the window on
-// (with the root, whatever its age, when Slack gives it), oldest first.
-func (f *fetcher) replies(ctx context.Context, channelID, root string) ([]map[string]any, error) {
+// acknowledged reports whether the caller wrote m, reacted to it or, for
+// a top-level message, replied in its thread.
+func (f *fetcher) acknowledged(m map[string]any, topLevel bool) bool {
+	return f.wrote(m) || reactedBy(m, f.me) || topLevel && slices.Contains(jsonx.Slice(m["reply_users"]), any(f.me))
+}
+
+// pages reads a conversation or a thread page after page (pageSize
+// messages each) and returns the messages, in Slack's order and without
+// duplicates. It stops at the end, after a page for which enough says
+// that the rest is not needed (nil: never), or after maxPages pages: the
+// result is then marked incomplete.
+func (f *fetcher) pages(ctx context.Context, method string, params map[string]any, enough func(m map[string]any) bool) ([]map[string]any, error) {
 	var out []map[string]any
 	seen := map[string]bool{}
-	params := map[string]any{
-		"channel":   channelID,
-		"ts":        root,
-		"oldest":    f.oldest,
-		"inclusive": true,
-		"limit":     repliesLimit,
-	}
-	for range repliesPages {
-		resp, err := f.api(ctx, "conversations.replies", params)
+	params["limit"] = pageSize
+	for page := 1; ; page++ {
+		resp, err := f.api(ctx, method, params)
 		if err != nil {
 			return nil, err
 		}
-		for _, m := range jsonx.Maps(resp["messages"]) {
-			// Slack repeats the root on every page.
+		msgs := jsonx.Maps(resp["messages"])
+		for _, m := range msgs {
+			// conversations.replies repeats the root on every page.
 			if ts := jsonx.Str(m["ts"]); ts != "" && !seen[ts] {
 				seen[ts] = true
 				out = append(out, m)
@@ -579,11 +585,52 @@ func (f *fetcher) replies(ctx context.Context, channelID, root string) ([]map[st
 		}
 		cursor := jsonx.GetStr(resp, "response_metadata", "next_cursor")
 		if cursor == "" || resp["has_more"] == false {
-			break
+			return out, nil
 		}
+		if enough != nil && slices.ContainsFunc(msgs, enough) {
+			return out, nil
+		}
+		if page == maxPages {
+			f.incomplete.Store(true)
+			return out, nil
+		}
+		// A copy: the previous map may still be held by the client.
+		params = maps.Clone(params)
 		params["cursor"] = cursor
 	}
-	return sortByTS(out), nil
+}
+
+// history returns the top-level messages of a conversation since the
+// start of the window, oldest first. Slack gives the newest first: no
+// more is read once a page holds a sign of the caller (a message, a
+// reaction, a thread reply), which answers everything older.
+func (f *fetcher) history(ctx context.Context, channelID string) ([]map[string]any, error) {
+	msgs, err := f.pages(ctx, "conversations.history", map[string]any{
+		"channel":   channelID,
+		"oldest":    f.oldest,
+		"inclusive": true,
+	}, func(m map[string]any) bool { return f.acknowledged(m, true) })
+	if err != nil {
+		return nil, err
+	}
+	return sortByTS(msgs), nil
+}
+
+// replies returns the messages of a thread from the start of the window on
+// (with the root, whatever its age, when Slack gives it), oldest first.
+// Slack gives the oldest first, so the whole thread is read: an answer of
+// the caller's can be on the last page.
+func (f *fetcher) replies(ctx context.Context, channelID, root string) ([]map[string]any, error) {
+	msgs, err := f.pages(ctx, "conversations.replies", map[string]any{
+		"channel":   channelID,
+		"ts":        root,
+		"oldest":    f.oldest,
+		"inclusive": true,
+	}, nil)
+	if err != nil {
+		return nil, err
+	}
+	return sortByTS(msgs), nil
 }
 
 // humanSubtypes are the subtypes of a message that is a person talking;

@@ -27,7 +27,8 @@ func New(rt *clictx.Context) *cobra.Command {
   dm, mpim  DMs and group DMs whose newest message is not yours
   mention   @mentions of you that you have not answered in the thread (or,
             for a top-level mention nobody replied to, later in the channel)
-  thread    new replies in threads you posted in
+  thread    new replies in threads you posted in (also after a mention
+            you answered)
 
 "unreads" is about what you have not read; this is about what you have not
 answered, read or not. Your last message, your reaction or (for a top-level
@@ -39,8 +40,10 @@ Prints JSON:
   since      start of the window, in UTC
   truncated  true when there was more to look at than was looked at: more
              candidates than --max-conversations (raise it), or more
-             matches than the 200 read from each search (only a shorter
-             --since helps then)
+             matches than the 200 read from each search, or a
+             conversation with more than 1000 messages in the window, whose
+             item may undercount or be answered already (only a shorter
+             --since helps with these two)
   items      newest first, each with:
     kind          dm, mpim, mention or thread
     channel_id, channel_name
@@ -57,7 +60,11 @@ Prints JSON:
 
 The candidates come from Slack's search (messages to you, mentions of you,
 your own thread posts), which a bot token cannot use; each one is then read
-to see whether it still waits. Nothing is marked as read.`,
+to see whether it still waits. Nothing is marked as read.
+
+The search goes back to two days before --since, for your own thread posts
+too: a thread whose last post of yours is older than that is not found,
+however recent its replies, unless one of them mentions you.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			start, err := inbox.ParseSince(since, time.Now())
@@ -94,6 +101,6 @@ to see whether it still waits. Nothing is marked as read.`,
 	cmd.Flags().StringVar(&since, "since", inbox.DefaultSince, "Start of the window: a number of days or hours (3d, 12h), or a day (2026-01-31, from 00:00 UTC)")
 	cmd.Flags().IntVar(&maxBodyChars, "max-body-chars", inbox.DefaultMaxBodyChars, "Max text characters per item (-1 for unlimited)")
 	cmd.Flags().IntVar(&maxConversations, "max-conversations", inbox.DefaultMaxConversations, "Max conversations and threads to inspect, the most recently active first; when there are more, truncated is true")
-	cmd.Flags().BoolVar(&noThreads, "no-threads", false, "Leave out the threads you only posted in (kind thread)")
+	cmd.Flags().BoolVar(&noThreads, "no-threads", false, "Leave out the new replies in threads you posted in (kind thread)")
 	return cmd
 }
