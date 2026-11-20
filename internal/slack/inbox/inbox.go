@@ -127,6 +127,9 @@ type Options struct {
 	CacheDir string
 }
 
+// latestMargin is how far past the local clock fetcher.latest is put.
+const latestMargin = 24 * time.Hour
+
 // maxSince is the longest relative --since accepted: 100 years.
 const maxSince = 100 * 365 * 24 * time.Hour
 
@@ -198,8 +201,10 @@ type fetcher struct {
 	me      string
 	sinceTS float64
 	oldest  string
-	// latest is when Fetch started, as a Slack timestamp: with it,
-	// conversations.history pages from the newest message back.
+	// latest is a Slack timestamp after every message there is: with it,
+	// conversations.history pages from the newest message back. It is a
+	// day after Fetch started, so that a local clock running behind
+	// Slack's does not hide the newest messages.
 	latest       string
 	baseURL      string
 	maxBodyChars int
@@ -253,7 +258,7 @@ func Fetch(ctx context.Context, client *slackapi.Client, opts Options) (Result, 
 		me:           me,
 		sinceTS:      sinceTS,
 		oldest:       strconv.FormatFloat(sinceTS, 'f', 6, 64),
-		latest:       strconv.FormatFloat(float64(time.Now().UnixMicro())/1e6, 'f', 6, 64),
+		latest:       strconv.FormatFloat(float64(time.Now().Add(latestMargin).UnixMicro())/1e6, 'f', 6, 64),
 		baseURL:      strings.TrimRight(cmp.Or(jsonx.Str(auth["url"]), client.WorkspaceURL()), "/"),
 		maxBodyChars: opts.MaxBodyChars,
 		noThreads:    opts.NoThreads,
@@ -524,10 +529,12 @@ func (f *fetcher) evaluate(ctx context.Context, c *candidate) (*draft, error) {
 		// A top-level mention nobody replied to: a later message of the
 		// caller's in the channel counts as the answer.
 		mention := slices.MaxFunc(c.mentionTS, func(a, b string) int { return cmp.Compare(tsNum(a), tsNum(b)) })
+		// Without "latest" the pages go forward from the mention: an
+		// answer, most often written soon after it, is on the first
+		// pages, however busy the channel has been since.
 		later, err := f.pages(ctx, "conversations.history", map[string]any{
 			"channel":   c.channelID,
 			"oldest":    mention,
-			"latest":    f.latest,
 			"inclusive": false,
 		}, f.wrote)
 		if err != nil {

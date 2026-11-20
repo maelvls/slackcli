@@ -121,10 +121,14 @@ func (w *world) serve(method string, params map[string]any) map[string]any {
 		return map[string]any{"messages": map[string]any{"matches": toAny(matches), "paging": map[string]any{"pages": float64(max(w.pages, 1))}}}
 	case "conversations.history":
 		oldest := tsNum(params["oldest"].(string))
+		latest := 1e18
+		if s, ok := params["latest"].(string); ok {
+			latest = tsNum(s)
+		}
 		var out []map[string]any
 		for _, m := range w.history[id] {
 			at := tsNum(m["ts"].(string))
-			if at > oldest || (params["inclusive"] == true && at == oldest) {
+			if at <= latest && (at > oldest || (params["inclusive"] == true && at == oldest)) {
 				out = append(out, m)
 			}
 		}
@@ -354,7 +358,9 @@ func TestFetch(t *testing.T) {
 	// Conversations are read from the start of the window, a few at a time;
 	// threads are read whole.
 	for _, c := range w.only("conversations.history") {
-		if c.params["oldest"] == nil || c.params["latest"] == nil {
+		// The look for an answer after a mention (not inclusive) goes
+		// forward, without "latest".
+		if c.params["oldest"] == nil || (c.params["latest"] == nil) == (c.params["inclusive"] == true) {
 			t.Errorf("conversations.history params = %v", c.params)
 		}
 	}
@@ -407,6 +413,20 @@ func TestFetchNoThreadsAfterAnsweredMention(t *testing.T) {
 	}
 	if got := kinds(newWorld().fetch(t, Options{NoThreads: true})); len(got) != 0 {
 		t.Errorf("items with NoThreads = %q, want none", got)
+	}
+}
+
+// The newest messages are seen even when the local clock is behind
+// Slack's: a message can be stamped later than "now".
+func TestFetchSeesMessagesAheadOfTheLocalClock(t *testing.T) {
+	ahead := float64(time.Now().Add(time.Hour).Unix())
+	w := &world{
+		to:      []map[string]any{match(im("D1", "U00000001"), "U00000001", ahead, -1)},
+		history: map[string][]map[string]any{"D1": {msg("U00000001", 1001), msg("U00000001", ahead)}},
+	}
+	res := w.fetch(t, Options{})
+	if len(res.Items) != 1 || res.Items[0].TS != ts(ahead) || res.Items[0].Count != 2 {
+		t.Errorf("items = %+v", res.Items)
 	}
 }
 
@@ -513,16 +533,34 @@ func TestFetchReadsLongConversations(t *testing.T) {
 		}
 	}
 	t.Run("answer in the channel", func(t *testing.T) {
-		w := mention(slices.Concat([]map[string]any{msg(me, 1011)}, burst("U00000002", 1012, 250)))
+		w := mention(append(burst("U00000002", 1012, 250), msg(me, 1900)))
 		if res := w.fetch(t, Options{}); len(res.Items) != 0 || res.Truncated {
 			t.Errorf("result = %+v, want the mention answered", res)
 		}
-		if n := len(w.only("conversations.history")); n != 2 {
-			t.Errorf("history calls = %d, want 2", n)
+		calls := w.only("conversations.history")
+		if len(calls) != 2 {
+			t.Errorf("history calls = %d, want 2", len(calls))
+		}
+		// Forward from the mention: no "latest".
+		for _, c := range calls {
+			if _, ok := c.params["latest"]; ok || c.params["oldest"] != ts(1010) {
+				t.Errorf("history params = %v", c.params)
+			}
+		}
+	})
+	t.Run("answer right after the mention in a busy channel", func(t *testing.T) {
+		// The channel has been busier since than what is read: the answer
+		// is still found, on the first page.
+		w := mention(slices.Concat([]map[string]any{msg(me, 1011)}, burst("U00000002", 1012, pageSize*maxPages+50)))
+		if res := w.fetch(t, Options{}); len(res.Items) != 0 || res.Truncated {
+			t.Errorf("result = %+v, want the mention answered", res)
+		}
+		if n := len(w.only("conversations.history")); n != 1 {
+			t.Errorf("history calls = %d, want 1", n)
 		}
 	})
 	t.Run("channel too busy", func(t *testing.T) {
-		res := mention(slices.Concat([]map[string]any{msg(me, 1011)}, burst("U00000002", 1012, pageSize*maxPages))).fetch(t, Options{})
+		res := mention(append(burst("U00000002", 1012, pageSize*maxPages), msg(me, 1900))).fetch(t, Options{})
 		if got := kinds(res); !reflect.DeepEqual(got, []string{"mention C1"}) || !res.Truncated {
 			t.Errorf("items, truncated = %q, %v", got, res.Truncated)
 		}
