@@ -2,11 +2,13 @@ package root
 
 import (
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/spf13/cobra"
 
+	"github.com/maelvls/slackcli/internal/appinfo"
 	"github.com/maelvls/slackcli/internal/clictx"
 	"github.com/maelvls/slackcli/internal/slack/enrich"
 )
@@ -51,5 +53,34 @@ func TestWarningsAreInTheResultNotOnStderr(t *testing.T) {
 	got = runWith(t, time.Second, build, "fail")
 	if got.code != ExitError || got.stdout != "" || got.stderr != "Warning: the uploaded files were left behind\ndenied\n" {
 		t.Errorf("fail: %+v", got)
+	}
+}
+
+// A command that times out never prints its result: what it had to say,
+// before the timeout and while cleaning up after it, goes to stderr, once.
+func TestTimeoutFlushesTheWarnings(t *testing.T) {
+	t.Setenv(appinfo.EnvName("COMMAND_TIMEOUT_MS"), "40")
+	build := func(rt *clictx.Context) []*cobra.Command {
+		return []*cobra.Command{{Use: "slow", RunE: func(cmd *cobra.Command, _ []string) error {
+			rt.Warnf("said before the timeout")
+			<-cmd.Context().Done()
+			// The cleanup the grace period is for.
+			rt.Warnf("the uploaded file F1 could not be deleted")
+			enrich.Warnf(cmd.Context(), "said by a lookup during the cleanup")
+			return cmd.Context().Err()
+		}}}
+	}
+	got := runWith(t, 5*time.Second, build, "slow")
+	if got.code != ExitTimeout || got.stdout != "" {
+		t.Fatalf("%+v", got)
+	}
+	lines := strings.Split(strings.TrimSuffix(got.stderr, "\n"), "\n")
+	want := []string{
+		"Warning: said before the timeout",
+		"Warning: the uploaded file F1 could not be deleted",
+		"Warning: said by a lookup during the cleanup",
+	}
+	if len(lines) != 4 || !strings.Contains(lines[0], "command timed out after 40ms") || strings.Join(lines[1:], "|") != strings.Join(want, "|") {
+		t.Errorf("stderr = %q, want the timeout then %q", got.stderr, want)
 	}
 }

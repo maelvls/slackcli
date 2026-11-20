@@ -84,21 +84,34 @@ func (c *Context) FlushNotes() {
 // added when it is an object, and indented on a terminal.
 func (c *Context) PrintCompact(compact []byte) error {
 	warnings, hints := c.takeNotes()
-	out, ok := withNotes(compact, warnings, hints)
-	if !ok {
-		// Not something notes can be added to: they go to stderr.
+	// keep puts the notes back, for FlushNotes to write on stderr.
+	keep := func() {
 		c.mu.Lock()
+		defer c.mu.Unlock()
 		c.warnings = append(warnings, c.warnings...)
 		c.hints = append(hints, c.hints...)
-		c.mu.Unlock()
+	}
+	out, ok := withNotes(compact, warnings, hints)
+	if !ok {
+		// Not something notes can be added to.
+		keep()
 	}
 	if output.Indented(c.Stdout) {
 		var err error
 		if out, err = output.Indent(out); err != nil {
+			if ok {
+				keep()
+			}
 			return err
 		}
 	}
 	_, err := fmt.Fprintf(c.Stdout, "%s\n", out)
+	if err != nil && ok {
+		// The result did not reach stdout (a closed pipe, a full disk):
+		// its notes must not be lost with it. One of them may be the only
+		// trace that a message was sent.
+		keep()
+	}
 	return err
 }
 

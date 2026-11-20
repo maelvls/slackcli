@@ -275,6 +275,8 @@ func (r runner) run(args []string, stdout, stderr io.Writer) int {
 		case <-done:
 		case <-grace.C:
 		}
+		// What the command said while it was cleaning up.
+		rt.FlushNotes()
 		return ExitTimeout
 	}
 

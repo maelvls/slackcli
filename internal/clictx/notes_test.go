@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"testing"
 
 	"github.com/maelvls/slackcli/internal/slack/enrich"
@@ -106,6 +107,29 @@ func TestUnprintedNotesGoToStderr(t *testing.T) {
 		t.Errorf("printed %s, want %s", stdout, want)
 	}
 	const want = "Warning: the uploaded file F1 was left behind\nWarning: the permalink could not be fetched\nTry again.\n"
+	if stderr.String() != want {
+		t.Errorf("stderr = %q, want %q", stderr, want)
+	}
+}
+
+type failingWriter struct{}
+
+func (failingWriter) Write([]byte) (int, error) { return 0, errors.New("no space left on device") }
+
+// When the result cannot be written, its notes are not lost with it:
+// they are still there for stderr. One of them may say that a message
+// was sent although its permalink is missing.
+func TestNotesSurviveAFailedPrint(t *testing.T) {
+	c, _, stderr := notesContext()
+	c.Stdout = failingWriter{}
+	c.Warnf("the message was sent, but its permalink could not be fetched")
+	c.ResultHintf("Do not send it again.")
+	if err := c.Print(map[string]any{"ok": true}); err == nil {
+		t.Fatal("Print succeeded on a writer that fails")
+	}
+	c.FlushNotes()
+	c.FlushNotes() // once only
+	const want = "Warning: the message was sent, but its permalink could not be fetched\nDo not send it again.\n"
 	if stderr.String() != want {
 		t.Errorf("stderr = %q, want %q", stderr, want)
 	}
