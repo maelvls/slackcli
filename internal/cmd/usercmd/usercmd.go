@@ -92,18 +92,20 @@ title ("jane", "jane doe", "doe engineer"). Use it when you do not know
 the exact handle or name that "user get" needs; several words may also be
 given as several arguments.
 
-It asks Slack's people search, which answers in one call, tolerates typos
-and ranks the candidates. With a bot token, or where Slack refuses that
-search, the user directory is scanned instead for the members in whose
-handle, names, email or title every word is found, ignoring case and
-accents: slow in large workspaces. Deactivated members and bots are not
-searched: "user get" finds them by handle, email or ID.
+It asks Slack's people search, which answers in one call and ranks the
+candidates; it wants whole words or their beginning, spelled right, and
+leaves out bots. With a bot token, or where Slack refuses that search, the
+user directory is scanned instead for the active members, bots left out,
+in whose handle, names, email or title every word is found, ignoring case
+and accents: slow in large workspaces. "user get" finds a bot or a
+deactivated member by handle, email or ID.
 
 Prints {"users": […], "total": …}, best match first. Each user has id,
-name (the handle), real_name, display_name, title, and email and tz when
-Slack gives them. "users" is [] when nobody matches. total is how many
-members match, when Slack says: when it is more than the users listed,
-make the query more specific or raise --limit.`,
+name (the handle), real_name, display_name and title; a directory scan
+adds email and tz, which the people search does not give ("user get <id>"
+does). "users" is [] when nobody matches. total is how many members
+match, when Slack says: when it is more than the users listed, make the
+query more specific or raise --limit (100 at most).`,
 		Args: cobra.MinimumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if err := cmdutil.CheckLimit(limit, users.MaxSearchLimit, "make the query more specific instead"); err != nil {
@@ -126,7 +128,11 @@ make the query more specific or raise --limit.`,
 				rt.Hintf("Warning: %s", w)
 			}
 			if n := len(payload.Users); payload.Total > n {
-				rt.Hintf("%d users match %q, the first %d are listed: make the query more specific, or raise --limit.", payload.Total, query, n)
+				advice := "make the query more specific, or raise --limit"
+				if limit == users.MaxSearchLimit {
+					advice = "make the query more specific"
+				}
+				rt.Hintf("%d users match %q, the first %d are listed: %s.", payload.Total, query, n, advice)
 			}
 			return cmdutil.PrintList(rt, payload, "users")
 		},

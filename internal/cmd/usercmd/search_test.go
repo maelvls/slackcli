@@ -3,6 +3,7 @@ package usercmd
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"reflect"
 	"strings"
 	"testing"
@@ -61,11 +62,27 @@ func TestSearch(t *testing.T) {
 		t.Fatal(err)
 	}
 	if !reflect.DeepEqual(userIDs(out), []string{"U000000007"}) || out["total"] != float64(2) ||
-		!strings.Contains(stderr.String(), `2 users match "jane doe", the first 1 are listed`) {
+		!strings.Contains(stderr.String(), `2 users match "jane doe", the first 1 are listed: make the query more specific, or raise --limit.`) {
 		t.Errorf("--limit 1 printed %s, stderr %s", h.stdout, stderr)
 	}
 	if got := h.only("search.modules.people"); len(got) != 1 || got[0].params["query"] != "jane doe" || got[0].params["count"] != 1 {
 		t.Errorf("calls = %+v", got)
+	}
+}
+
+// At the largest --limit, the hint does not say to raise it.
+func TestSearchHintAtTheLargestLimit(t *testing.T) {
+	var people []map[string]any
+	for i := range 101 {
+		people = append(people, map[string]any{"id": fmt.Sprintf("U%09d", i), "username": "doe"})
+	}
+	h, stderr := searchHarness(t, people...)
+	out, err := h.run("search", "doe", "--limit", "100")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := stderr.String(); len(userIDs(out)) != 100 || got != "101 users match \"doe\", the first 100 are listed: make the query more specific.\n" {
+		t.Errorf("printed %d users, stderr %s", len(userIDs(out)), got)
 	}
 }
 
@@ -89,7 +106,7 @@ func TestSearchScansTheDirectory(t *testing.T) {
 	}
 	want := map[string]any{"total": float64(1), "users": []any{map[string]any{
 		"id": "U000000001", "name": "alice", "real_name": "Alice A", "display_name": "ali", "email": "alice@example.com",
-		"title": "Engineer", "is_bot": false, "deleted": false,
+		"title": "Engineer",
 	}}}
 	if !reflect.DeepEqual(out, want) {
 		t.Errorf("printed %s", h.stdout)

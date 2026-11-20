@@ -101,6 +101,22 @@ func TestInfoOfDM(t *testing.T) {
 	}
 }
 
+// Without a DM with that user, the error is about describing, not reading.
+func TestInfoOfMissingDM(t *testing.T) {
+	h := infoHarness(t, generalChannel)
+	h.listing = func(map[string]any) map[string]any { return map[string]any{"channels": []any{}} }
+	_, err := h.run("info", "U000000123")
+	if err == nil || !strings.Contains(err.Error(), "there is no direct message with user U000000123") ||
+		!strings.Contains(err.Error(), "no conversation to describe") || strings.Contains(err.Error(), "to read") {
+		t.Errorf("error = %v", err)
+	}
+	for _, m := range h.methods() {
+		if m == "conversations.open" || m == "conversations.info" {
+			t.Errorf("calls = %v", h.methods())
+		}
+	}
+}
+
 func TestInfoErrors(t *testing.T) {
 	h := infoHarness(t, generalChannel)
 	h.fail["conversations.info"] = "channel_not_found"

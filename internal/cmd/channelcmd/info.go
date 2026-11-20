@@ -1,6 +1,9 @@
 package channelcmd
 
 import (
+	"errors"
+	"fmt"
+
 	"github.com/spf13/cobra"
 
 	"github.com/maelvls/slackcli/internal/clictx"
@@ -38,6 +41,11 @@ conversation object instead.`,
 			ch, err := cmdutil.WithTarget(ctx, rt, target, func(loc cmdutil.Located) (map[string]any, error) {
 				return channels.Info(ctx, loc.Client, loc.ChannelID)
 			})
+			var noDM *channels.NoDMError
+			if errors.As(err, &noDM) {
+				// The error itself is worded for reading messages.
+				return fmt.Errorf("there is no direct message with user %s: nothing was ever written there, so there is no conversation to describe", noDM.UserID)
+			}
 			if err != nil {
 				return err
 			}

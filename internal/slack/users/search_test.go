@@ -2,6 +2,7 @@ package users
 
 import (
 	"context"
+	"errors"
 	"reflect"
 	"strconv"
 	"strings"
@@ -53,17 +54,18 @@ func searchIDs(r SearchResult) []string {
 
 func TestSearchUsersAsksPeopleSearch(t *testing.T) {
 	ctx := context.Background()
+	// Slack's people search escapes the texts of the profile as HTML.
 	rec := peopleSearch(
-		person("U00000001A", "jdoe", "Jane Doe", "Engineer"),
-		person("U00000002B", "john", "John Doeson", ""),
+		person("U00000001A", "jdoe", "Jane Doe", "R&amp;D &lt;Engineer&gt;"),
+		person("U00000002B", "john", "John &quot;Jo&quot; Doeson", ""),
 	)
 	got, err := SearchUsers(ctx, rec.client(), "  doe ", 0)
 	if err != nil {
 		t.Fatal(err)
 	}
 	want := SearchResult{Total: 2, Users: []CompactUser{
-		{ID: "U00000001A", Name: "jdoe", RealName: "Jane Doe", DisplayName: "jdoe", Title: "Engineer"},
-		{ID: "U00000002B", Name: "john", RealName: "John Doeson", DisplayName: "john"},
+		{ID: "U00000001A", Name: "jdoe", RealName: "Jane Doe", DisplayName: "jdoe", Title: "R&D <Engineer>"},
+		{ID: "U00000002B", Name: "john", RealName: `John "Jo" Doeson`, DisplayName: "john"},
 	}}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("SearchUsers = %+v", got)
@@ -130,7 +132,9 @@ func TestSearchUsersByEmail(t *testing.T) {
 		}
 		return map[string]any{"ok": true}, nil
 	}}
-	got, err := SearchUsers(ctx, rec.client(), "jane@example.com", 0)
+	// A user token may look an address up.
+	userToken := tokenClient(rec, "xoxp-test")
+	got, err := SearchUsers(ctx, userToken, "jane@example.com", 0)
 	if err != nil || !reflect.DeepEqual(searchIDs(got), []string{"U00000001A"}) || got.Total != 1 {
 		t.Errorf("SearchUsers(email) = %+v, %v", got, err)
 	}
@@ -140,13 +144,33 @@ func TestSearchUsersByEmail(t *testing.T) {
 
 	// An address nobody has is then searched as text.
 	rec.calls = nil
-	got, err = SearchUsers(ctx, rec.client(), "nobody@example.com", 0)
+	got, err = SearchUsers(ctx, userToken, "nobody@example.com", 0)
 	if err != nil || len(got.Users) != 0 {
 		t.Errorf("SearchUsers(unknown email) = %+v, %v", got, err)
 	}
 	if !reflect.DeepEqual(rec.methods(), []string{"users.lookupByEmail", "search.modules.people"}) {
 		t.Errorf("calls = %v", rec.methods())
 	}
+
+	// Browser credentials may not (not_allowed_token_type): the call is
+	// not made.
+	rec.calls = nil
+	if _, err = SearchUsers(ctx, rec.client(), "jane@example.com", 0); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(rec.methods(), []string{"search.modules.people"}) {
+		t.Errorf("browser credentials: calls = %v", rec.methods())
+	}
+}
+
+// tokenClient is a client with a standard token whose calls rec serves
+// and records.
+func tokenClient(rec *recorder, token string) *slackapi.Client {
+	return slackapi.New(slackapi.Auth{Type: slackapi.AuthStandard, Token: token}, "https://test.slack.com",
+		slackapi.WithHandler(func(_ context.Context, method string, params map[string]any) (map[string]any, error) {
+			rec.calls = append(rec.calls, call{method, params})
+			return rec.serve(method, params)
+		}))
 }
 
 // searchDirectoryPages is a directory of two pages for the scan.
@@ -171,6 +195,7 @@ func TestSearchUsersScansTheDirectory(t *testing.T) {
 		"@DOE":          {"U00000002B", "U00000001A", "U00000005E", "U00000006F", "U00000007G"},
 		"jane doe":      {"U00000001A"},
 		"doe jane":      {"U00000001A"},
+		"  jane   doe ": {"U00000001A"},
 		"doe engineer":  {"U00000001A"},
 		"mael":          {"U00000005E"},
 		"maël":          {"U00000005E"},
@@ -179,12 +204,7 @@ func TestSearchUsersScansTheDirectory(t *testing.T) {
 	} {
 		// A bot token cannot use the people search.
 		rec := directory{pages: searchDirectoryPages}.recorder()
-		bot := slackapi.New(slackapi.Auth{Type: slackapi.AuthStandard, Token: "xoxb-test"}, "https://test.slack.com",
-			slackapi.WithHandler(func(_ context.Context, method string, params map[string]any) (map[string]any, error) {
-				rec.calls = append(rec.calls, call{method, params})
-				return rec.serve(method, params)
-			}))
-		got, err := SearchUsers(ctx, bot, query, 0)
+		got, err := SearchUsers(ctx, tokenClient(rec, "xoxb-test"), query, 0)
 		if err != nil {
 			t.Fatalf("SearchUsers(%q): %v", query, err)
 		}
@@ -197,23 +217,59 @@ func TestSearchUsersScansTheDirectory(t *testing.T) {
 	}
 }
 
-// The people search is internal to Slack: where it is refused, the
-// directory is scanned.
-func TestSearchUsersFallsBackToTheDirectory(t *testing.T) {
+// peopleSearchFails is a workspace whose people search answers with err.
+func peopleSearchFails(err func(method string) error) *recorder {
 	rec := directory{pages: searchDirectoryPages}.recorder()
 	serve := rec.serve
 	rec.serve = func(method string, params map[string]any) (map[string]any, error) {
 		if method == "search.modules.people" {
-			return nil, &slackapi.APIError{Method: method, Code: "not_allowed_token_type"}
+			return nil, err(method)
 		}
 		return serve(method, params)
 	}
-	got, err := SearchUsers(context.Background(), rec.client(), "doe", 2)
-	if err != nil || !reflect.DeepEqual(searchIDs(got), []string{"U00000002B", "U00000001A"}) || got.Total != 5 {
-		t.Errorf("SearchUsers = %+v, %v", got, err)
+	return rec
+}
+
+// The people search is internal to Slack: where it is refused, the
+// directory is scanned.
+func TestSearchUsersFallsBackToTheDirectory(t *testing.T) {
+	for _, code := range []string{"not_allowed_token_type", "missing_scope", "unknown_method", "enterprise_is_restricted"} {
+		rec := peopleSearchFails(func(method string) error { return &slackapi.APIError{Method: method, Code: code} })
+		got, err := SearchUsers(context.Background(), rec.client(), "doe", 2)
+		if err != nil || !reflect.DeepEqual(searchIDs(got), []string{"U00000002B", "U00000001A"}) || got.Total != 5 {
+			t.Errorf("%s: SearchUsers = %+v, %v", code, got, err)
+		}
+		if got.Users[0].IsBot != nil || got.Users[0].Deleted != nil {
+			t.Errorf("%s: a scanned user has is_bot or deleted, which the people search does not give: %+v", code, got.Users[0])
+		}
+		if !reflect.DeepEqual(rec.methods(), []string{"search.modules.people", "users.list", "users.list"}) {
+			t.Errorf("%s: calls = %v", code, rec.methods())
+		}
 	}
-	if !reflect.DeepEqual(rec.methods(), []string{"search.modules.people", "users.list", "users.list"}) {
-		t.Errorf("calls = %v", rec.methods())
+}
+
+// A people search that failed for any other reason fails the search: no
+// scan hides the error.
+func TestSearchUsersDoesNotScanAfterAFailure(t *testing.T) {
+	for name, fail := range map[string]func(method string) error{
+		"network error": func(string) error {
+			return errors.New("calling Slack API search.modules.people: dial tcp: i/o timeout")
+		},
+		"internal_error": func(method string) error { return &slackapi.APIError{Method: method, Code: "internal_error"} },
+		"fatal_error":    func(method string) error { return &slackapi.APIError{Method: method, Code: "fatal_error"} },
+		"invalid_auth":   func(method string) error { return &slackapi.APIError{Method: method, Code: "invalid_auth"} },
+		"rate limit": func(method string) error {
+			return &slackapi.RateLimitError{Method: method, RetryAfter: time.Minute}
+		},
+	} {
+		rec := peopleSearchFails(fail)
+		_, err := SearchUsers(context.Background(), rec.client(), "doe", 0)
+		if err == nil || !strings.Contains(err.Error(), "searching users: ") {
+			t.Errorf("%s: error = %v", name, err)
+		}
+		if !reflect.DeepEqual(rec.methods(), []string{"search.modules.people"}) {
+			t.Errorf("%s: calls = %v", name, rec.methods())
+		}
 	}
 }
 
@@ -258,15 +314,20 @@ func TestSearchUsersFailures(t *testing.T) {
 
 	// A scan that cannot start fails.
 	rec = limited("users.list")
-	if _, err := SearchUsers(ctx, rec.client(), "doe", 0); err == nil || !strings.Contains(err.Error(), "searching the user directory") {
+	if _, err := SearchUsers(ctx, rec.client(), "doe", 0); err == nil ||
+		!strings.Contains(err.Error(), "searching the user directory (Slack refused its people search: not_allowed_token_type): ") {
 		t.Errorf("rate-limited scan: error = %v", err)
+	}
+	if _, err := SearchUsers(ctx, tokenClient(limited("users.list"), "xoxb-test"), "doe", 0); err == nil ||
+		!strings.Contains(err.Error(), "searching the user directory (bot tokens cannot use Slack's people search): ") {
+		t.Errorf("rate-limited scan with a bot token: error = %v", err)
 	}
 
 	// A scan cut short gives what it found, without a total, and says so.
 	rec = limited("users.list#1")
 	got, err := SearchUsers(ctx, rec.client(), "doe", 0)
 	if err != nil || !reflect.DeepEqual(searchIDs(got), []string{"U00000002B", "U00000001A"}) || got.Total != 0 ||
-		len(got.Warnings) != 1 || !strings.Contains(got.Warnings[0], "stopped early") {
+		len(got.Warnings) != 1 || !strings.Contains(got.Warnings[0], "(Slack refused its people search: not_allowed_token_type) and the scan stopped early") {
 		t.Errorf("scan cut short = %+v, %v", got, err)
 	}
 }

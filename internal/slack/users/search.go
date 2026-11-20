@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"html"
 	"slices"
 	"strings"
 	"unicode"
@@ -15,7 +16,9 @@ import (
 
 const (
 	defaultSearchLimit = 20
-	// MaxSearchLimit is the most users one search returns.
+	// MaxSearchLimit is the most users one search returns. It is also the
+	// largest page search.modules.people serves: asked for more, Slack
+	// silently answers with 20.
 	MaxSearchLimit = 100
 )
 
@@ -38,15 +41,23 @@ type SearchResult struct {
 //
 // It asks Slack's people search (search.modules.people, what the Slack
 // client searches people with), which answers in one call whatever the
-// size of the workspace and decides what matches (it tolerates typos).
-// Where that is not available (a bot token, a workspace that refuses it)
-// the user directory is scanned instead (users.list), keeping the members
-// in whose handle, names, email or title every word of the query is found,
-// ignoring case and accents: slow in large workspaces, and cut short by
-// the rate limit in huge ones (see SearchResult.Warnings).
+// size of the workspace and decides what matches and in which order.
+// Nothing is filtered here: Slack's search was seen to leave bots out, and
+// whether it lists deactivated members is not known.
+//
+// Where Slack refuses that method (a bot token, see peopleSearchRefused)
+// the user directory is scanned instead (users.list), keeping the active
+// members, bots left out, in whose handle, names, email or title every
+// word of the query is found, ignoring case and accents: slow in large
+// workspaces, and cut short by the rate limit in huge ones (see
+// SearchResult.Warnings). Any other failure of the people search fails
+// the search: a timeout or a Slack outage says nothing about whether the
+// method is available, and a scan started then would hide the real error
+// behind a slow, possibly partial answer.
 //
 // A query that is an email address is first looked up as such
-// (users.lookupByEmail).
+// (users.lookupByEmail), with the tokens that may: Slack answers
+// not_allowed_token_type to browser credentials.
 func SearchUsers(ctx context.Context, client *slackapi.Client, query string, limit int) (SearchResult, error) {
 	query = strings.TrimSpace(query)
 	terms := searchTerms(query)
@@ -58,7 +69,7 @@ func SearchUsers(ctx context.Context, client *slackapi.Client, query string, lim
 	}
 	limit = min(limit, MaxSearchLimit)
 
-	if emailRe.MatchString(query) {
+	if emailRe.MatchString(query) && !client.Auth().IsBrowser() {
 		user, err := lookupByEmail(ctx, client, query)
 		switch {
 		case user != nil:
@@ -71,18 +82,38 @@ func SearchUsers(ctx context.Context, client *slackapi.Client, query string, lim
 	}
 
 	// Bot tokens cannot call search.*.
+	why := "bot tokens cannot use Slack's people search"
 	if !strings.HasPrefix(client.Auth().BearerToken(), "xoxb-") {
 		result, err := searchPeople(ctx, client, query, limit)
 		if err == nil {
 			return result, nil
 		}
-		if enrich.MustAbortRequired(ctx, err) {
+		if !peopleSearchRefused(err) {
 			return SearchResult{}, fmt.Errorf("searching users: %w", err)
 		}
-		// Anything else (a token without the scope, a workspace where
-		// the method is not served) leaves the directory to look at.
+		why = fmt.Sprintf("Slack refused its people search: %s", slackapi.ErrorCode(err))
 	}
-	return searchDirectory(ctx, client, query, terms, limit)
+	return searchDirectory(ctx, client, terms, limit, why)
+}
+
+// peopleSearchRefused reports whether err is Slack answering that
+// search.modules.people is not for this token or this workspace, which is
+// the one case where the directory is scanned instead. These codes are
+// about the method and the credentials, not about the query or the moment:
+// asking again would get the same answer.
+//
+//   - unknown_method, method_deprecated: the method is internal to Slack
+//     and may not be served everywhere, or forever;
+//   - not_allowed_token_type, missing_scope, no_permission: this kind of
+//     token may not call it (an app token without search:read …);
+//   - enterprise_is_restricted, feature_not_enabled: the workspace or its
+//     plan does not offer it.
+//
+// Everything else fails the search: a timeout, a network error, an HTTP
+// 5xx, internal_error or fatal_error, a rate limit, dead credentials.
+func peopleSearchRefused(err error) bool {
+	return slackapi.IsErrorCode(err, "unknown_method", "method_deprecated", "not_allowed_token_type", "missing_scope",
+		"no_permission", "enterprise_is_restricted", "feature_not_enabled")
 }
 
 // searchPeople asks Slack's people search, page after page until limit
@@ -120,28 +151,34 @@ func searchPeople(ctx context.Context, client *slackapi.Client, query string, li
 
 // peopleUser gives an item of search.modules.people the shape of a
 // users.info user: there the handle is "username", and the rest is in the
-// profile.
+// profile (an item has no tz, is_bot or deleted). Unlike users.info, the
+// search escapes the texts of the profile as HTML ("R&amp;D").
 func peopleUser(item map[string]any) map[string]any {
-	user := map[string]any{"id": item["id"], "name": item["username"], "profile": item["profile"]}
-	for _, key := range []string{"tz", "is_bot", "deleted"} {
-		if v, ok := item[key]; ok {
-			user[key] = v
+	profile := map[string]any{}
+	for key, v := range jsonx.Map(item["profile"]) {
+		profile[key] = v
+	}
+	for _, key := range []string{"real_name", "display_name", "title", "status_text"} {
+		if s, ok := profile[key].(string); ok {
+			profile[key] = html.UnescapeString(s)
 		}
 	}
-	return user
+	return map[string]any{"id": item["id"], "name": item["username"], "profile": profile}
 }
 
 // searchDirectory scans the whole user directory for the active members
 // that match every term. A rate limit after the first page ends the scan
-// with what was found and a warning.
-func searchDirectory(ctx context.Context, client *slackapi.Client, query string, terms []string, limit int) (SearchResult, error) {
+// with what was found and a warning. why says why the people search was
+// not used, for the error and the warning.
+func searchDirectory(ctx context.Context, client *slackapi.Client, terms []string, limit int, why string) (SearchResult, error) {
 	type match struct {
 		user  CompactUser
 		score int
 	}
 	var matches []match
 	result := SearchResult{Users: []CompactUser{}}
-	whole := foldForSearch(strings.TrimPrefix(query, "@"))
+	// The query as one name, whatever the spaces between its words.
+	whole := strings.Join(terms, " ")
 	cursor := ""
 	for pages := 0; ; pages++ {
 		params := map[string]any{"limit": scanPageSize}
@@ -152,16 +189,18 @@ func searchDirectory(ctx context.Context, client *slackapi.Client, query string,
 		if err != nil {
 			if pages > 0 && enrich.IsRateLimit(err) {
 				result.Warnings = append(result.Warnings, fmt.Sprintf(
-					"the scan of the user directory stopped early, the rest of the members were not looked at: %v", err))
+					"the user directory was scanned (%s) and the scan stopped early, the rest of the members were not looked at: %v", why, err))
 				break
 			}
-			return SearchResult{}, fmt.Errorf("searching the user directory: %w", err)
+			return SearchResult{}, fmt.Errorf("searching the user directory (%s): %w", why, err)
 		}
 		for _, m := range jsonx.Maps(resp["members"]) {
 			if jsonx.Str(m["id"]) == "" || jsonx.Bool(m["deleted"]) || jsonx.Bool(m["is_bot"]) {
 				continue
 			}
 			user := ToCompactUser(m)
+			// Always false here, and the people search has neither.
+			user.IsBot, user.Deleted = nil, nil
 			if score, ok := searchScore(user, whole, terms); ok {
 				matches = append(matches, match{user, score})
 			}
