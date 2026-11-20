@@ -3,6 +3,7 @@ package usercmd
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/spf13/cobra"
 
@@ -30,7 +31,7 @@ func New(rt *clictx.Context) *cobra.Command {
 		Short: "Workspace user directory",
 		Args:  cobra.NoArgs,
 	}
-	cmd.AddCommand(newListCommand(rt), newGetCommand(rt), newDMOpenCommand(rt))
+	cmd.AddCommand(newListCommand(rt), newSearchCommand(rt), newGetCommand(rt), newDMOpenCommand(rt))
 	return cmd
 }
 
@@ -75,6 +76,70 @@ present when there are more users: pass it to --cursor.`,
 	cmd.Flags().IntVar(&limit, "limit", 200, fmt.Sprintf("Max users to return (1-%d); bots that are filtered out do not count", maxListLimit))
 	cmd.Flags().StringVar(&cursor, "cursor", "", "Pagination cursor: the next_cursor value of the previous page")
 	cmd.Flags().BoolVar(&includeBots, "include-bots", false, "Include bot users")
+	return cmd
+}
+
+func newSearchCommand(rt *clictx.Context) *cobra.Command {
+	var (
+		workspace string
+		limit     int
+	)
+	cmd := &cobra.Command{
+		Use:   "search <query>",
+		Short: "Find users by part of a name, a handle or a title",
+		Long: `Find the users a few words designate: part of a name or of a handle, a
+title ("jane", "jane doe", "doe engineer"). Use it when you do not know
+the exact handle or name that "user get" needs; several words may also be
+given as several arguments.
+
+It asks Slack's people search, which answers in one call and ranks the
+candidates; it wants whole words or their beginning, spelled right, and
+leaves out bots. With a bot token, or where Slack refuses that search, the
+user directory is scanned instead for the active members, bots left out,
+in whose handle, names, email or title every word is found, ignoring case
+and accents: slow in large workspaces. "user get" finds a bot or a
+deactivated member by handle, email or ID.
+
+Prints {"users": […], "total": …}, best match first. Each user has id,
+name (the handle), real_name, display_name and title; a directory scan,
+and an email address looked up as such, add email and tz, which the
+people search does not give ("user get <id>" does). "users" is [] when
+nobody matches. total is how many members match, when Slack says: when it
+is more than the users listed, make the query more specific or raise
+--limit (100 at most).`,
+		Args: cobra.MinimumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if err := cmdutil.CheckLimit(limit, users.MaxSearchLimit, "make the query more specific instead"); err != nil {
+				return err
+			}
+			query := strings.Join(args, " ")
+			ctx := cmd.Context()
+			ws := rt.EffectiveWorkspace(workspace)
+			payload, err := clictx.WithAutoRefresh(ctx, rt, func() (users.SearchResult, error) {
+				r, err := rt.Client(ctx, ws)
+				if err != nil {
+					return users.SearchResult{}, err
+				}
+				return users.SearchUsers(ctx, r.Client, query, limit)
+			})
+			if err != nil {
+				return err
+			}
+			for _, w := range payload.Warnings {
+				rt.Hintf("Warning: %s", w)
+			}
+			if n := len(payload.Users); payload.Total > n {
+				advice := "make the query more specific, or raise --limit"
+				if limit == users.MaxSearchLimit {
+					advice = "make the query more specific"
+				}
+				rt.Hintf("%d users match %q, the first %d are listed: %s.", payload.Total, query, n, advice)
+			}
+			return cmdutil.PrintList(rt, payload, "users")
+		},
+	}
+	clictx.AddWorkspaceFlag(cmd, &workspace)
+	cmd.Flags().IntVar(&limit, "limit", 20, fmt.Sprintf("Max users to return (1-%d)", users.MaxSearchLimit))
 	return cmd
 }
 

@@ -76,8 +76,8 @@ func TestGroupsWithoutACommandOfTheirOwn(t *testing.T) {
 		args []string
 		want string
 	}{
-		{[]string{"channel", "#general"}, `unknown command "#general" for "slackcli channel": its commands are invite, list, mark, new`},
-		{[]string{"user", "U0AAAAAAAAA"}, `unknown command "U0AAAAAAAAA" for "slackcli user": its commands are dm-open, get, list`},
+		{[]string{"channel", "#general"}, `unknown command "#general" for "slackcli channel": its commands are info, invite, list, mark, new`},
+		{[]string{"user", "U0AAAAAAAAA"}, `unknown command "U0AAAAAAAAA" for "slackcli user": its commands are dm-open, get, list, search`},
 		{[]string{"canvas", "F0123ABCDEF"}, `unknown command "F0123ABCDEF" for "slackcli canvas": its commands are create, edit, get`},
 		{[]string{"auth", "status"}, `unknown command "status" for "slackcli auth": its commands are add, `},
 		{[]string{"search", "bogus", "x"}, `unknown command "bogus" for "slackcli search": its commands are all, files, messages`},

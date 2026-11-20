@@ -1,6 +1,6 @@
 ---
 name: slackcli
-description: "Slack CLI for agents: read message URLs/threads/channel history/unreads/Later/canvases/workflows, search messages and files, download attachments, look up users, list/create/invite channels, open DMs, create/edit canvases from Markdown, hand a message to a human in the compose editor, manage Slack-native drafts, schedule sends, and explicit sends/edits/deletes/reactions/mark-read/uploads."
+description: "Slack CLI for agents: read message URLs/threads/channel history/unreads/Later/canvases/workflows, search messages and files, download attachments, look up and search users, list/describe/create/invite channels, open DMs, create/edit canvases from Markdown, hand a message to a human in the compose editor, manage Slack-native drafts, schedule sends, and explicit sends/edits/deletes/reactions/mark-read/uploads."
 ---
 
 # slackcli
@@ -33,8 +33,10 @@ One call each. Messages carry `time` (their `ts` as a local date and time); add 
 - What was said in a channel since a day: `message list "#name" --oldest 2026-01-30 --expand-threads --resolve-users` (`--latest` ends the window; `--expand-threads` adds the replies of each thread after its first message).
 - One thread: `message list "<message-url>"`.
 - The DM with someone: `user get <handle|email|name>` for their ID, then `message list U…`. It fails when no DM exists; nothing is opened.
+- Someone whose exact handle or name you do not know: `user search <words>` (part of a name, a handle, a title) prints the candidates, best match first. `user get` only takes an exact handle, email or name, and prints one user.
 - Who said what, anywhere: `search messages "<words> from:@handle in:#channel" --no-download`. Results carry `channel_name`, `time`, `author.name` and a `permalink` to pass to `message list`.
 - A channel whose exact name you do not know: `channel list --name <text>` (add `--all` for channels you are not in). A known name needs no lookup: pass `#name`.
+- What a channel is about: `channel info <#name|id|url>` prints its topic, purpose, member count and whether you are in it.
 - The inbox: `unreads --counts-only`, then `message list` on what matters. Plain `unreads` prints up to 10 messages per conversation.
 
 ## Non-obvious behaviour
@@ -43,7 +45,7 @@ One call each. Messages carry `time` (their `ts` as a local date and time); add 
 - Output is one line of JSON (indented only on a terminal). Warnings and hints are inside it, in `warnings` and `hints` (why a list is empty, what could not be fetched): read them: a command that succeeds and prints JSON writes nothing on stderr. `channel list` prints `{id, name, user, is_private, is_im, is_mpim, is_archived, num_members}`; `--raw` prints Slack's own objects, twenty times larger.
 - `search` without `--channel` uses Slack's search API (operators allowed; not available to bot tokens). With `--channel` (repeatable or comma-separated) the channels are scanned and matched locally: operators are rejected, thread replies are not seen, and it can be slow: bound it with `--after`. `--after`/`--before` are exclusive days.
 - `later`, `unreads`, `message draft` and `channel list --via-counts` need browser credentials (xoxc + cookie). `canvas edit` and `canvas create --channel` need a standard token with `canvases:write`; browser credentials can only create standalone canvases.
-- `message send` text is Slack mrkdwn; lists are converted to real Slack lists. Inside them write links as `<URL|label>`: CommonMark `[label](URL)` is not converted. `--blocks` replaces that conversion; with `--attach` the text is the files' plain comment. Several `--attach` flags make one message.
+- `message send <target> <text>` takes the text as an argument (`--text <text>` is accepted too). The text is Slack mrkdwn; lists are converted to real Slack lists. Inside them write links as `<URL|label>`: CommonMark `[label](URL)` is not converted. `--blocks` replaces that conversion; with `--attach` the text is the files' plain comment. Several `--attach` flags make one message.
 - Text that starts with a dash: `message send`, `edit`, `compose` and `draft create/update` take it as text when it has several words (`- item`, `-1 for me`). A single dash-word (`-1`, `--force`) is read as a flag: put it after `--`. For `message react`, write the `-1` emoji as `:-1:`.
 - Scheduling: prefer `--schedule` with an ISO 8601 timestamp and explicit offset. `--schedule-in` day names, and `later remind --in` day names, use the local timezone of the machine running slackcli (9:00 by default): confirm it matches the user's intent or pass a Unix timestamp.
 - `message draft update --attach` adds files; it never removes any. Drafts with a scheduled time or several destinations are refused.

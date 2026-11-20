@@ -24,10 +24,10 @@ const maxListLimit = 1000
 func New(rt *clictx.Context) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "channel",
-		Short: "List conversations, create channels, manage invites, and mark as read",
+		Short: "List and describe conversations, create channels, manage invites, and mark as read",
 		Args:  cobra.NoArgs,
 	}
-	cmd.AddCommand(newListCommand(rt), newNewCommand(rt), newInviteCommand(rt), newMarkCommand(rt))
+	cmd.AddCommand(newListCommand(rt), newInfoCommand(rt), newNewCommand(rt), newInviteCommand(rt), newMarkCommand(rt))
 	return cmd
 }
 
