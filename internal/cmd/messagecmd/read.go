@@ -123,7 +123,7 @@ func (c *command) runGet(cmd *cobra.Command, targetInput string, opts readOption
 		return err
 	}
 	// 0 would mean "the default" to messages.CompactOptions.
-	if err := cmdutil.CheckMaxChars(cmdutil.MaxBodyCharsFlag, opts.maxBodyChars); err != nil {
+	if err := cmdutil.CheckMaxBodyChars(cmd, opts.maxBodyChars); err != nil {
 		return err
 	}
 
@@ -291,7 +291,7 @@ func (c *command) runList(cmd *cobra.Command, targetInput string, opts listOptio
 	// Reading opens no DM: a user target is the DM that exists with that
 	// user.
 	target.ReadOnly = true
-	if err := cmdutil.CheckMaxChars(cmdutil.MaxBodyCharsFlag, opts.maxBodyChars); err != nil {
+	if err := cmdutil.CheckMaxBodyChars(cmd, opts.maxBodyChars); err != nil {
 		return err
 	}
 	threadTS, err := cmdutil.ParseTS("--thread-ts", opts.threadTS)

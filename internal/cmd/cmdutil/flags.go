@@ -71,10 +71,6 @@ func CheckMaxChars(flag string, n int) error {
 	return nil
 }
 
-// MaxBodyCharsFlag is the name, dashes included, of the flag that caps the
-// content of each message printed (see AddMaxBodyCharsFlag).
-const MaxBodyCharsFlag = "--max-body-chars"
-
 // NoDownloadFlagName is the name of the flag that skips downloading the
 // files attached to messages: the same on every command that downloads.
 const NoDownloadFlagName = "no-download"
@@ -84,13 +80,28 @@ const NoDownloadFlagName = "no-download"
 // same name wherever message content is printed; --max-content-chars, its
 // former name on "search", is accepted everywhere as a hidden alias. When
 // both are given, the last one wins. Validate the value with
-// CheckMaxChars(MaxBodyCharsFlag, *p).
+// CheckMaxBodyChars.
 func AddMaxBodyCharsFlag(cmd *cobra.Command, p *int) {
-	const alias = "max-content-chars"
 	f := cmd.Flags()
-	f.IntVar(p, "max-body-chars", messages.DefaultMaxBodyChars, "Max characters of each message's content to include; longer content is cut (-1 for unlimited)")
-	f.IntVar(p, alias, messages.DefaultMaxBodyChars, "Alias of --max-body-chars")
-	_ = f.MarkHidden(alias)
+	f.IntVar(p, maxBodyCharsFlag, messages.DefaultMaxBodyChars, "Max characters of each message's content to include; longer content is cut (-1 for unlimited)")
+	f.IntVar(p, maxBodyCharsAlias, messages.DefaultMaxBodyChars, "Alias of --"+maxBodyCharsFlag)
+	_ = f.MarkHidden(maxBodyCharsAlias)
+}
+
+const (
+	maxBodyCharsFlag  = "max-body-chars"
+	maxBodyCharsAlias = "max-content-chars"
+)
+
+// CheckMaxBodyChars is CheckMaxChars for the flag AddMaxBodyCharsFlag
+// registered on cmd. The error names the flag that was typed: the alias
+// when only the alias was given.
+func CheckMaxBodyChars(cmd *cobra.Command, n int) error {
+	name := maxBodyCharsFlag
+	if f := cmd.Flags(); f.Changed(maxBodyCharsAlias) && !f.Changed(maxBodyCharsFlag) {
+		name = maxBodyCharsAlias
+	}
+	return CheckMaxChars("--"+name, n)
 }
 
 // AttachPaths trims and de-duplicates the values of a repeatable --attach

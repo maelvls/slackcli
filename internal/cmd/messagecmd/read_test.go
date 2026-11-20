@@ -340,7 +340,7 @@ func TestMaxContentCharsAlias(t *testing.T) {
 		if !reflect.DeepEqual(got, want) || !strings.Contains(h.stdout.String(), `hello\n…`) {
 			t.Errorf("%v: --max-content-chars 5 printed %s, want %v", args, h.stdout.String(), want)
 		}
-		h.mustFail("must be a positive integer, or -1 for unlimited", append(args, "--max-content-chars", "0")...)
+		h.mustFail("invalid --max-content-chars value 0: must be a positive integer, or -1 for unlimited", append(args, "--max-content-chars", "0")...)
 	}
 }
 

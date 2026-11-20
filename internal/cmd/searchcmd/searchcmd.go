@@ -2,7 +2,6 @@
 package searchcmd
 
 import (
-	"context"
 	"fmt"
 	"strings"
 
@@ -91,7 +90,7 @@ two ways of searching and how to get more results than --limit.`,
 			return cobra.ExactArgs(1)(cmd, args)
 		},
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return run(cmd.Context(), rt, kind, args[0], f)
+			return run(cmd, rt, kind, args[0], f)
 		},
 	}
 	fl := cmd.Flags()
@@ -119,7 +118,8 @@ two ways of searching and how to get more results than --limit.`,
 	return cmd
 }
 
-func run(ctx context.Context, rt *clictx.Context, kind search.Kind, query string, f flags) error {
+func run(cmd *cobra.Command, rt *clictx.Context, kind search.Kind, query string, f flags) error {
+	ctx := cmd.Context()
 	contentType, err := search.ParseContentType(f.contentType)
 	if err != nil {
 		return fmt.Errorf("--content-type: %w", err)
@@ -127,7 +127,7 @@ func run(ctx context.Context, rt *clictx.Context, kind search.Kind, query string
 	if err := cmdutil.CheckLimit(f.limit, search.MaxLimit, "to go further back, repeat the search with an earlier --before date"); err != nil {
 		return err
 	}
-	if err := cmdutil.CheckMaxChars(cmdutil.MaxBodyCharsFlag, f.maxContentChars); err != nil {
+	if err := cmdutil.CheckMaxBodyChars(cmd, f.maxContentChars); err != nil {
 		return err
 	}
 

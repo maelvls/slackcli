@@ -64,7 +64,7 @@ a bot or user token.`,
 			if err := cmdutil.CheckRange("--max-messages", maxMessages, unreads.MaxMessagesLimit, "use --counts-only to fetch no messages"); err != nil {
 				return err
 			}
-			if err := cmdutil.CheckMaxChars(cmdutil.MaxBodyCharsFlag, maxBodyChars); err != nil {
+			if err := cmdutil.CheckMaxBodyChars(cmd, maxBodyChars); err != nil {
 				return err
 			}
 			ctx := cmd.Context()

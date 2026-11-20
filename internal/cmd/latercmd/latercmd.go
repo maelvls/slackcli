@@ -92,7 +92,7 @@ Prints JSON:
 			if limit < 1 {
 				return fmt.Errorf("invalid --limit value %d: must be a positive integer", limit)
 			}
-			if err := cmdutil.CheckMaxChars(cmdutil.MaxBodyCharsFlag, maxBodyChars); err != nil {
+			if err := cmdutil.CheckMaxBodyChars(cmd, maxBodyChars); err != nil {
 				return err
 			}
 			ctx := cmd.Context()

@@ -182,7 +182,15 @@ func TestUnreadsFlags(t *testing.T) {
 		t.Errorf("--counts-only made %d conversations.history calls", n)
 	}
 
+	out, err = h.run("--max-messages", "5", "--max-content-chars", "6", "--include-system")
+	if err != nil {
+		t.Fatal(err)
+	}
+	viaAlias := h.stdout.String()
 	out, err = h.run("--max-messages", "5", "--max-body-chars", "6", "--include-system")
+	if got := h.stdout.String(); got != viaAlias {
+		t.Errorf("--max-content-chars 6 printed %s, --max-body-chars 6 printed %s", viaAlias, got)
+	}
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -278,6 +286,9 @@ func TestUnreadsRejectsGarbageFlags(t *testing.T) {
 		{[]string{"--max-body-chars", "abc"}, "--max-body-chars"},
 		{[]string{"--max-body-chars", "0"}, "--max-body-chars"},
 		{[]string{"--max-body-chars", "-5"}, "--max-body-chars"},
+		// The hidden alias is validated too, under the name typed.
+		{[]string{"--max-content-chars", "0"}, "invalid --max-content-chars value 0"},
+		{[]string{"--max-content-chars", "5", "--max-body-chars", "0"}, "invalid --max-body-chars value 0"},
 		{[]string{"extra"}, "unknown command"},
 	}
 	for _, tt := range tests {
