@@ -24,6 +24,9 @@ type APIError struct {
 	// general explanation of [explain]: what is known about this very
 	// failure (see WithFallback).
 	Hint string
+	// Status is the HTTP status of the response; 0 when it is not known
+	// (an error made up by a test).
+	Status int
 }
 
 // withHint returns err with hint as its explanation when err is an
@@ -214,6 +217,11 @@ func IsTransient(err error) bool {
 		return true
 	case errors.As(err, &status):
 		return status.Status >= 500
+	}
+	// An HTTP 5xx is Slack failing, whatever code comes with it.
+	var api *APIError
+	if errors.As(err, &api) && api.Status >= 500 {
+		return true
 	}
 	return IsErrorCode(err, transientCodes...)
 }

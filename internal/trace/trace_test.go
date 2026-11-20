@@ -3,8 +3,11 @@ package trace
 import (
 	"bytes"
 	"errors"
+	"slices"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 )
 
 func TestSummaryGroupsSpansAndNamesWhatIsRunning(t *testing.T) {
@@ -89,4 +92,123 @@ func TestSafeNote(t *testing.T) {
 	if got := out.String(); strings.Contains(got, "secret-plan") || strings.Contains(got, "xoxe-1") || !strings.Contains(got, `download: 0s, failed: Get "…": EOF`) {
 		t.Errorf("trace = %q", got)
 	}
+}
+
+// blockedWriter is a stderr that is a full pipe nobody reads.
+type blockedWriter struct{ writing, release chan struct{} }
+
+func (w blockedWriter) Write(p []byte) (int, error) {
+	select {
+	case w.writing <- struct{}{}:
+	case <-w.release:
+	}
+	<-w.release
+	return len(p), nil
+}
+
+// A trace line that cannot be written does not hold the record: the
+// message of a timeout is made from it.
+func TestSummaryDoesNotWaitForALineBeingWritten(t *testing.T) {
+	t.Setenv("SLACKCLI_DEBUG", "1")
+	out := blockedWriter{writing: make(chan struct{}), release: make(chan struct{})}
+	Reset(out)
+	t.Cleanup(func() { Reset(nil) })
+
+	go Begin("api users.info", "").End("HTTP 200")
+	<-out.writing       // the line is being written, and is stuck
+	go Logf("an event") // waits its turn behind it
+
+	got := make(chan string)
+	go func() {
+		Begin("keychain", "set") // nor does it keep spans from starting
+		got <- Summary()
+	}()
+	select {
+	case summary := <-got:
+		if !strings.Contains(summary, "api users.info ") || !strings.Contains(summary, "still running: keychain set for ") {
+			t.Errorf("summary = %q", summary)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Summary waits for the write")
+	}
+	close(out.release)
+}
+
+// The lines of the live trace are written one at a time and in the order
+// of the events, also when the writer is slow and the events come from
+// several goroutines.
+func TestLiveTraceLinesAreWrittenInOrderAndOneAtATime(t *testing.T) {
+	t.Setenv("SLACKCLI_DEBUG", "1")
+	t.Cleanup(func() { Reset(nil) })
+
+	// A plain buffer, which must not be written to by two goroutines at
+	// once: the race detector is the judge.
+	var buf bytes.Buffer
+	Reset(&buf)
+	var wg sync.WaitGroup
+	for i := range 50 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			Begin("api users.info", "").End("HTTP 200")
+			Logf("event %d", i)
+		}()
+	}
+	wg.Wait()
+	if n := strings.Count(buf.String(), "\n"); n != 100 {
+		t.Errorf("%d lines, want 100", n)
+	}
+
+	// Events that happen while a line is being written wait their turn,
+	// and come out in the order they happened in.
+	out := &slowWriter{writing: make(chan struct{}, 1), release: make(chan struct{})}
+	Reset(out)
+	queued := func() int {
+		rec.mu.Lock()
+		defer rec.mu.Unlock()
+		return len(rec.pending)
+	}
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		Logf("event 0")
+	}()
+	<-out.writing // "event 0" is being written, and is stuck
+	for i := 1; i <= 5; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			Logf("event %d", i)
+		}()
+		for deadline := time.Now().Add(5 * time.Second); queued() != i; time.Sleep(time.Millisecond) {
+			if time.Now().After(deadline) {
+				t.Fatalf("event %d was not queued", i)
+			}
+		}
+	}
+	close(out.release)
+	wg.Wait()
+	var got []string
+	for _, line := range strings.Split(strings.TrimSuffix(out.buf.String(), "\n"), "\n") {
+		_, event, _ := strings.Cut(line, "] ")
+		got = append(got, event)
+	}
+	if want := []string{"event 0", "event 1", "event 2", "event 3", "event 4", "event 5"}; !slices.Equal(got, want) {
+		t.Errorf("lines = %q, want %q", got, want)
+	}
+}
+
+// slowWriter is stuck in its first write until released.
+type slowWriter struct {
+	buf              bytes.Buffer
+	writing, release chan struct{}
+}
+
+func (w *slowWriter) Write(p []byte) (int, error) {
+	select {
+	case w.writing <- struct{}{}:
+	default:
+	}
+	<-w.release
+	return w.buf.Write(p)
 }

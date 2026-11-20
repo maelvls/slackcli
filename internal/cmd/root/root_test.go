@@ -197,6 +197,130 @@ func TestRunTimeoutCoversTheSetUpOfTheCommand(t *testing.T) {
 	}
 }
 
+// A set-up that ends once the timeout was reported must not start the
+// command: one that ignores its context (removing saved credentials, say)
+// would do its work after the user was told that it did not.
+func TestRunTimeoutDoesNotStartACommandWhoseSetUpWasLate(t *testing.T) {
+	t.Setenv(appinfo.EnvName("COMMAND_TIMEOUT_MS"), "30")
+	var started atomic.Bool
+	finished := make(chan struct{})
+	got := runWith(t, 5*time.Second, func(*clictx.Context) []*cobra.Command {
+		time.Sleep(300 * time.Millisecond) // well past the timeout
+		return []*cobra.Command{{Use: "remove", RunE: func(*cobra.Command, []string) error {
+			started.Store(true)
+			return nil
+		}, PersistentPostRun: func(*cobra.Command, []string) { close(finished) }}}
+	}, "remove")
+	if got.code != ExitTimeout || started.Load() {
+		t.Errorf("code = %d, command started = %v (%q)", got.code, started.Load(), got.stderr)
+	}
+	select {
+	case <-finished:
+		t.Error("the command ran to its end")
+	default:
+	}
+}
+
+// Nor does a set-up that ends while the timeout is being reported, before
+// the command is told to stop: that takes as long as stderr does.
+func TestRunTimeoutDoesNotStartACommandWhileItIsReported(t *testing.T) {
+	t.Setenv(appinfo.EnvName("COMMAND_TIMEOUT_MS"), "30")
+	testenv.Isolate(t)
+	var started atomic.Bool
+	hookRan := make(chan struct{})
+	stderr := blockedWriter{release: make(chan struct{})}
+	defer close(stderr.release)
+	r := runner{
+		newContext: func() *clictx.Context {
+			return &clictx.Context{Store: &auth.Store{Path: filepath.Join(t.TempDir(), "credentials.json")}}
+		},
+		commands: func(*clictx.Context) []*cobra.Command {
+			// Past the timeout, and well within the time the message
+			// of the timeout is given to be written (the grace period).
+			time.Sleep(300 * time.Millisecond)
+			defer close(hookRan)
+			return []*cobra.Command{{Use: "remove", RunE: func(*cobra.Command, []string) error {
+				started.Store(true)
+				return nil
+			}}}
+		},
+		grace: 2 * time.Second,
+	}
+	var stdout bytes.Buffer
+	if code := r.run([]string{"remove"}, &stdout, stderr); code != ExitTimeout {
+		t.Errorf("code = %d", code)
+	}
+	<-hookRan
+	if started.Load() {
+		t.Error("the command was started after the timeout")
+	}
+}
+
+// A command that returned on the very tick its timeout, or a signal,
+// struck on has returned: its own result is what counts, every time.
+func TestWaitPrefersACommandThatReturned(t *testing.T) {
+	result := errors.New("the result of the command")
+	for range 500 {
+		done, timedOut, signalled := make(chan error, 1), make(chan expiry, 1), make(chan struct{})
+		done <- result
+		timedOut <- expiry{awake: time.Second, wall: time.Hour}
+		close(signalled)
+		if err, how, late := wait(done, timedOut, signalled); err != result || how != finished || late != (expiry{}) {
+			t.Fatalf("wait = %v, %v, %+v; want the command's result", err, how, late)
+		}
+	}
+
+	late := expiry{awake: time.Minute, wall: time.Minute}
+	timedOut := make(chan expiry, 1)
+	timedOut <- late
+	if err, how, got := wait(make(chan error), timedOut, nil); err != nil || how != expired || got != late {
+		t.Errorf("timeout: wait = %v, %v, %+v", err, how, got)
+	}
+	signalled := make(chan struct{})
+	close(signalled)
+	if err, how, _ := wait(make(chan error), make(chan expiry), signalled); err != nil || how != interruptedBefore {
+		t.Errorf("signal: wait = %v, %v", err, how)
+	}
+}
+
+// blockedWriter is a stderr that is a full pipe nobody reads.
+type blockedWriter struct{ release chan struct{} }
+
+func (w blockedWriter) Write(p []byte) (int, error) {
+	<-w.release
+	return len(p), nil
+}
+
+// Neither the message of a timeout nor the trace keeps the process from
+// exiting with 124 when stderr blocks.
+func TestRunTimeoutDoesNotWaitOnABlockedStderr(t *testing.T) {
+	for _, debug := range []string{"", "1"} {
+		t.Setenv(appinfo.EnvName("COMMAND_TIMEOUT_MS"), "30")
+		t.Setenv(appinfo.EnvName(trace.EnvSuffix), debug)
+		testenv.Isolate(t)
+		stderr := blockedWriter{release: make(chan struct{})}
+		r := runner{
+			newContext: func() *clictx.Context {
+				return &clictx.Context{Store: &auth.Store{Path: filepath.Join(t.TempDir(), "credentials.json")}}
+			},
+			commands: one(&cobra.Command{Use: "slow", RunE: func(cmd *cobra.Command, _ []string) error {
+				span := trace.Begin("api conversations.history", "")
+				<-cmd.Context().Done()
+				span.EndErr(cmd.Context().Err()) // a trace line, when the trace is on
+				return cmd.Context().Err()
+			}}),
+			grace: 100 * time.Millisecond,
+		}
+		start := time.Now()
+		var stdout bytes.Buffer
+		code := r.run([]string{"slow"}, &stdout, stderr)
+		if elapsed := time.Since(start); code != ExitTimeout || elapsed > 3*time.Second {
+			t.Errorf("debug=%q: code = %d after %s", debug, code, elapsed)
+		}
+		close(stderr.release)
+	}
+}
+
 // A command that times out says what it spent its time on and what it was
 // still waiting for, without SLACKCLI_DEBUG.
 func TestRunTimeoutSaysWhereTheTimeWent(t *testing.T) {

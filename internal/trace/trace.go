@@ -44,6 +44,34 @@ type recorder struct {
 	totals  map[string]*total
 	order   []string
 	running []*Span
+	// pending are the lines of the live trace that are not written yet,
+	// in the order of the events (see emit).
+	pending []string
+
+	// writing is held while lines are written to out, and never together
+	// with mu: a stderr that blocks (a full pipe nobody reads) must not
+	// keep Summary, which the message of a timeout needs, from reading
+	// the record.
+	writing sync.Mutex
+}
+
+// queue adds a line to the live trace. It is called with mu held, which
+// is what orders the lines; flush writes them.
+func (r *recorder) queue(line string) { r.pending = append(r.pending, line) }
+
+// flush writes the lines that are queued, one writer at a time and in
+// the order they were queued in: whoever gets to write takes everything
+// there is, its own line and those of the others.
+func (r *recorder) flush() {
+	r.writing.Lock()
+	defer r.writing.Unlock()
+	r.mu.Lock()
+	lines, out := r.pending, r.out
+	r.pending = nil
+	r.mu.Unlock()
+	for _, line := range lines {
+		fmt.Fprintln(out, line)
+	}
 }
 
 type total struct {
@@ -70,7 +98,7 @@ func Reset(out io.Writer) {
 	rec.mu.Lock()
 	defer rec.mu.Unlock()
 	rec.start, rec.out, rec.live = fresh.start, fresh.out, fresh.live
-	rec.totals, rec.order, rec.running = fresh.totals, nil, nil
+	rec.totals, rec.order, rec.running, rec.pending = fresh.totals, nil, nil, nil
 }
 
 // Span is one timed operation.
@@ -117,8 +145,8 @@ func (s *Span) end(note string, failed bool) {
 	}
 	d := time.Since(s.start)
 	rec.mu.Lock()
-	defer rec.mu.Unlock()
 	if s.done {
+		rec.mu.Unlock()
 		return
 	}
 	s.done = true
@@ -135,6 +163,7 @@ func (s *Span) end(note string, failed bool) {
 		t.failed++
 	}
 	if !rec.live {
+		rec.mu.Unlock()
 		return
 	}
 	line := fmt.Sprintf("[%s +%s] %s", appinfo.Name, round(time.Since(rec.start)), s.name)
@@ -150,18 +179,22 @@ func (s *Span) end(note string, failed bool) {
 	case note != "":
 		line += ", " + note
 	}
-	fmt.Fprintln(rec.out, line)
+	rec.queue(line)
+	rec.mu.Unlock()
+	rec.flush()
 }
 
 // Logf writes one line to the live trace, for an event that has no
 // duration. It does nothing unless the live trace is on.
 func Logf(format string, args ...any) {
 	rec.mu.Lock()
-	defer rec.mu.Unlock()
 	if !rec.live {
+		rec.mu.Unlock()
 		return
 	}
-	fmt.Fprintf(rec.out, "[%s +%s] %s\n", appinfo.Name, round(time.Since(rec.start)), fmt.Sprintf(format, args...))
+	rec.queue(fmt.Sprintf("[%s +%s] %s", appinfo.Name, round(time.Since(rec.start)), fmt.Sprintf(format, args...)))
+	rec.mu.Unlock()
+	rec.flush()
 }
 
 // Summary says, on one line, what the time went to since the process

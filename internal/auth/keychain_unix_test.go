@@ -3,11 +3,16 @@
 package auth
 
 import (
+	"bytes"
 	"context"
 	"os"
 	"path/filepath"
+	"regexp"
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/maelvls/slackcli/internal/trace"
 )
 
 // A security(1) that the timeout killed must not keep the call waiting for
@@ -57,5 +62,62 @@ func TestRunSecurityDoesNotWaitForWhatAKilledSecurityLeftBehind(t *testing.T) {
 	}
 	if _, err := keychainGetResult(res, true, time.Second); err == nil {
 		t.Error("a keychain that did not answer is not an absent secret")
+	}
+}
+
+// The trace says how a keychain call ended, by its status and nothing
+// else: a failure is not a success, an absent item is not a failure, and
+// what security(1) wrote is not shown.
+func TestRunSecurityTracesHowTheCallEnded(t *testing.T) {
+	dir := t.TempDir()
+	// The fake exits with the status named by its last argument, or, as
+	// `security -i`, reports a failed sub-command and exits with 0.
+	script := `#!/bin/sh
+echo "secret on stdout"
+echo "secret on stderr" >&2
+if [ "$1" = "-i" ]; then exit 0; fi
+for last; do :; done
+exit "$last"
+`
+	if err := os.WriteFile(filepath.Join(dir, "security"), []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir)
+	// Registered first, so that it runs once the variable is back to
+	// what it was: Reset reads it.
+	t.Cleanup(func() { trace.Reset(nil) })
+	t.Setenv("SLACKCLI_DEBUG", "1")
+	var out bytes.Buffer
+	trace.Reset(&out)
+
+	ctx := context.Background()
+	runSecurity(ctx, "", "find-generic-password", "0")
+	runSecurity(ctx, "", "find-generic-password", "44")
+	runSecurity(ctx, "", "find-generic-password", "51")
+	runSecurity(ctx, "add-generic-password …\n", "-i")
+	t.Setenv("PATH", t.TempDir()) // no security at all
+	runSecurity(ctx, "", "delete-generic-password", "0")
+
+	lines := strings.Split(strings.TrimSuffix(out.String(), "\n"), "\n")
+	want := []string{
+		`keychain find-generic-password: \S+$`,
+		`keychain find-generic-password: \S+, no such item$`,
+		`keychain find-generic-password: \S+, failed: security exited with status 51$`,
+		`keychain set: \S+, failed: security reported an error$`,
+		`keychain delete-generic-password: \S+, failed: security could not be run$`,
+	}
+	if len(lines) != len(want) {
+		t.Fatalf("trace:\n%s", out.String())
+	}
+	for i, re := range want {
+		if !regexp.MustCompile(re).MatchString(lines[i]) {
+			t.Errorf("line %d = %q, want %s", i, lines[i], re)
+		}
+	}
+	if strings.Contains(out.String(), "secret") {
+		t.Errorf("the trace shows the output of security:\n%s", out.String())
+	}
+	if got := trace.Summary(); !strings.Contains(got, "(5 calls, 3 failed)") {
+		t.Errorf("summary = %q", got)
 	}
 }

@@ -12,7 +12,6 @@ import (
 	"github.com/maelvls/slackcli/internal/auth"
 	"github.com/maelvls/slackcli/internal/authextract"
 	"github.com/maelvls/slackcli/internal/slackapi"
-	"github.com/maelvls/slackcli/internal/trace"
 )
 
 // Resolved is a ready-to-use client and the workspace it talks to.
@@ -122,9 +121,7 @@ func (c *Context) client(ctx context.Context, workspace string) (*Resolved, erro
 	// 2. Slack Desktop: import every team (only the pinned one, if any),
 	// then look again.
 	if c.Desktop != nil {
-		span := trace.Begin("credentials import", "Slack Desktop")
 		extracted, err := c.Desktop(ctx)
-		span.EndErr(err)
 		failed("Slack Desktop", err)
 		if err == nil && extracted != nil && len(extracted.Teams) > 0 {
 			found := workspacesFrom(extracted, extracted.Teams)
@@ -155,9 +152,7 @@ func (c *Context) client(ctx context.Context, workspace string) (*Resolved, erro
 		if browser.extract == nil {
 			continue
 		}
-		span := trace.Begin("credentials import", browser.name)
 		extracted, err := browser.extract(ctx)
-		span.EndErr(err)
 		failed(browser.name, err)
 		if err != nil || extracted == nil || len(extracted.Teams) == 0 {
 			continue // not installed, not logged in, AppleScript disabled…

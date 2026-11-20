@@ -2,6 +2,7 @@
 package root
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -10,6 +11,7 @@ import (
 	"os/signal"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -52,6 +54,15 @@ func CommandTimeout() time.Duration {
 // that its context was cancelled and return, so that its deferred cleanups
 // run (temporary copies of cookie databases, partial downloads…).
 const timeoutGrace = 2 * time.Second
+
+// interruptGrace is the same for a command that was interrupted (Ctrl-C,
+// SIGTERM). It is longer: a command that waits on a human has no timeout
+// behind it, and closes its editor when interrupted.
+const interruptGrace = 5 * time.Second
+
+// Run the root's PersistentPreRunE even if a sub-command defines its own.
+// It is cobra's global, hence set once, here.
+func init() { cobra.EnableTraverseRunHooks = true }
 
 // New builds the root command.
 func New(rt *clictx.Context) *cobra.Command {
@@ -185,7 +196,7 @@ func newHelp(root *cobra.Command) *cobra.Command {
 // Run executes the CLI with the given arguments (without the program name)
 // and returns the process exit code.
 func Run(args []string, stdout, stderr io.Writer) int {
-	return runner{newContext: clictx.New, commands: commands, grace: timeoutGrace}.run(args, stdout, stderr)
+	return runner{newContext: clictx.New, commands: commands, grace: timeoutGrace, interruptGrace: interruptGrace}.run(args, stdout, stderr)
 }
 
 // runner is Run with its dependencies spelled out, so that tests can run
@@ -193,8 +204,12 @@ func Run(args []string, stdout, stderr io.Writer) int {
 type runner struct {
 	newContext func() *clictx.Context
 	commands   func(rt *clictx.Context) []*cobra.Command
-	// grace is how long a command gets to return after a timeout.
+	// grace is how long a command gets to return after a timeout, and
+	// how long the messages of a timeout may take to be written.
 	grace time.Duration
+	// interruptGrace is how long a command gets to return after a signal
+	// (0 means grace).
+	interruptGrace time.Duration
 	// elapsed is the clock of the watchdog (see stopwatch); nil means the
 	// real one. Tests replace it to put the machine to sleep.
 	elapsed func() (awake, wall time.Duration)
@@ -204,12 +219,32 @@ type runner struct {
 // exit code and what the time went to.
 func (r runner) run(args []string, stdout, stderr io.Writer) int {
 	code := r.execute(args, stdout, stderr)
-	if summary := trace.Summary(); summary != "" {
-		trace.Logf("exit code %d; %s", code, summary)
-	} else {
-		trace.Logf("exit code %d", code)
-	}
+	// Not waited for longer than the grace period: a stderr that is a
+	// full pipe nobody reads must not keep the process from exiting.
+	within(r.grace, func() {
+		if summary := trace.Summary(); summary != "" {
+			trace.Logf("exit code %d; %s", code, summary)
+		} else {
+			trace.Logf("exit code %d", code)
+		}
+	})
 	return code
+}
+
+// within runs f and returns once it is done or d has passed, whichever
+// comes first; f is left running in the second case.
+func within(d time.Duration, f func()) {
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		f()
+	}()
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-done:
+	case <-t.C:
+	}
 }
 
 func (r runner) execute(args []string, stdout, stderr io.Writer) int {
@@ -223,9 +258,9 @@ func (r runner) execute(args []string, stdout, stderr io.Writer) int {
 	// can escape it; a command that waits on a human stops it
 	// (clictx.NoTimeout, Context.DisableTimeout).
 	//
-	// One thing is not bounded: this goroutine writing to stderr. When a
-	// command times out it writes a few lines there, and a stderr that is
-	// a pipe nobody reads, and that is full, blocks them.
+	// Nor does this goroutine wait on stderr for long when a command
+	// times out: a pipe nobody reads, once full, blocks whoever writes to
+	// it (see within).
 	timeout := CommandTimeout()
 	deadline := time.Now().Add(timeout)
 	elapsed := r.elapsed
@@ -262,27 +297,36 @@ func (r runner) execute(args []string, stdout, stderr io.Writer) int {
 	})
 
 	// ran is the command cobra selected, once its command line was
-	// accepted. It is written by the goroutine below, and only read once
-	// that one is done.
-	var ran *cobra.Command
+	// accepted.
+	var ran atomic.Pointer[cobra.Command]
+	// timedOutFlag is set once the command timeout has struck.
+	var timedOutFlag atomic.Bool
 	done := make(chan error, 1)
 	// The context of the command is set up by the goroutine below, under
 	// the watchdog like the rest: it is handed over here once it is ready,
 	// for its warnings and hints to be written when the command is over.
 	ready := make(chan *clictx.Context, 1)
-	var rt *clictx.Context
+	var (
+		rtMu sync.Mutex
+		rt   *clictx.Context
+	)
 	// flushNotes writes on stderr the warnings and hints that no result
 	// carried (clictx.Context.FlushNotes). It does nothing when the time
-	// was up before there was a context to record one.
+	// was up, or the signal came, before there was a context to record
+	// one. It may be called from several goroutines (see within): one
+	// that a blocked stderr holds does not hold the next.
 	flushNotes := func() {
+		rtMu.Lock()
 		if rt == nil {
 			select {
 			case rt = <-ready:
 			default:
 			}
 		}
-		if rt != nil {
-			rt.FlushNotes()
+		c := rt
+		rtMu.Unlock()
+		if c != nil {
+			c.FlushNotes()
 		}
 	}
 	go func() {
@@ -291,10 +335,6 @@ func (r runner) execute(args []string, stdout, stderr io.Writer) int {
 		rt.SetWatchdogCanceller(stopWatchdog)
 		rt.Incomplete = incomplete
 		ready <- rt
-
-		// Run the root's PersistentPreRunE even if a sub-command defines
-		// its own.
-		cobra.EnableTraverseRunHooks = true
 
 		cmd := newRoot(rt, r.commands(rt))
 		cmd.SetArgs(args)
@@ -309,7 +349,16 @@ func (r runner) execute(args []string, stdout, stderr io.Writer) int {
 			if err := cmdutil.CheckFlags(c); err != nil {
 				return err
 			}
-			ran = c
+			// A set-up that only got here once the command was timed out
+			// or interrupted must not start it: this process is about to
+			// exit, and has said that the command did not run to its end.
+			if timedOutFlag.Load() {
+				return errTimedOut
+			}
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			ran.Store(c)
 			// The trace names the command, not its arguments: they may
 			// hold a message or a secret.
 			if clictx.HasNoTimeout(c) {
@@ -325,30 +374,71 @@ func (r runner) execute(args []string, stdout, stderr io.Writer) int {
 		done <- cmd.ExecuteContext(ctx)
 	}()
 
-	var err error
-	select {
-	case err = <-done:
+	// interrupted says so, the way that fits the command.
+	interrupted := func() int {
+		// As for a timeout: what a writing command was doing may have
+		// reached Slack all the same.
+		if c := ran.Load(); c != nil && clictx.ChangesSlack(commandName(c)) {
+			fmt.Fprintln(stderr, "interrupted. What the command was sending or changing may still have gone through: check before retrying.")
+		} else {
+			fmt.Fprintln(stderr, "interrupted")
+		}
+		return 130
+	}
+
+	err, how, late := wait(done, timedOut, signalCtx.Done())
+	switch how {
+	case finished:
 		stopWatchdog()
-	case late := <-timedOut:
+	case interruptedBefore:
+		// The command sees the cancellation and returns, most of the
+		// time. One that does not (a set-up or a call that ignores its
+		// context) is not waited for: Ctrl-C must end the process, and
+		// with exit code 130, also when there is no timeout behind it.
+		stopWatchdog()
+		grace := time.NewTimer(cmp.Or(r.interruptGrace, r.grace))
+		defer grace.Stop()
+		select {
+		case err = <-done:
+		case <-grace.C:
+			// What the command had to say so far, then that it was
+			// interrupted; neither holds the exit when stderr blocks.
+			within(r.grace, func() {
+				flushNotes()
+				interrupted()
+			})
+			return 130
+		}
+	case expired:
 		// The command is still running: what it was doing may or may not
 		// have reached Slack, and saying "timed out" alone invites a
 		// retry that posts twice.
-		fmt.Fprintf(stderr, "%s command timed out after %s. If it was sending or changing something, that may still have gone through: check before retrying. Set %s (milliseconds) to adjust.\n",
-			appinfo.Name, timeout, appinfo.EnvName("COMMAND_TIMEOUT_MS"))
-		if late.asleep(timeout) {
-			// The limit was reached on the wall clock only (see watch).
-			fmt.Fprintf(stderr, "The clock moved %s forward while the command only ran for %s: the machine was asleep (or its clock was set forward), and the command was not left to resume.\n",
-				late.wall.Round(100*time.Millisecond), late.awake.Round(time.Millisecond))
-		}
-		// Where the time went, so that a transcript is enough to tell a
-		// slow Slack from a rate limit or a locked keychain.
-		if summary := trace.Summary(); summary != "" && trace.Enabled() {
-			fmt.Fprintf(stderr, "Before the timeout, %s.\n", summary)
-		} else if summary != "" {
-			fmt.Fprintf(stderr, "Before the timeout, %s. Set %s=1 to trace every call as it is made.\n", summary, appinfo.EnvName(trace.EnvSuffix))
-		}
-		// The warnings and hints no result carried.
-		flushNotes()
+		//
+		// From here on nothing new is started: a set-up that ends now
+		// does not get to run its command (see the pre-run hook). The
+		// command itself is only told to stop once the messages are
+		// written, so that what it writes on its way out comes after
+		// them; but neither that nor the exit waits on a stderr that
+		// blocks.
+		timedOutFlag.Store(true)
+		within(r.grace, func() {
+			fmt.Fprintf(stderr, "%s command timed out after %s. If it was sending or changing something, that may still have gone through: check before retrying. Set %s (milliseconds) to adjust.\n",
+				appinfo.Name, timeout, appinfo.EnvName("COMMAND_TIMEOUT_MS"))
+			if late.asleep(timeout) {
+				// The limit was reached on the wall clock only (see watch).
+				fmt.Fprintf(stderr, "The clock moved %s forward while the command only ran for %s: the machine was asleep (or its clock was set forward), and the command was not left to resume.\n",
+					late.wall.Round(100*time.Millisecond), late.awake.Round(time.Millisecond))
+			}
+			// Where the time went, so that a transcript is enough to tell
+			// a slow Slack from a rate limit or a locked keychain.
+			if summary := trace.Summary(); summary != "" && trace.Enabled() {
+				fmt.Fprintf(stderr, "Before the timeout, %s.\n", summary)
+			} else if summary != "" {
+				fmt.Fprintf(stderr, "Before the timeout, %s. Set %s=1 to trace every call as it is made.\n", summary, appinfo.EnvName(trace.EnvSuffix))
+			}
+			// The warnings and hints no result carried.
+			flushNotes()
+		})
 		// Let the command see the cancellation and return, so that its
 		// deferred cleanups run; do not wait for one that ignores it.
 		cancel()
@@ -358,24 +448,19 @@ func (r runner) execute(args []string, stdout, stderr io.Writer) int {
 		case <-done:
 		case <-grace.C:
 		}
-		// What the command said while it was cleaning up.
-		flushNotes()
+		// What the command said while it was cleaning up; like the
+		// messages above, not waited for when stderr blocks.
+		within(r.grace, flushNotes)
 		return ExitTimeout
 	}
 
 	// The warnings and hints are in the JSON the command printed. Those
-	// it did not print (it failed, or prints text) go to stderr.
+	// it did not print (it failed, was interrupted, or prints text) go to
+	// stderr.
 	flushNotes()
 	if err != nil {
 		if errors.Is(err, context.Canceled) && signalCtx.Err() != nil {
-			// As for a timeout: what a writing command was doing may
-			// have reached Slack all the same.
-			if ran != nil && clictx.ChangesSlack(commandName(ran)) {
-				fmt.Fprintln(stderr, "interrupted. What the command was sending or changing may still have gone through: check before retrying.")
-			} else {
-				fmt.Fprintln(stderr, "interrupted")
-			}
-			return 130
+			return interrupted()
 		}
 		var usage *cmdutil.UsageError
 		if errors.As(err, &usage) {
@@ -389,6 +474,53 @@ func (r runner) execute(args []string, stdout, stderr io.Writer) int {
 		return ExitError
 	}
 	return ExitOK
+}
+
+// errTimedOut is what a command that was not started because the timeout
+// had struck fails with. Nobody sees it: the run ends with ExitTimeout.
+var errTimedOut = errors.New("the command timed out before it started")
+
+// ending is how the wait for a command ended.
+type ending int
+
+const (
+	// finished: the command returned.
+	finished ending = iota
+	// expired: the command timeout struck first.
+	expired
+	// interruptedBefore: a signal came first.
+	interruptedBefore
+)
+
+// wait waits for the command to return (done), for its timeout or for a
+// signal, and says which came first, with the error of the command or
+// what the watchdog saw.
+//
+// A command that has returned has returned, whatever else is true by
+// then: when the timeout or a signal is ready at the same time (a command
+// that ends on the tick the watchdog strikes on, typically right after
+// the machine woke up), it is the command's own result that counts.
+// Reporting a write that went through as timed out would invite sending
+// it again.
+func wait(done <-chan error, timedOut <-chan expiry, signalled <-chan struct{}) (error, ending, expiry) {
+	select {
+	case err := <-done:
+		return err, finished, expiry{}
+	case <-signalled:
+		select {
+		case err := <-done:
+			return err, finished, expiry{}
+		default:
+			return nil, interruptedBefore, expiry{}
+		}
+	case late := <-timedOut:
+		select {
+		case err := <-done:
+			return err, finished, expiry{}
+		default:
+			return nil, expired, late
+		}
+	}
 }
 
 // expiry is what the two clocks of the watchdog showed when the time of a
