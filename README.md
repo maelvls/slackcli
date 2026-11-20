@@ -118,9 +118,9 @@ Saved credentials live in `~/.config/slackcli/credentials.json`. On macOS the se
 
 After a timeout or an interrupt, a command that writes may still have gone through: check before retrying.
 
-A command that times out says on stderr what it spent its time on and what it was still waiting for (Slack calls by method, rate-limit waits, downloads, keychain reads, the credentials lock, credential imports). The limit also holds on the wall clock: a command that the machine slept through is ended when it wakes up.
+A command that times out says on stderr what it spent its time on and what it was still waiting for (Slack calls by method, rate-limit waits, downloads, keychain reads, the credentials lock, credential imports). The limit also holds on the wall clock: a command that the machine slept through is ended when it wakes up. (One thing can still hold a timed-out command: a stderr that is a full pipe nobody reads.)
 
-To see where the time of any command goes, set `SLACKCLI_DEBUG=1`. Every Slack call, with its duration, HTTP status, error code and attempt number, every wait and the exit code are written to stderr as they happen, one line each, prefixed with `[slackcli +<time since start>]`. Nothing of it is written otherwise. The trace never shows a token, a cookie or the arguments of the command. Calls made in parallel each count their own time, so the total of a kind can exceed the time that went by.
+To see where the time of any command goes, set `SLACKCLI_DEBUG=1`. Every Slack call, with its duration, HTTP status, error code and attempt number, every wait and the exit code are written to stderr as they happen, one line each, prefixed with `[slackcli +<time since start>]`. Nothing of it is written otherwise. The trace, like the timeout message, names Slack methods and never their parameters: no token, cookie, command argument, channel, file name or message text. Of an error it keeps the first line, with URLs cut down to their host and anything between double quotes removed. Calls made in parallel each count their own time, so the total of a kind can exceed the time that went by.
 
 ```console
 $ SLACKCLI_DEBUG=1 slackcli message list general --limit 3 --resolve-users >/dev/null

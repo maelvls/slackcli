@@ -18,6 +18,7 @@ import (
 	"github.com/maelvls/slackcli/internal/appinfo"
 	"github.com/maelvls/slackcli/internal/auth"
 	"github.com/maelvls/slackcli/internal/clictx"
+	"github.com/maelvls/slackcli/internal/slackapi"
 	"github.com/maelvls/slackcli/internal/testenv"
 	"github.com/maelvls/slackcli/internal/trace"
 )
@@ -345,10 +346,33 @@ func TestRunLiveTrace(t *testing.T) {
 	}
 }
 
+// A command can ask how long it has left, for as long as it has a limit.
+func TestRunTellsTheCommandHowLongItHasLeft(t *testing.T) {
+	t.Setenv(appinfo.EnvName("COMMAND_TIMEOUT_MS"), "30000")
+	var left, after time.Duration
+	var limited, limitedAfter bool
+	got := runWith(t, time.Second, func(rt *clictx.Context) []*cobra.Command {
+		return []*cobra.Command{{Use: "work", RunE: func(cmd *cobra.Command, _ []string) error {
+			left, limited = slackapi.TimeLeft(cmd.Context())
+			rt.DisableTimeout()
+			after, limitedAfter = slackapi.TimeLeft(cmd.Context())
+			return nil
+		}}}
+	}, "work")
+	if got.code != ExitOK || !limited || left > 30*time.Second || left < 20*time.Second {
+		t.Errorf("%+v: %s left, limited = %v", got, left, limited)
+	}
+	if limitedAfter || after != 0 {
+		t.Errorf("without a timeout: %s left, limited = %v", after, limitedAfter)
+	}
+}
+
 func TestRunNoTimeout(t *testing.T) {
-	t.Setenv(appinfo.EnvName("COMMAND_TIMEOUT_MS"), "30")
+	// Long enough for a loaded machine to get to the command before the
+	// watchdog, which runs from the very start, strikes.
+	t.Setenv(appinfo.EnvName("COMMAND_TIMEOUT_MS"), "200")
 	wait := func(*cobra.Command, []string) error {
-		time.Sleep(150 * time.Millisecond)
+		time.Sleep(600 * time.Millisecond)
 		return nil
 	}
 

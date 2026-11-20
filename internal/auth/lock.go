@@ -55,9 +55,6 @@ func lockFile(path string) (unlock func(), err error) {
 		if err == nil {
 			return holdLock(lock, token), nil
 		}
-		if waiting == nil {
-			waiting = trace.Begin("credentials lock", "held by another process")
-		}
 		if !lockHeld(lock, err) {
 			// The lock may have gone between the refusal and the look at
 			// it (see lockHeld): only a refusal that lasts is final.
@@ -66,6 +63,9 @@ func lockFile(path string) (unlock func(), err error) {
 				continue
 			}
 			return nil, fmt.Errorf("creating the lock file of the credentials file (%s; is its directory writable?): %w", lock, err)
+		}
+		if waiting == nil {
+			waiting = trace.Begin("credentials lock", "held by another process")
 		}
 		if removeStaleLock(lock) {
 			continue

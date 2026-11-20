@@ -219,7 +219,12 @@ func (r runner) execute(args []string, stdout, stderr io.Writer) int {
 	// running the command) happens on another goroutine, so that nothing
 	// can escape it; a command that waits on a human stops it
 	// (clictx.NoTimeout, Context.DisableTimeout).
+	//
+	// One thing is not bounded: this goroutine writing to stderr. When a
+	// command times out it writes a few lines there, and a stderr that is
+	// a pipe nobody reads, and that is full, blocks them.
 	timeout := CommandTimeout()
+	deadline := time.Now().Add(timeout)
 	elapsed := r.elapsed
 	if elapsed == nil {
 		elapsed = stopwatch()
@@ -241,6 +246,16 @@ func (r runner) execute(args []string, stdout, stderr io.Writer) int {
 	// Optional lookups that Slack rate limited do not fail a command: they
 	// report here, and the user is told the result is incomplete.
 	ctx, incomplete := enrich.Collect(ctx)
+	// What may last (one more try of a call that timed out) can ask how
+	// long the command has left.
+	ctx = slackapi.WithCommandDeadline(ctx, func() (time.Time, bool) {
+		select {
+		case <-stopped:
+			return time.Time{}, false
+		default:
+			return deadline, true
+		}
+	})
 
 	// ran is the command cobra selected, once its command line was
 	// accepted. It is written by the goroutine below, and only read once
@@ -375,9 +390,10 @@ func stopwatch() func() (awake, wall time.Duration) {
 // passed on either clock of elapsed, unless stopped is closed first.
 //
 // A timer alone would not do. Timers, and with them every HTTP timeout,
-// follow the monotonic clock, which on macOS (mach_absolute_time) stands
-// still while the machine sleeps: a command caught by the lid closing
-// would have its "30 seconds" last the whole night. The wall clock does
+// follow the monotonic clock, which stands still while the machine sleeps,
+// on macOS (mach_absolute_time) as on Linux (CLOCK_MONOTONIC does not
+// count the time suspended): a command caught by the lid closing would
+// have its "30 seconds" last the whole night. The wall clock does
 // not stop, so whichever clock says the time is up first wins; they are
 // read every time the ticker gets to fire, which it does soon after the
 // machine wakes. (A wall clock set forward by more than the timeout in

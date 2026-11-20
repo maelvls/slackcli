@@ -382,7 +382,9 @@ func (c *Client) callOnce(ctx context.Context, method string, params map[string]
 			}
 			continue
 		}
-		if code := apiErrorCode(body); code != "" {
+		var data map[string]any
+		_ = json.Unmarshal(body, &data)
+		if code, _ := data["error"].(string); code != "" && data["ok"] != true {
 			span.Fail(fmt.Sprintf("HTTP %d, %s", status, code))
 		} else {
 			span.End(fmt.Sprintf("HTTP %d", status))
@@ -392,8 +394,6 @@ func (c *Client) callOnce(ctx context.Context, method string, params map[string]
 			return nil, c.redirectError(method, status, header.Get("Location"))
 		}
 
-		var data map[string]any
-		_ = json.Unmarshal(body, &data)
 		if status < 200 || status > 299 {
 			if code, _ := data["error"].(string); code != "" {
 				return nil, newAPIError(method, data)
@@ -487,19 +487,6 @@ func isReadOnlyMethod(method string) bool {
 		return true
 	}
 	return readOnlyVerbs[method[strings.LastIndex(method, ".")+1:]]
-}
-
-// apiErrorCode returns the "error" of a response body that says ok=false,
-// for the trace; "" for anything else.
-func apiErrorCode(body []byte) string {
-	var data struct {
-		OK    *bool  `json:"ok"`
-		Error string `json:"error"`
-	}
-	if json.Unmarshal(body, &data) != nil || data.OK == nil || *data.OK {
-		return ""
-	}
-	return data.Error
 }
 
 func (c *Client) post(ctx context.Context, endpoint string, fields map[string]string, multi bool, timeout time.Duration) (int, http.Header, []byte, error) {

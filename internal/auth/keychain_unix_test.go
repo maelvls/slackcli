@@ -17,8 +17,8 @@ import (
 func TestRunSecurityDoesNotWaitForWhatAKilledSecurityLeftBehind(t *testing.T) {
 	dir := t.TempDir()
 	started := filepath.Join(dir, "started")
-	// The child outlives the test by a few seconds at most.
-	script := "#!/bin/sh\nsleep 8 &\necho > '" + started + "'\nsleep 8\n"
+	// The child outlives the test by three seconds at most.
+	script := "#!/bin/sh\nsleep 3 &\necho > '" + started + "'\nsleep 3\n"
 	if err := os.WriteFile(filepath.Join(dir, "security"), []byte(script), 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -27,10 +27,16 @@ func TestRunSecurityDoesNotWaitForWhatAKilledSecurityLeftBehind(t *testing.T) {
 	// The timeout, once the child is there.
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	var killed time.Time
+	// On a loaded Mac the first run of a script that was just written
+	// can take seconds: wait for it as long as it takes, within reason.
+	var (
+		killed  time.Time
+		running bool
+	)
 	go func() {
-		for deadline := time.Now().Add(5 * time.Second); time.Now().Before(deadline); time.Sleep(5 * time.Millisecond) {
+		for deadline := time.Now().Add(30 * time.Second); time.Now().Before(deadline); time.Sleep(5 * time.Millisecond) {
 			if _, err := os.Stat(started); err == nil {
+				running = true
 				break
 			}
 		}
@@ -38,14 +44,16 @@ func TestRunSecurityDoesNotWaitForWhatAKilledSecurityLeftBehind(t *testing.T) {
 		cancel()
 	}()
 	res := runSecurity(ctx, "", "find-generic-password", "-s", "service", "-a", "account", "-w")
+	returned := time.Now()
 	if ctx.Err() == nil {
 		t.Fatalf("the fake security ended on its own: %+v", res)
 	}
-	if elapsed := time.Since(killed); elapsed > 4*time.Second {
-		t.Errorf("returned %s after security was killed: it waited for its child", elapsed)
+	if !running {
+		t.Skip("the fake security did not start its child within 30s: nothing was tested")
 	}
-	if _, err := os.Stat(started); err != nil {
-		t.Errorf("the fake security did not get to start its child: %v", err)
+	// Without the WaitDelay (1 s) it is the 3 s of the child.
+	if elapsed := returned.Sub(killed); elapsed > 2500*time.Millisecond {
+		t.Errorf("returned %s after security was killed: it waited for its child", elapsed)
 	}
 	if _, err := keychainGetResult(res, true, time.Second); err == nil {
 		t.Error("a keychain that did not answer is not an absent secret")

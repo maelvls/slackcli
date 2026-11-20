@@ -205,7 +205,8 @@ func Download(ctx context.Context, client *slackapi.Client, rawURL string, opts 
 		}
 	}
 
-	span := trace.Begin("download", filepath.Base(dest))
+	// Not named: the name of a file is its author's.
+	span := trace.Begin("download", "")
 	defer func() { span.EndErr(retErr) }()
 	resp, err := Get(ctx, client, rawURL)
 	if err != nil {

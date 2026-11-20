@@ -18,7 +18,9 @@ package trace
 import (
 	"fmt"
 	"io"
+	"net/url"
 	"os"
+	"regexp"
 	"slices"
 	"sort"
 	"strings"
@@ -81,7 +83,9 @@ type Span struct {
 
 // Begin starts a span. name groups the spans of one kind in the summary
 // ("api conversations.history", "keychain", "download"); detail says which
-// one this is, and must not hold a secret. End it with End or Fail.
+// one this is. Neither may hold a secret or something of the user's (a
+// file name, a channel, a text): both are shown when a command times out,
+// whether the live trace is on or not. End it with End, Fail or EndErr.
 func Begin(name, detail string) *Span {
 	s := &Span{name: name, detail: detail, start: time.Now()}
 	rec.mu.Lock()
@@ -97,10 +101,11 @@ func (s *Span) End(note string) { s.end(note, false) }
 // Fail closes the span as a failure; note says how it failed.
 func (s *Span) Fail(note string) { s.end(note, true) }
 
-// EndErr closes the span as a failure when err is not nil.
+// EndErr closes the span as a failure when err is not nil. The note is
+// the error made safe to show (see SafeNote).
 func (s *Span) EndErr(err error) {
 	if err != nil {
-		s.Fail(firstLine(err.Error()))
+		s.Fail(SafeNote(err.Error()))
 		return
 	}
 	s.End("")
@@ -208,11 +213,30 @@ func round(d time.Duration) time.Duration {
 	return d.Round(100 * time.Millisecond)
 }
 
-func firstLine(s string) string {
+var (
+	urlRe    = regexp.MustCompile(`[a-zA-Z][a-zA-Z0-9+.-]*://[^\s"'<>)]+`)
+	quotedRe = regexp.MustCompile(`"(?:[^"\\]|\\.)*"?`)
+)
+
+// SafeNote shortens the text of an error to what a trace may show. An
+// error can quote what it was about, and a trace ends up in transcripts
+// and bug reports: of a URL only the scheme and the host are kept (the
+// path and the query can name a file or carry a signature), whatever is
+// between double quotes is dropped (the first bytes of a response, a file
+// name, an email address), and so is everything after the first line or
+// 120 characters.
+func SafeNote(s string) string {
 	line, _, _ := strings.Cut(s, "\n")
-	const max = 160
-	if len(line) > max {
-		line = line[:max] + "…"
+	line = quotedRe.ReplaceAllString(line, `"…"`)
+	line = urlRe.ReplaceAllStringFunc(line, func(raw string) string {
+		if u, err := url.Parse(raw); err == nil && u.Host != "" {
+			return u.Scheme + "://" + u.Host + "/…"
+		}
+		return "…"
+	})
+	const max = 120
+	if r := []rune(line); len(r) > max {
+		line = string(r[:max]) + "…"
 	}
 	return line
 }

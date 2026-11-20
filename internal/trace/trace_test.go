@@ -58,3 +58,30 @@ func TestLiveTraceWritesOneLinePerSpan(t *testing.T) {
 		t.Errorf("notes: %q", lines)
 	}
 }
+
+// What an error quotes is not for a trace: no path or query of a URL, no
+// bytes of a response, no name.
+func TestSafeNote(t *testing.T) {
+	for in, want := range map[string]string{
+		"context canceled": "context canceled",
+		`Post "https://slack.com/api/conversations.history?token=xoxc-1": EOF`:                                 `Post "…": EOF`,
+		"fetching https://files.slack.com/files-pri/T1-F2/secret-plan.pdf?t=xoxe-1 failed":                     "fetching https://files.slack.com/… failed",
+		`Downloaded HTML instead of file (auth likely failed). First bytes: "<html><title>Acme \"x\"</title>"`: `Downloaded HTML instead of file (auth likely failed). First bytes: "…"`,
+		`Invalid file URL "https://example.com/a b`:                                                            `Invalid file URL "…"`,
+		"first line\nsecond line": "first line",
+		strings.Repeat("é", 200):  strings.Repeat("é", 120) + "…",
+	} {
+		if got := SafeNote(in); got != want {
+			t.Errorf("SafeNote(%q) = %q, want %q", in, got, want)
+		}
+	}
+
+	t.Setenv("SLACKCLI_DEBUG", "1")
+	var out bytes.Buffer
+	Reset(&out)
+	t.Cleanup(func() { Reset(nil) })
+	Begin("download", "").EndErr(errors.New(`Get "https://files.slack.com/files-pri/T1-F2/secret-plan.pdf?t=xoxe-1": EOF`))
+	if got := out.String(); strings.Contains(got, "secret-plan") || strings.Contains(got, "xoxe-1") || !strings.Contains(got, `download: 0s, failed: Get "…": EOF`) {
+		t.Errorf("trace = %q", got)
+	}
+}
