@@ -169,3 +169,30 @@ func TestFallbackThatCannotAnswer(t *testing.T) {
 		}
 	})
 }
+
+// Looking for the other client can take calls of its own. A command that
+// is interrupted meanwhile was interrupted: it must not report the refusal
+// it was working around (and exit as if Slack had answered).
+func TestFallbackInterruptedWhileLookingForTheOtherClient(t *testing.T) {
+	other, otherCalls := answering("https://acme.enterprise.slack.com", nil)
+	for name, found := range map[string]*Client{"none found": nil, "one found": other} {
+		t.Run(name, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			c, _ := answering("https://acme-eng.slack.com", map[string]string{"drafts.list": "team_is_restricted"}, WithFallback(Fallback{
+				Applies: func(string, error) bool { return true },
+				Client: func(context.Context) (*Client, string) {
+					cancel()
+					return found, "the organisation is signed out"
+				},
+			}))
+			_, err := c.API(ctx, "drafts.list", nil)
+			if !errors.Is(err, context.Canceled) || IsErrorCode(err, "team_is_restricted") {
+				t.Errorf("err = %v, want context.Canceled", err)
+			}
+			if len(*otherCalls) != 0 {
+				t.Errorf("the other client was called %d times after the interruption", len(*otherCalls))
+			}
+		})
+	}
+}

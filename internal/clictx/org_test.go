@@ -3,6 +3,7 @@ package clictx
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"reflect"
@@ -31,6 +32,9 @@ type slack struct {
 	mu    sync.Mutex
 	sites map[string]*site
 	calls []string
+	// during, when set, runs while a call ("<host> <method>") is on its
+	// way: a test cancels the context there.
+	during func(call string)
 }
 
 func (s *slack) RoundTrip(req *http.Request) (*http.Response, error) {
@@ -40,7 +44,14 @@ func (s *slack) RoundTrip(req *http.Request) (*http.Response, error) {
 	s.mu.Lock()
 	s.calls = append(s.calls, req.URL.Host+" "+method)
 	st := s.sites[req.URL.Host]
+	during := s.during
 	s.mu.Unlock()
+	if during != nil {
+		during(req.URL.Host + " " + method)
+	}
+	if err := req.Context().Err(); err != nil {
+		return nil, err
+	}
 
 	var answer map[string]any
 	switch {
@@ -415,4 +426,34 @@ func TestOrgFallbackIsOnlyForStoredWorkspaceSessions(t *testing.T) {
 			t.Errorf("calls = %q, want the one refused call", got)
 		}
 	})
+}
+
+// Ctrl-C (or the command timeout) during the identity check is an
+// interruption, and is reported as one: not as the refusal the check was
+// there to work around.
+func TestOrgFallbackInterruptedDuringTheIdentityCheck(t *testing.T) {
+	for _, during := range []string{"acme-eng.slack.com auth.test", "acme.enterprise.slack.com auth.test", "acme.enterprise.slack.com drafts.list"} {
+		t.Run(during, func(t *testing.T) {
+			c, s := grid(t)
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			s.during = func(call string) {
+				if call == during {
+					cancel()
+				}
+			}
+			r, err := c.Client(ctx, "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = r.Client.API(ctx, "drafts.list", nil)
+			if !errors.Is(err, context.Canceled) || slackapi.IsErrorCode(err, "team_is_restricted") {
+				t.Errorf("err = %v, want context.Canceled", err)
+			}
+			calls := s.took()
+			if last := calls[len(calls)-1]; last != during {
+				t.Errorf("calls = %q: something was asked after the interruption", calls)
+			}
+		})
+	}
 }

@@ -305,6 +305,12 @@ func (c *Client) call(ctx context.Context, method string, params map[string]any,
 		return resp, err
 	}
 	other, why := c.fallback.Client(ctx)
+	if ctx.Err() != nil {
+		// Looking for the other client may take calls of its own. When
+		// the command was interrupted or timed out meanwhile, that is what
+		// happened to this call: the refusal would hide it.
+		return nil, ctx.Err()
+	}
 	if other == nil || other == c {
 		return nil, withHint(err, why)
 	}
