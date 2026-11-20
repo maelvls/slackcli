@@ -216,6 +216,8 @@ func round(d time.Duration) time.Duration {
 var (
 	urlRe    = regexp.MustCompile(`[a-zA-Z][a-zA-Z0-9+.-]*://[^\s"'<>)]+`)
 	quotedRe = regexp.MustCompile(`"(?:[^"\\]|\\.)*"?`)
+	// pathRe matches the start of an absolute path (/…, ~/…, C:\…).
+	pathRe = regexp.MustCompile(`(?:^|[\s(=])(~?/|[A-Za-z]:\\)`)
 )
 
 // SafeNote shortens the text of an error to what a trace may show. An
@@ -223,8 +225,8 @@ var (
 // and bug reports: of a URL only the scheme and the host are kept (the
 // path and the query can name a file or carry a signature), whatever is
 // between double quotes is dropped (the first bytes of a response, a file
-// name, an email address), and so is everything after the first line or
-// 120 characters.
+// name, an email address), so is the path of a file (its name is its
+// author's), and so is everything after the first line or 120 characters.
 func SafeNote(s string) string {
 	line, _, _ := strings.Cut(s, "\n")
 	line = quotedRe.ReplaceAllString(line, `"…"`)
@@ -234,6 +236,16 @@ func SafeNote(s string) string {
 		}
 		return "…"
 	})
+	// A path may hold spaces and colons, so where it ends cannot be told:
+	// everything from its start to the last ": " goes, which leaves the
+	// cause that the errors of the os package and of "…: %w" end with.
+	if m := pathRe.FindStringSubmatchIndex(line); m != nil {
+		start, rest := m[2], ""
+		if i := strings.LastIndex(line[start:], ": "); i >= 0 {
+			rest = line[start+i:]
+		}
+		line = line[:start] + "…" + rest
+	}
 	const max = 120
 	if r := []rune(line); len(r) > max {
 		line = string(r[:max]) + "…"

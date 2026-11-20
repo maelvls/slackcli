@@ -17,8 +17,8 @@ import (
 func TestRunSecurityDoesNotWaitForWhatAKilledSecurityLeftBehind(t *testing.T) {
 	dir := t.TempDir()
 	started := filepath.Join(dir, "started")
-	// The child outlives the test by three seconds at most.
-	script := "#!/bin/sh\nsleep 3 &\necho > '" + started + "'\nsleep 3\n"
+	// The child outlives the test by five seconds at most.
+	script := "#!/bin/sh\nsleep 5 &\necho > '" + started + "'\nsleep 5\n"
 	if err := os.WriteFile(filepath.Join(dir, "security"), []byte(script), 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -51,8 +51,8 @@ func TestRunSecurityDoesNotWaitForWhatAKilledSecurityLeftBehind(t *testing.T) {
 	if !running {
 		t.Skip("the fake security did not start its child within 30s: nothing was tested")
 	}
-	// Without the WaitDelay (1 s) it is the 3 s of the child.
-	if elapsed := returned.Sub(killed); elapsed > 2500*time.Millisecond {
+	// Without the WaitDelay (1 s) it is the 5 s of the child.
+	if elapsed := returned.Sub(killed); elapsed > 3*time.Second {
 		t.Errorf("returned %s after security was killed: it waited for its child", elapsed)
 	}
 	if _, err := keychainGetResult(res, true, time.Second); err == nil {

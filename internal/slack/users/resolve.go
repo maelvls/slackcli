@@ -487,10 +487,18 @@ func scanError(err error, wants []*want) error {
 	if onlyRefused && len(missing) > 0 {
 		// Every input is an email address that users.lookupByEmail would
 		// not look up: "pass the email address instead" is no advice.
+		//
+		// The way out is a token that may: never a browser session,
+		// which is what users.lookupByEmail answers
+		// not_allowed_token_type to, and most likely what is in use.
+		token := "a token that has the users:read.email scope (xoxp- or xoxb-, in SLACK_TOKEN or saved with `" + appinfo.Name + " auth add`)"
+		if slackapi.IsErrorCode(refusal, "not_allowed_token_type") {
+			token += "; a browser session, as imported from Slack Desktop or a browser, cannot use this method"
+		}
 		return &scanLimitError{err: err, msg: fmt.Sprintf("could not resolve user %s: these credentials may not look a user up by email (users.lookupByEmail: %s), "+
 			"and the other way, a scan of the user directory, cannot finish in a workspace this large (users.list was rate limited). "+
-			"Pass the user ID (U…) instead, or use credentials that can read emails (a user's browser session: `%s auth import-desktop`). %s",
-			strings.Join(missing, ", "), refusalCode(refusal), appinfo.Name, wait)}
+			"Pass the user ID (U…) instead, or use %s. %s",
+			strings.Join(missing, ", "), refusalCode(refusal), token, wait)}
 	}
 	if onlyEmails && len(missing) > 0 {
 		return &scanLimitError{err: err, msg: fmt.Sprintf("could not resolve user %s: no active member of this workspace has that email address (users.lookupByEmail), "+

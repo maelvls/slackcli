@@ -217,6 +217,27 @@ func TestRefusedEmailLookupInAHugeWorkspace(t *testing.T) {
 	if strings.Contains(err.Error(), "or the email address instead") {
 		t.Errorf("error suggests passing an email for an email: %v", err)
 	}
+	// The way out is a token with the scope, never a browser session:
+	// that is what gets not_allowed_token_type, and is told so.
+	for code, browser := range map[string]bool{"missing_scope": false, "not_allowed_token_type": true} {
+		rec := hugeWorkspace(directory{lookupErr: code})
+		_, err := ResolveUserID(ctx, rec.client(), "alice@example.com")
+		if err == nil {
+			t.Fatalf("%s: no error", code)
+		}
+		msg := err.Error()
+		for _, want := range []string{"users.lookupByEmail: " + code, "Pass the user ID (U…) instead, or use a token that has the users:read.email scope (xoxp- or xoxb-, in SLACK_TOKEN"} {
+			if !strings.Contains(msg, want) {
+				t.Errorf("%s: error does not say %q: %v", code, want, err)
+			}
+		}
+		if strings.Contains(msg, "import-desktop") || strings.Contains(msg, "a user's browser session") {
+			t.Errorf("%s: error advises a browser session: %v", code, err)
+		}
+		if got := strings.Contains(msg, "a browser session, as imported from Slack Desktop or a browser, cannot use this method"); got != browser {
+			t.Errorf("%s: says a browser session cannot = %v, want %v: %v", code, got, browser, err)
+		}
+	}
 
 	// With a handle next to it, the advice about emails is corrected
 	// rather than repeated.

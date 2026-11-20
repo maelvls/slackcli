@@ -207,7 +207,18 @@ func Download(ctx context.Context, client *slackapi.Client, rawURL string, opts 
 
 	// Not named: the name of a file is its author's.
 	span := trace.Begin("download", "")
-	defer func() { span.EndErr(retErr) }()
+	defer func() {
+		var de *DownloadError
+		switch {
+		case retErr == nil:
+			span.End("")
+		case errors.As(retErr, &de) || ctx.Err() != nil:
+			span.EndErr(retErr)
+		default:
+			// An error of the disk, which names the file.
+			span.Fail("could not write the file")
+		}
+	}()
 	resp, err := Get(ctx, client, rawURL)
 	if err != nil {
 		return "", err

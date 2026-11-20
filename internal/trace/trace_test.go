@@ -68,8 +68,13 @@ func TestSafeNote(t *testing.T) {
 		"fetching https://files.slack.com/files-pri/T1-F2/secret-plan.pdf?t=xoxe-1 failed":                     "fetching https://files.slack.com/… failed",
 		`Downloaded HTML instead of file (auth likely failed). First bytes: "<html><title>Acme \"x\"</title>"`: `Downloaded HTML instead of file (auth likely failed). First bytes: "…"`,
 		`Invalid file URL "https://example.com/a b`:                                                            `Invalid file URL "…"`,
-		"first line\nsecond line": "first line",
-		strings.Repeat("é", 200):  strings.Repeat("é", 120) + "…",
+		"writing /Users/me/Library/Caches/slackcli/downloads/Secret plan: v2.pdf: no space left on device":     "writing …: no space left on device",
+		`open C:\Users\me\Secret plan.pdf: Access is denied.`:                                                  "open …: Access is denied.",
+		"rename ~/x/Secret plan.pdf.tmp /tmp/Secret plan.pdf: permission denied":                               "rename …: permission denied",
+		"HTTP 200, channel_not_found":                                                                          "HTTP 200, channel_not_found",
+		"no answer after 20s (locked, or waiting on a prompt?)":                                                "no answer after 20s (locked, or waiting on a prompt?)",
+		"first line\nsecond line":                                                                              "first line",
+		strings.Repeat("é", 200):                                                                               strings.Repeat("é", 120) + "…",
 	} {
 		if got := SafeNote(in); got != want {
 			t.Errorf("SafeNote(%q) = %q, want %q", in, got, want)
