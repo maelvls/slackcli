@@ -47,8 +47,8 @@ const (
 	// DefaultLimit is the number of items listed when ListOptions.Limit is 0.
 	DefaultLimit = 20
 	// DefaultMaxBodyChars is the content length limit when
-	// ListOptions.MaxBodyChars is 0.
-	DefaultMaxBodyChars = 4000
+	// ListOptions.MaxBodyChars is 0: the same as everywhere else.
+	DefaultMaxBodyChars = messages.DefaultMaxBodyChars
 
 	// pageSize is the saved.list page size. Composite cursors (see
 	// encodeCursor) count items within a page, so it must not vary.

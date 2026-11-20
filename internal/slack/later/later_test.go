@@ -214,7 +214,7 @@ func TestListTruncatesContentOnCharacterBoundaries(t *testing.T) {
 		{"long", strings.Repeat("x", 5000), 100, strings.Repeat("x", 100) + "\n…"},
 		// The TypeScript cut UTF-16 units, splitting characters in two.
 		{"multi-byte", strings.Repeat("é", 10), 4, "éééé\n…"},
-		{"default is 4000", strings.Repeat("x", 4001), 0, strings.Repeat("x", 4000) + "\n…"},
+		{"default", strings.Repeat("x", DefaultMaxBodyChars+1), 0, strings.Repeat("x", DefaultMaxBodyChars) + "\n…"},
 		{"short enough", "hello", 5, "hello"},
 		{"unlimited", strings.Repeat("x", 5000), -1, strings.Repeat("x", 5000)},
 	}

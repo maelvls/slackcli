@@ -28,8 +28,8 @@ const (
 	// MaxMessagesLimit is the most conversations.history returns at once.
 	MaxMessagesLimit = 999
 	// DefaultMaxBodyChars is the content length limit when
-	// Options.MaxBodyChars is 0.
-	DefaultMaxBodyChars = 4000
+	// Options.MaxBodyChars is 0: the same as everywhere else.
+	DefaultMaxBodyChars = messages.DefaultMaxBodyChars
 
 	// fetchConcurrency bounds the per-conversation lookups: unbounded, a
 	// user with hundreds of unread conversations would fire them all at

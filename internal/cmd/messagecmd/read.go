@@ -27,6 +27,7 @@ type readOptions struct {
 	ts               string
 	threadTS         string
 	maxBodyChars     int
+	noDownload       bool
 	includeReactions bool
 	resolveUsers     bool
 	refreshUsers     bool
@@ -66,7 +67,8 @@ type listResult struct {
 func addReadFlags(cmd *cobra.Command, o *readOptions) {
 	f := cmd.Flags()
 	f.StringVar(&o.workspace, "workspace", "", cmdutil.TargetWorkspaceUsage)
-	f.IntVar(&o.maxBodyChars, "max-body-chars", messages.DefaultMaxBodyChars, "Max characters of each message's content to include; longer content is cut (-1 for unlimited)")
+	cmdutil.AddMaxBodyCharsFlag(cmd, &o.maxBodyChars)
+	f.BoolVar(&o.noDownload, cmdutil.NoDownloadFlagName, false, "Do not download attached files: they are listed without a local path, which is faster when only the text matters")
 	f.BoolVar(&o.includeReactions, "include-reactions", false, "Include reactions and the IDs of the users who reacted")
 	f.BoolVar(&o.resolveUsers, "resolve-users", false, `Name the users: add "name" to each author, and "referenced_users", the profiles of the user IDs appearing in the output (cached for 24h)`)
 	f.BoolVar(&o.refreshUsers, "refresh-users", false, "Like --resolve-users, but fetch the profiles again instead of using the cache")
@@ -92,7 +94,8 @@ Prints {message, thread, referenced_users}; see "list" for the fields of a
 message. "thread" ({ts, length}) is present when the message belongs to a
 thread: use "list" on the same target to read it. Attached files are
 downloaded and listed with their local path; a file that cannot be
-downloaded is listed with an "error" instead.`,
+downloaded is listed with an "error" instead. With --no-download nothing is
+downloaded and the files are listed without a path.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return c.runGet(cmd, args[0], opts)
@@ -120,7 +123,7 @@ func (c *command) runGet(cmd *cobra.Command, targetInput string, opts readOption
 		return err
 	}
 	// 0 would mean "the default" to messages.CompactOptions.
-	if err := cmdutil.CheckMaxChars("--max-body-chars", opts.maxBodyChars); err != nil {
+	if err := cmdutil.CheckMaxChars(cmdutil.MaxBodyCharsFlag, opts.maxBodyChars); err != nil {
 		return err
 	}
 
@@ -151,12 +154,16 @@ func (c *command) runGet(cmd *cobra.Command, targetInput string, opts readOption
 	return c.rt.Print(result)
 }
 
-// present downloads the files of msgs, converts them to the printed shape
-// and resolves the users they reference when asked to.
+// present downloads the files of msgs (unless --no-download), converts
+// them to the printed shape and resolves the users they reference when
+// asked to.
 func (c *command) present(ctx context.Context, loc cmdutil.Located, msgs []messages.Message, opts readOptions) ([]messages.CompactMessage, map[string]users.CompactUser, error) {
-	downloads, err := c.downloadMessageFiles(ctx, loc.Client, msgs)
-	if err != nil {
-		return nil, nil, err
+	downloads := listedFiles(msgs)
+	if !opts.noDownload {
+		var err error
+		if downloads, err = c.downloadMessageFiles(ctx, loc.Client, msgs); err != nil {
+			return nil, nil, err
+		}
 	}
 	compact := make([]messages.CompactMessage, len(msgs))
 	for i, m := range msgs {
@@ -225,7 +232,8 @@ the thread a message belongs to: every message of a listed thread has it,
 and in channel history only the messages that started a thread, which also
 have "reply_count". "reactions" needs --include-reactions; "author.name"
 and "referenced_users" need --resolve-users. Attached files are downloaded
-and listed with their local path, as by "get".`, messages.MaxHistoryLimit),
+and listed with their local path, as by "get", unless --no-download is
+given.`, messages.MaxHistoryLimit),
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return c.runList(cmd, args[0], opts)
@@ -283,7 +291,7 @@ func (c *command) runList(cmd *cobra.Command, targetInput string, opts listOptio
 	// Reading opens no DM: a user target is the DM that exists with that
 	// user.
 	target.ReadOnly = true
-	if err := cmdutil.CheckMaxChars("--max-body-chars", opts.maxBodyChars); err != nil {
+	if err := cmdutil.CheckMaxChars(cmdutil.MaxBodyCharsFlag, opts.maxBodyChars); err != nil {
 		return err
 	}
 	threadTS, err := cmdutil.ParseTS("--thread-ts", opts.threadTS)

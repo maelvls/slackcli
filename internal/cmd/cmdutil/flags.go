@@ -7,6 +7,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/maelvls/slackcli/internal/slack/messages"
 	"github.com/maelvls/slackcli/internal/slack/slackurl"
 )
 
@@ -68,6 +69,28 @@ func CheckMaxChars(flag string, n int) error {
 		return fmt.Errorf("invalid %s value %d: must be a positive integer, or -1 for unlimited", flag, n)
 	}
 	return nil
+}
+
+// MaxBodyCharsFlag is the name, dashes included, of the flag that caps the
+// content of each message printed (see AddMaxBodyCharsFlag).
+const MaxBodyCharsFlag = "--max-body-chars"
+
+// NoDownloadFlagName is the name of the flag that skips downloading the
+// files attached to messages: the same on every command that downloads.
+const NoDownloadFlagName = "no-download"
+
+// AddMaxBodyCharsFlag registers --max-body-chars, the cap on the content of
+// each message, with the one default every command uses. The flag has the
+// same name wherever message content is printed; --max-content-chars, its
+// former name on "search", is accepted everywhere as a hidden alias. When
+// both are given, the last one wins. Validate the value with
+// CheckMaxChars(MaxBodyCharsFlag, *p).
+func AddMaxBodyCharsFlag(cmd *cobra.Command, p *int) {
+	const alias = "max-content-chars"
+	f := cmd.Flags()
+	f.IntVar(p, "max-body-chars", messages.DefaultMaxBodyChars, "Max characters of each message's content to include; longer content is cut (-1 for unlimited)")
+	f.IntVar(p, alias, messages.DefaultMaxBodyChars, "Alias of --max-body-chars")
+	_ = f.MarkHidden(alias)
 }
 
 // AttachPaths trims and de-duplicates the values of a repeatable --attach

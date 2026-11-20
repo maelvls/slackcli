@@ -64,7 +64,7 @@ a bot or user token.`,
 			if err := cmdutil.CheckRange("--max-messages", maxMessages, unreads.MaxMessagesLimit, "use --counts-only to fetch no messages"); err != nil {
 				return err
 			}
-			if err := cmdutil.CheckMaxChars("--max-body-chars", maxBodyChars); err != nil {
+			if err := cmdutil.CheckMaxChars(cmdutil.MaxBodyCharsFlag, maxBodyChars); err != nil {
 				return err
 			}
 			ctx := cmd.Context()
@@ -93,7 +93,7 @@ a bot or user token.`,
 	clictx.AddWorkspaceFlag(cmd, &workspace)
 	cmd.Flags().BoolVar(&countsOnly, "counts-only", false, "Only list the conversations with unreads and their mention counts; do not fetch message content")
 	cmd.Flags().IntVar(&maxMessages, "max-messages", unreads.DefaultMaxMessages, fmt.Sprintf("Max unread messages to fetch per conversation, oldest unread first, hidden system messages included (1-%d)", unreads.MaxMessagesLimit))
-	cmd.Flags().IntVar(&maxBodyChars, "max-body-chars", unreads.DefaultMaxBodyChars, "Max content characters per message (-1 for unlimited)")
+	cmdutil.AddMaxBodyCharsFlag(cmd, &maxBodyChars)
 	cmd.Flags().BoolVar(&includeSystem, "include-system", false, "Include system messages (joins, leaves, topic changes, etc.) in messages instead of only counting them in system_messages_hidden")
 	return cmd
 }

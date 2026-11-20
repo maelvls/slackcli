@@ -109,9 +109,8 @@ two ways of searching and how to get more results than --limit.`,
 		"Keep only: any (everything), text (messages without files; text/plain files), image, snippet, file (messages with any file; every file)")
 	fl.IntVar(&f.limit, "limit", search.DefaultLimit,
 		fmt.Sprintf("Maximum number of results of each kind, 1 to %d. When more match, more_messages / more_files in the output say how to get them", search.MaxLimit))
-	fl.IntVar(&f.maxContentChars, "max-content-chars", search.DefaultMaxContentChars,
-		"Truncate the content of each message to this many characters (-1 for unlimited)")
-	fl.BoolVar(&f.noDownload, "no-download", false,
+	cmdutil.AddMaxBodyCharsFlag(cmd, &f.maxContentChars)
+	fl.BoolVar(&f.noDownload, cmdutil.NoDownloadFlagName, false,
 		"Do not download files: results list them without a local path (file results keep their permalink)")
 	fl.BoolVar(&f.resolveUsers, "resolve-users", false,
 		"Add referenced_users: the profiles of the authors and of the users mentioned in the messages found, keyed by user ID (the author's handle is on each result anyway, as author.name; this makes it the display name)")
@@ -128,7 +127,7 @@ func run(ctx context.Context, rt *clictx.Context, kind search.Kind, query string
 	if err := cmdutil.CheckLimit(f.limit, search.MaxLimit, "to go further back, repeat the search with an earlier --before date"); err != nil {
 		return err
 	}
-	if err := cmdutil.CheckMaxChars("--max-content-chars", f.maxContentChars); err != nil {
+	if err := cmdutil.CheckMaxChars(cmdutil.MaxBodyCharsFlag, f.maxContentChars); err != nil {
 		return err
 	}
 

@@ -53,6 +53,19 @@ func isCanvas(f messages.FileSummary) bool {
 	return f.Mode == "canvas" || f.Mode == "quip" || f.Mode == "docs"
 }
 
+// listedFiles is the outcome per file ID when nothing is downloaded
+// (--no-download): every file attached to msgs is listed, without a path,
+// as "search --no-download" does.
+func listedFiles(msgs []messages.Message) map[string]files.DownloadResult {
+	out := map[string]files.DownloadResult{}
+	for _, m := range msgs {
+		for _, f := range m.Files {
+			out[f.ID] = files.DownloadResult{OK: true}
+		}
+	}
+	return out
+}
+
 // downloadMessageFiles saves the files attached to msgs locally and
 // returns the outcome per file ID. A file that cannot be downloaded never
 // fails the command: its outcome carries the error (also written next to

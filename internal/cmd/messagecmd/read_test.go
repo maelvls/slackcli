@@ -298,6 +298,52 @@ func TestGetDownloadsFiles(t *testing.T) {
 	}
 }
 
+// --no-download, as on "search": the files are listed without a path and
+// nothing is fetched, on "get" (also the implicit one) and on "list".
+func TestNoDownload(t *testing.T) {
+	file := map[string]any{"id": "F1", "name": "notes.txt", "mimetype": "text/plain", "url_private_download": "https://files.slack.com/files-pri/T1-F1/download/notes.txt"}
+	for _, args := range [][]string{
+		{"get", testURL, "--no-download"},
+		{testURL, "--no-download"},
+		{"list", testChannel, "--no-download"},
+		{"list", testURL, "--no-download"},
+	} {
+		h := newHarness(t)
+		h.history(map[string]any{"ts": testTS, "text": "see attached", "files": []any{file}})
+		h.replies(map[string]any{"ts": testTS, "text": "see attached", "files": []any{file}})
+		h.serve = func(req *http.Request) *http.Response {
+			t.Errorf("%v: downloaded %s", args, req.URL)
+			return httpResponse(http.StatusNotFound, "", "")
+		}
+		got := h.mustRun(args...)
+		msg, _ := got["message"].(map[string]any)
+		if list, ok := got["messages"].([]any); ok && len(list) == 1 {
+			msg, _ = list[0].(map[string]any)
+		}
+		wantJSON(t, map[string]any{"files": msg["files"]}, `{"files": [{"name": "notes.txt", "mimetype": "text/plain"}]}`)
+		if entries, _ := os.ReadDir(h.c.downloadsDir); len(entries) != 0 {
+			t.Errorf("%v: %d files written to the downloads directory", args, len(entries))
+		}
+		if h.stderr.Len() != 0 {
+			t.Errorf("%v: stderr = %q", args, h.stderr.String())
+		}
+	}
+}
+
+// --max-content-chars, the name of the flag on "search", is --max-body-chars.
+func TestMaxContentCharsAlias(t *testing.T) {
+	for _, args := range [][]string{{"get", testURL}, {"list", testChannel}} {
+		h := newHarness(t)
+		h.history(map[string]any{"ts": testTS, "text": "hello world"})
+		want := h.mustRun(append(args, "--max-body-chars", "5")...)
+		got := h.mustRun(append(args, "--max-content-chars", "5")...)
+		if !reflect.DeepEqual(got, want) || !strings.Contains(h.stdout.String(), `hello\n…`) {
+			t.Errorf("%v: --max-content-chars 5 printed %s, want %v", args, h.stdout.String(), want)
+		}
+		h.mustFail("must be a positive integer, or -1 for unlimited", append(args, "--max-content-chars", "0")...)
+	}
+}
+
 func threadFixture(h *harness) {
 	h.replies(
 		map[string]any{"ts": "1770160000.000001", "thread_ts": "1770160000.000001", "reply_count": 2, "user": "U05BRPTKL6A", "text": "root"},

@@ -504,17 +504,17 @@ func TestHelpContracts(t *testing.T) {
 			t.Errorf("%s: use = %q", sub.Name(), sub.Use)
 		}
 		for flag, wants := range map[string][]string{
-			"workspace":         {"required if you have multiple workspaces"},
-			"channel":           {"#name, name or ID", "repeat the flag", "commas", "scanned", "search operators are then rejected"},
-			"user":              {"U…/W…", "@handle", "email", "display name"},
-			"after":             {"YYYY-MM-DD", "Exclusive", "starts on 2026-01-02", "time zone"},
-			"before":            {"YYYY-MM-DD", "Exclusive", "ends on 2026-01-31"},
-			"content-type":      {"any", "text", "image", "snippet", "file"},
-			"limit":             {"1 to 200", "more_messages / more_files"},
-			"max-content-chars": {"-1 for unlimited"},
-			"no-download":       {"without a local path"},
-			"resolve-users":     {"referenced_users"},
-			"refresh-users":     {"implies --resolve-users"},
+			"workspace":      {"required if you have multiple workspaces"},
+			"channel":        {"#name, name or ID", "repeat the flag", "commas", "scanned", "search operators are then rejected"},
+			"user":           {"U…/W…", "@handle", "email", "display name"},
+			"after":          {"YYYY-MM-DD", "Exclusive", "starts on 2026-01-02", "time zone"},
+			"before":         {"YYYY-MM-DD", "Exclusive", "ends on 2026-01-31"},
+			"content-type":   {"any", "text", "image", "snippet", "file"},
+			"limit":          {"1 to 200", "more_messages / more_files"},
+			"max-body-chars": {"-1 for unlimited"},
+			"no-download":    {"without a local path"},
+			"resolve-users":  {"referenced_users"},
+			"refresh-users":  {"implies --resolve-users"},
 		} {
 			f := sub.Flags().Lookup(flag)
 			if f == nil {
@@ -527,10 +527,15 @@ func TestHelpContracts(t *testing.T) {
 				}
 			}
 		}
-		for flag, def := range map[string]string{"limit": "20", "max-content-chars": "4000", "content-type": "any"} {
+		for flag, def := range map[string]string{"limit": "20", "max-body-chars": "8000", "max-content-chars": "8000", "content-type": "any"} {
 			if got := sub.Flags().Lookup(flag).DefValue; got != def {
 				t.Errorf("%s --%s default = %q, want %q", sub.Name(), flag, got, def)
 			}
+		}
+		// --max-content-chars, the flag's former name, is still accepted
+		// but no longer advertised.
+		if f := sub.Flags().Lookup("max-content-chars"); f == nil || !f.Hidden || strings.Contains(sub.UsageString(), "max-content-chars") {
+			t.Errorf("%s: --max-content-chars is not a hidden alias", sub.Name())
 		}
 	}
 	if want := []string{"all", "files", "messages"}; !reflect.DeepEqual(names, want) {
@@ -548,3 +553,20 @@ func jsonString(s string) string {
 // localDay is the day of a Unix time in the local time zone, as hints
 // print it.
 func localDay(sec int64) string { return time.Unix(sec, 0).Format("2006-01-02") }
+
+// The cap on message content has the same name as on "message get/list",
+// --max-body-chars; its former name is an alias.
+func TestMaxBodyCharsAndItsAlias(t *testing.T) {
+	for _, flag := range []string{"--max-body-chars", "--max-content-chars"} {
+		h := newHarness(t)
+		h.general()
+		h.on("conversations.history", func(map[string]any) (map[string]any, error) {
+			return map[string]any{"messages": []any{map[string]any{"ts": "1767225600.000100", "user": "U1", "text": "hello world"}}}, nil
+		})
+		out := h.mustRun("messages", "hello", "--channel", "C12345678", flag, "5")
+		msgs, _ := out["messages"].([]any)
+		if len(msgs) != 1 || msgs[0].(map[string]any)["content"] != "hello\n…" {
+			t.Errorf("%s 5: messages = %v", flag, out["messages"])
+		}
+	}
+}

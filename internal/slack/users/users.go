@@ -266,8 +266,13 @@ const maxGroupDMUsers = 8
 // DMChannel is the conversation opened by GetDMChannelForUsers, as printed
 // by `user dm-open`.
 type DMChannel struct {
-	UserIDs     []string `json:"user_ids"`
-	DMChannelID string   `json:"dm_channel_id"`
+	UserIDs []string `json:"user_ids"`
+	// ChannelID is the conversation, under the name every other command
+	// uses for a channel ID.
+	ChannelID string `json:"channel_id"`
+	// DMChannelID is ChannelID under its former name, kept for the
+	// scripts that read it.
+	DMChannelID string `json:"dm_channel_id"`
 	// ChannelType is "dm" for one user, "group_dm" for several.
 	ChannelType string `json:"channel_type"`
 	// AlreadyOpen is Slack's conversations.open "already_open" flag: true
@@ -318,5 +323,5 @@ func GetDMChannelForUsers(ctx context.Context, client *slackapi.Client, inputs [
 	if strings.HasPrefix(channelID, "D") {
 		channelType = "dm"
 	}
-	return DMChannel{UserIDs: ids, DMChannelID: channelID, ChannelType: channelType, AlreadyOpen: jsonx.Bool(resp["already_open"])}, nil
+	return DMChannel{UserIDs: ids, ChannelID: channelID, DMChannelID: channelID, ChannelType: channelType, AlreadyOpen: jsonx.Bool(resp["already_open"])}, nil
 }

@@ -4,7 +4,7 @@ Results are JSON on stdout, on one line (indented when stdout is a terminal); hi
 
 ## Messages
 
-A message is `{channel_id, ts, time, thread_ts?, reply_count?, author: {user_id | bot_id, name?}, content, files?, reactions?, forwarded_threads?}`. `ts` identifies the message; `time` is the same instant as a local date and time (`2026-02-04T01:31:49+01:00`). `content` is Markdown, cut at `--max-body-chars`. `reactions` (`[{name, users, count?}]`) appear only with `--include-reactions`. A root message with replies carries its own `ts` as `thread_ts`, and `reply_count`. `author.name` is present in search results (the handle) and with `--resolve-users` (the display name).
+A message is `{channel_id, ts, time, thread_ts?, reply_count?, author: {user_id | bot_id, name?}, content, files?, reactions?, forwarded_threads?}`. `ts` identifies the message; `time` is the same instant as a local date and time (`2026-02-04T01:31:49+01:00`). `content` is Markdown, cut at `--max-body-chars` (8000 by default on every command that prints messages, `-1` for no limit). `reactions` (`[{name, users, count?}]`) appear only with `--include-reactions`. A root message with replies carries its own `ts` as `thread_ts`, and `reply_count`. `author.name` is present in search results (the handle) and with `--resolve-users` (the display name).
 
 - `message get`: `{message, thread?: {ts, length}}`. `thread` means the message belongs to a thread of `length` messages; read it with `message list` on the same target.
 - `message list`: `{channel_id, messages, system_messages_hidden?}`, oldest first, in the same shape for channel history and for a thread (the root and all replies, each with `thread_ts`). With `--expand-threads`, the replies of each thread follow its root, so the list is in thread order rather than strictly chronological. `system_messages_hidden` counts the joins, leaves and topic changes left out of channel history (`--include-system` lists them).
@@ -13,6 +13,7 @@ A message is `{channel_id, ts, time, thread_ts?, reply_count?, author: {user_id 
 - `later list`: `{counts, items[], next_cursor?}`; an item has `channel_id, channel_name, ts, state, date_saved, date_completed?, date_due?` and `message` or `message_error`.
 
 - `channel list`: `{channels, next_cursor?}`; a channel is `{id, name?, user?, is_private?, is_im?, is_mpim?, is_archived?, num_members?}`: a flag is present only when true, and a DM has `user` (the other member) instead of `name`. `--raw` prints Slack's conversation objects instead (topic, purpose, creator …). With `--name`, the whole listing was read: there is no `next_cursor`.
+- `user dm-open`: `{user_ids, channel_id, dm_channel_id, channel_type: "dm"|"group_dm", already_open}`. `channel_id` is the conversation, as everywhere else; `dm_channel_id` is the same value under its former name.
 
 User IDs in `content` and `reactions` are left as is. `--resolve-users` puts the display name of each author in `author.name` and adds `referenced_users`, a map from user ID to `{id, name, real_name, display_name, email, title, tz, ...}` covering the users mentioned too, served from a 24-hour per-workspace cache; `--refresh-users` fetches again.
 
@@ -36,5 +37,5 @@ Paged lists return `next_cursor` when there is more: pass it to `--cursor` with 
 
 - A downloaded file entry has an absolute `path` plus `name` (or `title` for `search files`), `mimetype` and `mode`.
 - A failed download keeps its entry, with `error` and a `path` to a `<file-id>.download-error.txt` file holding the reason; a "could not download" warning is printed on stderr. This holds for `message get/list` and for every `search` command. Check for `error` before reading `path`.
-- `search --no-download` lists files without `path`.
+- `--no-download` (`message get`, `message list`, every `search` command) downloads nothing and lists files without `path`.
 - For a download-then-reply task, use `search messages --content-type file`: its results carry the source message's `permalink`, which is a valid reply target.

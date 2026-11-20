@@ -22,7 +22,7 @@ Use `slackcli` from `$PATH`. If it is missing, tell the user: it is installed fr
 1. Run the command you need: credentials are imported on the fly from Slack Desktop or a browser. Only if it reports none, run `auth import-desktop` (or `import-chrome`, `import-brave`, `import-firefox`), then `auth test`. `auth whoami` (local, redacted) lists the workspaces and the default one.
 2. Prefer a Slack message URL as the target: it carries workspace, channel and timestamp. Quote it.
 3. Choose the narrowest read: `message get` for one message, `message list` for a thread or channel history, `search messages|files|all` for discovery, `unreads` for the inbox.
-4. Bound the output with `--limit`, `--max-body-chars`, `--max-content-chars`, `--counts-only`, `--no-download`.
+4. Bound the output with `--limit`, `--max-body-chars` (the same flag on `message get/list`, `search`, `unreads` and `later list`; 8000 by default), `--counts-only`, and `--no-download` (`message get/list` and `search`: files are listed, not downloaded, which is faster when only the text matters).
 5. For a requested write, run only that mutation and check the JSON it prints.
 
 ## Common reads

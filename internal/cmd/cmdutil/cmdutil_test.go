@@ -619,3 +619,29 @@ func TestAllowDashTextPrintsHelp(t *testing.T) {
 		}
 	}
 }
+
+// --max-body-chars is the one name of the cap on message content;
+// --max-content-chars is accepted but not shown.
+func TestAddMaxBodyCharsFlag(t *testing.T) {
+	for _, tt := range []struct {
+		args []string
+		want int
+	}{
+		{nil, 8000},
+		{[]string{"--max-body-chars", "5"}, 5},
+		{[]string{"--max-content-chars=7"}, 7},
+		{[]string{"--max-content-chars", "7", "--max-body-chars", "-1"}, -1},
+	} {
+		var n int
+		cmd := &cobra.Command{Use: "x", RunE: func(*cobra.Command, []string) error { return nil }}
+		AddMaxBodyCharsFlag(cmd, &n)
+		cmd.SetArgs(tt.args)
+		if err := cmd.Execute(); err != nil || n != tt.want {
+			t.Errorf("%v: n = %d, err = %v, want %d", tt.args, n, err, tt.want)
+		}
+		usage := cmd.UsageString()
+		if !strings.Contains(usage, "--max-body-chars") || strings.Contains(usage, "max-content-chars") {
+			t.Errorf("usage shows the alias, or not the flag:\n%s", usage)
+		}
+	}
+}

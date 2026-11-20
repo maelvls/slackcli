@@ -107,7 +107,8 @@ Saved credentials live in `~/.config/slackcli/credentials.json`. On macOS the se
 - Results are JSON on stdout, with empty fields removed: on one line, or indented when stdout is a terminal. Hints and warnings go to stderr.
 - Messages have `ts`, which identifies them, and `time`, the same instant as a local date and time.
 - A list command always prints its list, `[]` when empty, and `next_cursor` when there is more (pass it to `--cursor`).
-- Files attached to messages are downloaded to the cache directory and listed with their local `path`.
+- Files attached to messages are downloaded to the cache directory and listed with their local `path`. `--no-download` (`message get`, `message list`, `search`) lists them without downloading anything.
+- Message content is cut at `--max-body-chars` (8000 characters by default, `-1` for no limit): the same flag and default on `message get`, `message list`, `search`, `unreads` and `later list`.
 
 | Exit code | Meaning |
 | --- | --- |

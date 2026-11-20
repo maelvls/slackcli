@@ -26,8 +26,8 @@ const (
 	// MaxLimit is the largest Options.Limit accepted.
 	MaxLimit = 200
 	// DefaultMaxContentChars is the message content length used when
-	// Options.MaxContentChars is zero.
-	DefaultMaxContentChars = 4000
+	// Options.MaxContentChars is zero: the same as everywhere else.
+	DefaultMaxContentChars = messages.DefaultMaxBodyChars
 
 	// The concurrency bounds keep a search from tripping Slack's rate
 	// limits by issuing all of its follow-up requests at once.

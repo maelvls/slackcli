@@ -124,9 +124,10 @@ channel ID. An existing conversation is reused; nothing is posted.
 
 ` + userArgHelp + `
 
-Prints {"user_ids": […], "dm_channel_id": "D…"|"G…", "channel_type":
-"dm"|"group_dm", "already_open": true|false}. Use dm_channel_id as the
-target of other commands. already_open is what Slack reports: true when
+Prints {"user_ids": […], "channel_id": "D…"|"G…", "dm_channel_id": (the
+same), "channel_type": "dm"|"group_dm", "already_open": true|false}. Use
+channel_id as the target of other commands; dm_channel_id is its former
+name, still printed. already_open is what Slack reports: true when
 the conversation was already open for you, false when this call opened it
 (a new conversation, or an existing one that was closed).`,
 		Args: cobra.MinimumNArgs(1),
