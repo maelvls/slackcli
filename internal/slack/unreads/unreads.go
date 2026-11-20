@@ -3,14 +3,17 @@
 // messages themselves.
 //
 // client.counts is an internal Slack method, which only accepts browser
-// session credentials.
+// session credentials. On an Enterprise Grid that restricts it
+// (team_is_restricted), users.counts is read instead.
 package unreads
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"slices"
 	"sync"
+	"sync/atomic"
 
 	"github.com/maelvls/slackcli/internal/appinfo"
 	"github.com/maelvls/slackcli/internal/jsonx"
@@ -120,7 +123,8 @@ type Threads struct {
 type Result struct {
 	// Channels are sorted by mention count, then unread count, descending.
 	Channels []Channel `json:"channels"`
-	// Threads is nil when no thread has unread replies.
+	// Threads is nil when no thread has unread replies, and when Slack
+	// does not say (the users.counts fallback of Fetch).
 	Threads *Threads `json:"threads,omitempty"`
 	// Warnings say what is missing from Channels because Slack rate
 	// limited the lookups (names, messages), for the caller to show on
@@ -128,14 +132,21 @@ type Result struct {
 	Warnings []string `json:"-"`
 }
 
-// entry is a conversation with unreads, as listed by client.counts.
+// entry is a conversation with unreads, as listed by client.counts or
+// users.counts.
 type entry struct {
-	id       string
-	kind     string
+	id   string
+	kind string
+	// lastRead is the read cursor; users.counts does not give it (see
+	// Fetch).
 	lastRead string
 	count    *int
 	mentions int
 }
+
+// errNotLookedUp is what lookup answers once Slack has rate limited the
+// name lookups.
+var errNotLookedUp = errors.New("not looked up")
 
 // Fetch returns every conversation with unread messages, with its name
 // and, unless opts.CountsOnly, its unread messages.
@@ -144,6 +155,13 @@ type entry struct {
 // two calls for its name and one for its messages, at most
 // fetchConcurrency at a time. A conversation whose messages cannot be
 // read is still listed, with Channel.MessagesError set.
+//
+// On an Enterprise Grid where client.counts answers team_is_restricted
+// (channels.IsRestricted), the conversations come from users.counts
+// instead: those unread or mentioned, without the archived ones and the
+// muted ones nobody mentioned the caller in. users.counts has no read
+// cursor, so it is taken from the conversations.info call that gives the
+// name, and it says nothing about threads: Result.Threads is nil.
 //
 // Only client.counts, a cancelled context and dead credentials fail the
 // listing. Names and messages are enrichments (see package enrich): once
@@ -163,28 +181,49 @@ func Fetch(ctx context.Context, client *slackapi.Client, opts Options) (Result, 
 		opts.MaxBodyChars = DefaultMaxBodyChars
 	}
 
-	resp, err := client.API(ctx, "client.counts", map[string]any{"thread_count_by_channel": true})
-	if err != nil {
-		return Result{}, fmt.Errorf("fetching unread counts: %w", err)
-	}
 	var entries []entry
-	for _, group := range []struct{ key, kind string }{{"channels", TypeChannel}, {"mpims", TypeMPIM}, {"ims", TypeDM}} {
-		for _, raw := range jsonx.Maps(resp[group.key]) {
-			id := jsonx.Str(raw["id"])
-			if id == "" || !jsonx.Bool(raw["has_unreads"]) {
+	resp, err := client.API(ctx, "client.counts", map[string]any{"thread_count_by_channel": true})
+	// viaUsersCounts: the entries have no read cursor.
+	viaUsersCounts := false
+	switch {
+	case err == nil:
+		for _, group := range []struct{ key, kind string }{{"channels", TypeChannel}, {"mpims", TypeMPIM}, {"ims", TypeDM}} {
+			for _, raw := range jsonx.Maps(resp[group.key]) {
+				id := jsonx.Str(raw["id"])
+				if id == "" || !jsonx.Bool(raw["has_unreads"]) {
+					continue
+				}
+				e := entry{id: id, kind: group.kind, lastRead: jsonx.Str(raw["last_read"])}
+				e.mentions, _ = jsonx.Int(raw["mention_count"])
+				for _, key := range []string{"unread_count_display", "unread_count"} {
+					// A count of 0 next to has_unreads says nothing.
+					if n, ok := jsonx.Int(raw[key]); ok && n > 0 {
+						e.count = &n
+						break
+					}
+				}
+				entries = append(entries, e)
+			}
+		}
+	case channels.IsRestricted(err):
+		viaUsersCounts = true
+		counts, err := channels.UsersCounts(ctx, client)
+		if err != nil {
+			return Result{}, fmt.Errorf("fetching unread counts: %w", err)
+		}
+		for _, c := range counts {
+			if !c.HasUnreads() {
 				continue
 			}
-			e := entry{id: id, kind: group.kind, lastRead: jsonx.Str(raw["last_read"])}
-			e.mentions, _ = jsonx.Int(raw["mention_count"])
-			for _, key := range []string{"unread_count_display", "unread_count"} {
-				// A count of 0 next to has_unreads says nothing.
-				if n, ok := jsonx.Int(raw[key]); ok && n > 0 {
-					e.count = &n
-					break
-				}
+			// The kinds of users.counts are those of ChannelType.
+			e := entry{id: c.ID, kind: c.Kind, mentions: c.MentionCount}
+			if n := c.UnreadCount; n > 0 {
+				e.count = &n
 			}
 			entries = append(entries, e)
 		}
+	default:
+		return Result{}, fmt.Errorf("fetching unread counts: %w", err)
 	}
 
 	result := Result{Channels: make([]Channel, len(entries))}
@@ -202,41 +241,70 @@ func Fetch(ctx context.Context, client *slackapi.Client, opts Options) (Result, 
 			}
 		})
 	}
+	// lookup fills the name of ch; the read cursor it returns is only
+	// known when the error is nil or info.LastRead is set.
+	lookup := func(e entry, ch *Channel) (channels.Info, error) {
+		if namesLimited.Closed() {
+			return channels.Info{}, errNotLookedUp
+		}
+		info, err := channels.Lookup(ctx, client, e.id)
+		ch.ChannelName = info.Name
+		switch {
+		case err == nil:
+		case enrich.MustAbort(ctx, err):
+			cancel(fmt.Errorf("looking up the name of %s: %w", e.id, err))
+		default:
+			namesLimited.Failed(err)
+		}
+		return info, err
+	}
+	load := func(e entry, ch *Channel) {
+		if messagesLimited.Closed() {
+			ch.MessagesError = enrich.RateLimitedCode
+			return
+		}
+		err := fetchMessages(ctx, client, e, opts, ch)
+		switch {
+		case err == nil:
+		case enrich.MustAbort(ctx, err):
+			cancel(fmt.Errorf("fetching unread messages of %s: %w", e.id, err))
+		case messagesLimited.Failed(err):
+			ch.MessagesError = enrich.RateLimitedCode
+		default:
+			ch.MessagesError = errorCode(err)
+		}
+	}
+	// noCursor counts the conversations whose messages were not fetched
+	// for want of a read cursor.
+	var noCursor atomic.Int32
 	for i, e := range entries {
 		ch := &result.Channels[i]
 		*ch = Channel{ChannelID: e.id, ChannelType: e.kind, UnreadCount: e.count, MentionCount: e.mentions}
-		run(func() {
-			if namesLimited.Closed() {
-				return
+		if !viaUsersCounts {
+			run(func() { _, _ = lookup(e, ch) })
+			if !opts.CountsOnly {
+				run(func() { load(e, ch) })
 			}
-			name, err := channels.LookupName(ctx, client, e.id)
-			switch {
-			case err == nil:
-				ch.ChannelName = name
-			case enrich.MustAbort(ctx, err):
-				cancel(fmt.Errorf("looking up the name of %s: %w", e.id, err))
-			default:
-				namesLimited.Failed(err)
-			}
-		})
-		if opts.CountsOnly {
 			continue
 		}
+		// The read cursor comes with the name: one task does both.
 		run(func() {
-			if messagesLimited.Closed() {
-				ch.MessagesError = enrich.RateLimitedCode
+			info, err := lookup(e, ch)
+			if opts.CountsOnly || ctx.Err() != nil {
 				return
 			}
-			err := fetchMessages(ctx, client, e, opts, ch)
-			switch {
-			case err == nil:
-			case enrich.MustAbort(ctx, err):
-				cancel(fmt.Errorf("fetching unread messages of %s: %w", e.id, err))
-			case messagesLimited.Failed(err):
-				ch.MessagesError = enrich.RateLimitedCode
-			default:
+			if err != nil && info.LastRead == "" {
+				// Without the cursor, the newest messages would be taken
+				// for the unread ones.
 				ch.MessagesError = errorCode(err)
+				if errors.Is(err, errNotLookedUp) || enrich.IsRateLimit(err) {
+					ch.MessagesError = enrich.RateLimitedCode
+					noCursor.Add(1)
+				}
+				return
 			}
+			e.lastRead = info.LastRead
+			load(e, ch)
 		})
 	}
 	wg.Wait()
@@ -246,6 +314,12 @@ func Fetch(ctx context.Context, client *slackapi.Client, opts Options) (Result, 
 	if n, err := messagesLimited.Skipped(); n > 0 {
 		result.Warnings = append(result.Warnings, fmt.Sprintf(
 			`the unread messages of %d of %d conversations were not fetched (%v): they are listed with "messages_error": %q; %s`,
+			n, len(entries), enrich.Cause(err), enrich.RateLimitedCode, enrich.Hint()))
+	}
+	if n := noCursor.Load(); n > 0 {
+		_, err := namesLimited.Skipped()
+		result.Warnings = append(result.Warnings, fmt.Sprintf(
+			`the unread messages of %d of %d conversations were not fetched, as how far they were read could not be looked up (%v): they are listed with "messages_error": %q; %s`,
 			n, len(entries), enrich.Cause(err), enrich.RateLimitedCode, enrich.Hint()))
 	}
 	if n, err := namesLimited.Skipped(); n > 0 {
