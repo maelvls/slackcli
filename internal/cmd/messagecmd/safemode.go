@@ -55,7 +55,9 @@ func (c *command) redirectSendToCompose(ctx context.Context, targetInput, text s
 		return redirectedResult{}, fmt.Errorf("safe mode is active (turned on by %s) but the interactive compose editor is unavailable in CI (the CI environment variable is set). Disable safe mode, or unset CI, to send messages", c.rt.SafeModeSource())
 	}
 
-	c.rt.Hintf(`Safe mode active (turned on by %s): redirecting "message send" to the compose editor. Nothing posts until a human sends it from the editor.`, c.rt.SafeModeSource())
+	// In the result ("hints"), not on stderr: "message send … 2>&1 | jq"
+	// must still parse once the human has sent the message.
+	c.rt.ResultHintf(`Safe mode active (turned on by %s): "message send" was redirected to the compose editor. Nothing is posted unless a human sends it from the editor.`, c.rt.SafeModeSource())
 	// The editor waits on a human for as long as it takes. It checks
 	// --thread-ts against a message URL target as "send" does.
 	c.rt.DisableTimeout()

@@ -52,19 +52,31 @@ Prints JSON:
                                  The oldest unread ones were fetched; raise
                                  --max-messages to get the rest.
     messages_error               Slack's error code when the messages of
-                                 the conversation could not be read
+                                 the conversation could not be read, or
+                                 no_read_cursor (see the fallback below)
   threads   {has_unreads, mention_count}, present when threads have unread
             replies (the replies themselves are not listed).
 
 Nothing is marked as read. This command uses Slack's internal client.counts
 API: it needs browser session credentials (xoxc- token and "d" cookie), not
-a bot or user token.`,
+a bot or user token.
+
+On an Enterprise Grid where client.counts answers team_is_restricted,
+users.counts is read instead. The list is not quite the same: a muted
+conversation is only listed when you are mentioned in it (client.counts
+lists every muted conversation with unreads), unread_count is Slack's own
+count, and threads is absent, as users.counts knows nothing of threads. A
+conversation whose read position Slack does not give is listed without
+messages, with messages_error no_read_cursor.
+
+To see who is waiting for an answer rather than what is unread, use
+"inbox".`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if err := cmdutil.CheckRange("--max-messages", maxMessages, unreads.MaxMessagesLimit, "use --counts-only to fetch no messages"); err != nil {
 				return err
 			}
-			if err := cmdutil.CheckMaxChars("--max-body-chars", maxBodyChars); err != nil {
+			if err := cmdutil.CheckMaxBodyChars(cmd, maxBodyChars); err != nil {
 				return err
 			}
 			ctx := cmd.Context()
@@ -85,7 +97,7 @@ a bot or user token.`,
 				return err
 			}
 			for _, w := range payload.Warnings {
-				rt.Hintf("Warning: %s", w)
+				rt.Warnf("%s", w)
 			}
 			return cmdutil.PrintList(rt, payload, "channels")
 		},
@@ -93,7 +105,7 @@ a bot or user token.`,
 	clictx.AddWorkspaceFlag(cmd, &workspace)
 	cmd.Flags().BoolVar(&countsOnly, "counts-only", false, "Only list the conversations with unreads and their mention counts; do not fetch message content")
 	cmd.Flags().IntVar(&maxMessages, "max-messages", unreads.DefaultMaxMessages, fmt.Sprintf("Max unread messages to fetch per conversation, oldest unread first, hidden system messages included (1-%d)", unreads.MaxMessagesLimit))
-	cmd.Flags().IntVar(&maxBodyChars, "max-body-chars", unreads.DefaultMaxBodyChars, "Max content characters per message (-1 for unlimited)")
+	cmdutil.AddMaxBodyCharsFlag(cmd, &maxBodyChars)
 	cmd.Flags().BoolVar(&includeSystem, "include-system", false, "Include system messages (joins, leaves, topic changes, etc.) in messages instead of only counting them in system_messages_hidden")
 	return cmd
 }

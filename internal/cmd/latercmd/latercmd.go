@@ -92,7 +92,7 @@ Prints JSON:
 			if limit < 1 {
 				return fmt.Errorf("invalid --limit value %d: must be a positive integer", limit)
 			}
-			if err := cmdutil.CheckMaxChars("--max-body-chars", maxBodyChars); err != nil {
+			if err := cmdutil.CheckMaxBodyChars(cmd, maxBodyChars); err != nil {
 				return err
 			}
 			ctx := cmd.Context()
@@ -114,7 +114,7 @@ Prints JSON:
 				return err
 			}
 			for _, w := range payload.Warnings {
-				rt.Hintf("Warning: %s", w)
+				rt.Warnf("%s", w)
 			}
 			if countsOnly {
 				return rt.Print(payload)
@@ -126,7 +126,7 @@ Prints JSON:
 	cmd.Flags().StringVar(&state, "state", string(later.StateInProgress), "Filter by state: in_progress, archived, completed, or all")
 	cmd.Flags().IntVar(&limit, "limit", later.DefaultLimit, "Max items to show; when there are more, the output has a next_cursor")
 	cmd.Flags().StringVar(&cursor, "cursor", "", "Continue a listing: the next_cursor value of the previous page (keep the same --state)")
-	cmd.Flags().IntVar(&maxBodyChars, "max-body-chars", later.DefaultMaxBodyChars, "Max content characters per message (-1 for unlimited)")
+	cmdutil.AddMaxBodyCharsFlag(cmd, &maxBodyChars)
 	cmd.Flags().BoolVar(&countsOnly, "counts-only", false, "Only show counts per state: no items, no message content")
 	return cmd
 }

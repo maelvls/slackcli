@@ -24,10 +24,10 @@ const maxListLimit = 1000
 func New(rt *clictx.Context) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "channel",
-		Short: "List conversations, create channels, manage invites, and mark as read",
+		Short: "List and describe conversations, create channels, manage invites, and mark as read",
 		Args:  cobra.NoArgs,
 	}
-	cmd.AddCommand(newListCommand(rt), newNewCommand(rt), newInviteCommand(rt), newMarkCommand(rt))
+	cmd.AddCommand(newListCommand(rt), newInfoCommand(rt), newNewCommand(rt), newInviteCommand(rt), newMarkCommand(rt))
 	return cmd
 }
 
@@ -116,17 +116,17 @@ needs no lookup: commands take #name.`,
 				return err
 			}
 			for _, w := range payload.Warnings {
-				rt.Hintf("Warning: %s", w)
+				rt.Warnf("%s", w)
 			}
 			if name != "" {
 				switch n := len(payload.Channels); {
 				case n > limit:
 					payload.Channels = payload.Channels[:limit]
-					rt.Hintf("%d conversations match --name %q, the first %d are listed: make --name more specific, or raise --limit.", n, name, limit)
+					rt.ResultHintf("%d conversations match --name %q, the first %d are listed: make --name more specific, or raise --limit.", n, name, limit)
 				case n == 0 && !all:
-					rt.Hintf("No conversation in this listing has %q in its name. It only has the conversations you are a member of: add --all to look at every public channel.", name)
+					rt.ResultHintf("No conversation in this listing has %q in its name. It only has the conversations you are a member of: add --all to look at every public channel.", name)
 				case n == 0:
-					rt.Hintf("No conversation visible to you has %q in its name.", name)
+					rt.ResultHintf("No conversation visible to you has %q in its name.", name)
 				}
 			}
 			result := listResult{Channels: channels.Compact(payload.Channels), NextCursor: payload.NextCursor}
@@ -139,7 +139,7 @@ needs no lookup: commands take #name.`,
 	clictx.AddWorkspaceFlag(cmd, &workspace)
 	cmd.Flags().StringVar(&user, "user", "", "List the conversations of this user instead of yours: user ID (U.../W...), email, or @handle/handle")
 	cmd.Flags().BoolVar(&all, "all", false, "List all conversations (conversations.list); incompatible with --user")
-	cmd.Flags().BoolVar(&viaCounts, "via-counts", false, "List joined conversations via client.counts (works on Enterprise Grid where users.conversations/conversations.list are restricted for browser tokens; needs browser credentials; one conversations.info call per conversation listed; incompatible with --all/--user)")
+	cmd.Flags().BoolVar(&viaCounts, "via-counts", false, "List joined conversations via client.counts, or users.counts where it is restricted too (works on Enterprise Grid where users.conversations/conversations.list are restricted for browser tokens; needs browser credentials; one conversations.info call per conversation listed; incompatible with --all/--user)")
 	cmd.Flags().StringVar(&name, "name", "", "Only the conversations whose name contains this text, ignoring case, looked for in the whole listing rather than in one page (incompatible with --cursor)")
 	cmd.Flags().BoolVar(&raw, "raw", false, "Print Slack's conversation objects (topic, purpose, creator, properties, …) instead of the compact ones")
 	cmd.Flags().IntVar(&limit, "limit", 100, fmt.Sprintf("Max conversations in one page, or with --name max conversations printed (1-%d)", maxListLimit))

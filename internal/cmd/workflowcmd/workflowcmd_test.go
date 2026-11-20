@@ -216,9 +216,10 @@ func TestListWarnsWhenFeaturedWorkflowsAreUnavailable(t *testing.T) {
 		"workflows": []any{
 			map[string]any{"title": "Request help", "trigger_id": "Ft0123ABCDEF", "link": shortcutURL, "app_id": "A0123ABCD", "featured": false},
 		},
+		"warnings": []any{"featured workflows could not be listed (listing featured workflows of channel C12345678: Slack API error calling workflows.featured.list: unknown_method); only bookmarked workflows are shown."},
 	})
-	if got := h.stderr.String(); !strings.Contains(got, "unknown_method") || !strings.Contains(got, "only bookmarked workflows") {
-		t.Errorf("stderr = %q, want a warning naming the failure", got)
+	if h.stderr.Len() != 0 {
+		t.Errorf("stderr = %q, want the warning in the result", h.stderr.String())
 	}
 }
 

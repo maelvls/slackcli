@@ -74,7 +74,12 @@ func TestDownloadFailureIsRecorded(t *testing.T) {
 	if got["F2"] != want {
 		t.Errorf("result = %+v\nwant %+v", got["F2"], want)
 	}
-	// The file is not skipped: it stays in the output, with the error.
+	// The file is not skipped: it stays in the output, with the error,
+	// and the result gets a warning (stderr does when nothing is printed).
+	if h.stderr.Len() != 0 {
+		t.Errorf("stderr before the end of the command = %q", h.stderr.String())
+	}
+	h.rt.FlushNotes()
 	if !strings.Contains(h.stderr.String(), "Warning: could not download file F2: Failed to download file (404)") || strings.Contains(h.stderr.String(), "skipping") {
 		t.Errorf("stderr = %q", h.stderr.String())
 	}
@@ -169,7 +174,7 @@ func TestDownloadProblemsNeverFailTheCommand(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for id, want := range map[string]string{"F20": "no download URL", "F21": "", "F22": "no download URL"} {
+	for id, want := range map[string]string{"F20": "no download URL", "F22": "no download URL"} {
 		res := got[id]
 		if res.OK || res.Error == "" || !strings.Contains(res.Error, want) {
 			t.Errorf("%s: result = %+v", id, res)
@@ -177,6 +182,18 @@ func TestDownloadProblemsNeverFailTheCommand(t *testing.T) {
 		if res.Path != filepath.Join(h.c.downloadsDir, id+".download-error.txt") {
 			t.Errorf("%s: path = %q", id, res.Path)
 		}
+	}
+	// A file hosted elsewhere has nothing to download: it is marked
+	// external, with its URL, and is neither an error nor a warning.
+	if want := (files.DownloadResult{OK: true, External: true, URL: "https://docs.google.com/document/d/abc"}); got["F21"] != want {
+		t.Errorf("F21: result = %+v, want %+v", got["F21"], want)
+	}
+	if _, err := os.Stat(filepath.Join(h.c.downloadsDir, "F21.download-error.txt")); err == nil {
+		t.Error("F21: an error file was written for an external file")
+	}
+	h.rt.FlushNotes()
+	if warned := h.stderr.String(); strings.Contains(warned, "F21") || !strings.Contains(warned, "F20") || !strings.Contains(warned, "F22") {
+		t.Errorf("warnings = %q, want one for F20 and F22 and none for F21", warned)
 	}
 	// Credentials never leave Slack: nothing was requested.
 	if len(h.requests) != 0 {

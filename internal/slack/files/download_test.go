@@ -516,6 +516,31 @@ func TestSanitizeFilename(t *testing.T) {
 	}
 }
 
+func TestIsExternal(t *testing.T) {
+	for rawURL, want := range map[string]bool{
+		"https://docs.google.com/document/d/abc": true,
+		"https://www.dropbox.com/s/abc/file.pdf": true,
+		"http://example.com/file":                true,
+		// Lookalikes of Slack hosts are external: nothing is sent to them.
+		"https://evil-slack.com/files/a":           true,
+		"https://slack.com.evil.org/files/a":       true,
+		"https://files.slack.com@evil.org/files/a": true,
+		// A Slack host, whatever else is wrong with the URL: the download
+		// is attempted and refused with an explanation.
+		"https://evil@files.slack.com/files/a":         false,
+		"https://files.slack.com/files-pri/T1-F1/a.md": false,
+		"https://acme.slack.com/files/U1/F1/a.md":      false,
+		"http://files.slack.com/files/plain.txt":       false,
+		"":                                             false,
+		"/relative/path":                               false,
+		"://not a url":                                 false,
+	} {
+		if got := IsExternal(rawURL); got != want {
+			t.Errorf("IsExternal(%q) = %v, want %v", rawURL, got, want)
+		}
+	}
+}
+
 func TestTryDownload(t *testing.T) {
 	ctx := context.Background()
 
@@ -556,7 +581,18 @@ func TestTryDownload(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if res.OK || !strings.Contains(res.Error, "docs.google.com") {
+		// Nothing to download, and nothing wrong either.
+		if want := (DownloadResult{OK: true, External: true, URL: "https://docs.google.com/document/d/abc"}); res != want {
+			t.Errorf("result = %+v, want %+v", res, want)
+		}
+	})
+
+	t.Run("a Slack URL that credentials cannot go to is a failure, not an external file", func(t *testing.T) {
+		res, err := TryDownload(ctx, standardClient(serving(200, "", "")), "http://files.slack.com/files/plain.txt", DownloadOptions{DestDir: t.TempDir()})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if res.OK || res.External || !strings.Contains(res.Error, "Refusing to send Slack credentials") {
 			t.Errorf("result = %+v", res)
 		}
 	})

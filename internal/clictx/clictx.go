@@ -16,8 +16,10 @@ import (
 	"github.com/maelvls/slackcli/internal/auth"
 	"github.com/maelvls/slackcli/internal/authextract"
 	"github.com/maelvls/slackcli/internal/output"
+	"github.com/maelvls/slackcli/internal/slack/enrich"
 	"github.com/maelvls/slackcli/internal/slackapi"
 	"github.com/maelvls/slackcli/internal/slackid"
+	"github.com/maelvls/slackcli/internal/trace"
 )
 
 // WorkspaceFlagUsage is the help text shared by every --workspace flag.
@@ -31,7 +33,8 @@ type Extractor func(ctx context.Context) (*authextract.Extracted, error)
 type Context struct {
 	// Store persists credentials.
 	Store *auth.Store
-	// Stdout receives command results; Stderr receives hints and warnings.
+	// Stdout receives command results, with their warnings and hints;
+	// Stderr receives errors and what is said while a command runs.
 	Stdout io.Writer
 	Stderr io.Writer
 	// SafeModeFlag is bound to the global --safe-mode flag.
@@ -46,7 +49,16 @@ type Context struct {
 	// ClientOptions are passed to every slackapi.New call (tests).
 	ClientOptions []slackapi.Option
 
-	mu              sync.Mutex
+	// Incomplete, when set, collects the warnings of optional lookups
+	// (enrich.Collect): they are printed with those of Warnf.
+	Incomplete *enrich.Warnings
+
+	mu sync.Mutex
+	// warnings and hints are the notes about the result that are not
+	// printed yet (see Warnf); incompleteSeen is how many warnings of
+	// Incomplete are.
+	warnings, hints []string
+	incompleteSeen  int
 	disableWatchdog func()
 	// last is what Client resolved most recently (nil if it failed):
 	// WithAutoRefresh uses it to know whose credentials were rejected.
@@ -59,19 +71,46 @@ func New() *Context {
 		Store:   auth.DefaultStore(),
 		Stdout:  os.Stdout,
 		Stderr:  os.Stderr,
-		Desktop: authextract.Desktop,
-		Chrome:  authextract.Chrome,
-		Brave:   authextract.Brave,
-		Firefox: authextract.Firefox,
+		Desktop: traced("Slack Desktop", authextract.Desktop),
+		Chrome:  traced("Chrome", authextract.Chrome),
+		Brave:   traced("Brave", authextract.Brave),
+		Firefox: traced("Firefox", authextract.Firefox),
 	}
-	c.Store.Warnf = c.Hintf
+	// A warning of the store is one about the result, like the others.
+	c.Store.Warnf = func(format string, args ...any) {
+		c.Warnf(strings.TrimPrefix(format, "warning: "), args...)
+	}
 	return c
 }
 
-// Print writes a command result to Stdout as pruned JSON.
-func (c *Context) Print(v any) error { return output.Write(c.Stdout, v) }
+// traced makes every run of an extractor a span of the trace, whoever
+// runs it: the automatic lookup of credentials, the refresh of a session
+// that expired, an "auth import-…" command. An extraction reads the files
+// of another application and may ask the keychain: it is one of the
+// things a command can wait on.
+func traced(source string, extract Extractor) Extractor {
+	return func(ctx context.Context) (*authextract.Extracted, error) {
+		span := trace.Begin("credentials import", source)
+		extracted, err := extract(ctx)
+		span.EndErr(err)
+		return extracted, err
+	}
+}
 
-// Hintf writes a line to Stderr (warnings, hints; never results).
+// Print writes a command result to Stdout as pruned JSON, with the
+// warnings and hints recorded so far (Warnf, ResultHintf).
+func (c *Context) Print(v any) error {
+	compact, err := output.MarshalCompact(v)
+	if err != nil {
+		return err
+	}
+	return c.PrintCompact(compact)
+}
+
+// Hintf writes a line to Stderr at once: what a human has to read while
+// the command runs, and the notes of commands that print text. Never
+// results; and not what is said about a JSON result either, which goes in
+// it (Warnf, ResultHintf).
 func (c *Context) Hintf(format string, args ...any) {
 	fmt.Fprintf(c.Stderr, strings.TrimRight(format, "\n")+"\n", args...)
 }

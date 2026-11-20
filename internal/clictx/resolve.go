@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"slices"
 	"strings"
 
 	"github.com/maelvls/slackcli/internal/appinfo"
@@ -26,8 +27,16 @@ type Resolved struct {
 }
 
 func (c *Context) resolved(a slackapi.Auth, workspaceURL string, fromStore bool) *Resolved {
+	opts := c.ClientOptions
+	// The session of a workspace of an Enterprise Grid is refused a few
+	// methods that the session of its organisation is allowed: see
+	// orgFallback. Only among stored sessions: SLACK_TOKEN is one identity,
+	// and nothing else is used in its place.
+	if fromStore && a.IsBrowser() && !IsOrgURL(workspaceURL) {
+		opts = append(slices.Clone(opts), slackapi.WithFallback(c.orgFallback(a, workspaceURL)))
+	}
 	return &Resolved{
-		Client:       slackapi.New(a, workspaceURL, c.ClientOptions...),
+		Client:       slackapi.New(a, workspaceURL, opts...),
 		Auth:         a,
 		WorkspaceURL: workspaceURL,
 		fromStore:    fromStore,

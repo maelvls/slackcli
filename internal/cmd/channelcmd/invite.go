@@ -52,7 +52,7 @@ Every target is tried. Prints JSON saying what happened to each:
   invited_user_ids             members added now
   already_in_channel_user_ids  members who were already in the channel
   unresolved_users             --users entries matching no single member
-                               (the reason is printed on stderr)
+                               (the reason is in "warnings")
   failed                       [{target, error}] invites Slack refused
 With --external: channel_id, external, external_limited, invited_emails,
 already_invited_emails, failed.
@@ -162,7 +162,7 @@ func (inv *invitation) run(ctx context.Context, loc cmdutil.Located) error {
 			for _, r := range resolved {
 				if r.Err != nil {
 					inv.unresolved = append(inv.unresolved, r.Input)
-					inv.rt.Hintf("%v", r.Err)
+					inv.rt.Warnf("%v", r.Err)
 					continue
 				}
 				inv.pending = append(inv.pending, r.ID)

@@ -2,7 +2,6 @@
 package searchcmd
 
 import (
-	"context"
 	"fmt"
 	"strings"
 
@@ -40,9 +39,10 @@ channel_name, ts, time (ts as a local date and time), author: {user_id,
 bot_id, name}, content (Markdown), files and permalink; file results have
 title, mimetype, mode, path (the local download) and permalink. A file that
 could not be downloaded keeps its entry, with "error" and a path to a file
-holding the reason. The list searched for ("messages", "files", or both for
-"search all") is always present: it is [] when nothing matches, with a hint
-on stderr.
+holding the reason, and is named in "warnings". A file that Slack does not
+host (a Google Docs link) has "external": true and its "url" instead of a
+path. The list searched for ("messages", "files", or both for "search all")
+is always present: it is [] when nothing matches, with a hint in "hints".
 
 There are two ways of searching:
 
@@ -91,7 +91,7 @@ two ways of searching and how to get more results than --limit.`,
 			return cobra.ExactArgs(1)(cmd, args)
 		},
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return run(cmd.Context(), rt, kind, args[0], f)
+			return run(cmd, rt, kind, args[0], f)
 		},
 	}
 	fl := cmd.Flags()
@@ -109,9 +109,8 @@ two ways of searching and how to get more results than --limit.`,
 		"Keep only: any (everything), text (messages without files; text/plain files), image, snippet, file (messages with any file; every file)")
 	fl.IntVar(&f.limit, "limit", search.DefaultLimit,
 		fmt.Sprintf("Maximum number of results of each kind, 1 to %d. When more match, more_messages / more_files in the output say how to get them", search.MaxLimit))
-	fl.IntVar(&f.maxContentChars, "max-content-chars", search.DefaultMaxContentChars,
-		"Truncate the content of each message to this many characters (-1 for unlimited)")
-	fl.BoolVar(&f.noDownload, "no-download", false,
+	cmdutil.AddMaxBodyCharsFlag(cmd, &f.maxContentChars)
+	fl.BoolVar(&f.noDownload, cmdutil.NoDownloadFlagName, false,
 		"Do not download files: results list them without a local path (file results keep their permalink)")
 	fl.BoolVar(&f.resolveUsers, "resolve-users", false,
 		"Add referenced_users: the profiles of the authors and of the users mentioned in the messages found, keyed by user ID (the author's handle is on each result anyway, as author.name; this makes it the display name)")
@@ -120,7 +119,8 @@ two ways of searching and how to get more results than --limit.`,
 	return cmd
 }
 
-func run(ctx context.Context, rt *clictx.Context, kind search.Kind, query string, f flags) error {
+func run(cmd *cobra.Command, rt *clictx.Context, kind search.Kind, query string, f flags) error {
+	ctx := cmd.Context()
 	contentType, err := search.ParseContentType(f.contentType)
 	if err != nil {
 		return fmt.Errorf("--content-type: %w", err)
@@ -128,7 +128,7 @@ func run(ctx context.Context, rt *clictx.Context, kind search.Kind, query string
 	if err := cmdutil.CheckLimit(f.limit, search.MaxLimit, "to go further back, repeat the search with an earlier --before date"); err != nil {
 		return err
 	}
-	if err := cmdutil.CheckMaxChars("--max-content-chars", f.maxContentChars); err != nil {
+	if err := cmdutil.CheckMaxBodyChars(cmd, f.maxContentChars); err != nil {
 		return err
 	}
 
@@ -161,7 +161,7 @@ func run(ctx context.Context, rt *clictx.Context, kind search.Kind, query string
 		return err
 	}
 	for _, w := range result.Warnings {
-		rt.Hintf("Warning: %s", w)
+		rt.Warnf("%s", w)
 	}
 	// The lists this kind of search is about are printed even when empty.
 	var lists []string
@@ -175,9 +175,9 @@ func run(ctx context.Context, rt *clictx.Context, kind search.Kind, query string
 	// usual reason for an empty result that should not be.
 	if len(result.Messages) == 0 && len(result.Files) == 0 && result.MoreMessages == nil && result.MoreFiles == nil {
 		if len(f.channels) > 0 {
-			rt.Hintf("Nothing matched in the channels scanned. With --channel only top-level messages are looked at, not thread replies, and files are matched on their title and name: search without --channel (the channel can go in the query: in:#name) to use Slack's index, which has both.")
+			rt.ResultHintf("Nothing matched in the channels scanned. With --channel only top-level messages are looked at, not thread replies, and files are matched on their title and name: search without --channel (the channel can go in the query: in:#name) to use Slack's index, which has both.")
 		} else {
-			rt.Hintf("Nothing matched. Slack's search requires every word of the query, and each operator narrows it: in:@user is the DM with that user, from:@user what that user wrote. Fewer words or operators widen the search.")
+			rt.ResultHintf("Nothing matched. Slack's search requires every word of the query, and each operator narrows it: in:@user is the DM with that user, from:@user what that user wrote. Fewer words or operators widen the search.")
 		}
 	}
 	return cmdutil.PrintList(rt, result, lists...)

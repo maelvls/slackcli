@@ -93,7 +93,7 @@ to move them into the keychain.
 Prints {version, updated_at, default_workspace_url, workspaces: [{
 workspace_url, workspace_name, auth_type, token, cookie_d, default, secrets,
 secrets_storage, hint}], environment, hint}. "workspaces" is [] when none is
-configured (a hint on stderr then says how to add credentials). "environment"
+configured (a hint in "hints" then says how to add credentials). "environment"
 is present when SLACK_TOKEN is set; its "error" says so when that token
 cannot be used.
 
@@ -148,7 +148,7 @@ until "auth set-default" is run; "hint" says so.`,
 				out.Workspaces = append(out.Workspaces, row)
 			}
 			if len(out.Workspaces) == 0 && out.Environment == nil {
-				rt.Hintf(`No Slack credentials are configured: run "%[1]s auth import-desktop" (also: import-chrome, import-brave, import-firefox), save a token with "%[1]s auth add", or set SLACK_TOKEN.`, appinfo.Name)
+				rt.ResultHintf(`No Slack credentials are configured: run "%[1]s auth import-desktop" (also: import-chrome, import-brave, import-firefox), save a token with "%[1]s auth add", or set SLACK_TOKEN.`, appinfo.Name)
 			}
 			// "workspaces" is printed even when empty.
 			return cmdutil.PrintList(rt, out, "workspaces")

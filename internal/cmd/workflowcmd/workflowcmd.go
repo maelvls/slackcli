@@ -46,8 +46,8 @@ Prints {"channel_id", "workflows": [{"title", "trigger_id", "link"?,
 "app_id"?, "featured"}]}: bookmarked workflows first, then featured ones
 that are not bookmarked; "workflows" is [] when there are none. If Slack
 refuses the featured-workflows lookup (not every workspace or token has
-it), only bookmarked workflows are listed and a warning is printed on
-stderr. No side effects.`,
+it), only bookmarked workflows are listed and "warnings" says so. No side
+effects.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			channel, err := cmdutil.ParseChannel(rt, args[0], workspace)
@@ -62,7 +62,7 @@ stderr. No side effects.`,
 				return err
 			}
 			if payload.FeaturedErr != nil {
-				rt.Hintf("Warning: featured workflows could not be listed (%v); only bookmarked workflows are shown.", payload.FeaturedErr)
+				rt.Warnf("featured workflows could not be listed (%v); only bookmarked workflows are shown.", payload.FeaturedErr)
 			}
 			return cmdutil.PrintList(rt, payload, "workflows")
 		},

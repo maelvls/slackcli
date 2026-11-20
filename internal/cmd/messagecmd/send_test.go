@@ -287,9 +287,9 @@ func TestSendAttachmentWithoutText(t *testing.T) {
 func TestSendAttachmentWarnsThatListsAreNotConverted(t *testing.T) {
 	h := newHarness(t)
 	uploadFixtures(h)
-	h.mustRun("send", testChannel, "- one\n- two", "--attach", writeFile(t, "a.txt", "a"))
-	if !strings.Contains(h.stderr.String(), "rich text formatting is not supported with file attachments") {
-		t.Errorf("stderr = %q", h.stderr.String())
+	got := h.mustRun("send", testChannel, "- one\n- two", "--attach", writeFile(t, "a.txt", "a"))
+	if want := []any{"rich text formatting is not supported with file attachments; sending as plain text."}; !reflect.DeepEqual(got["warnings"], want) || h.stderr.Len() != 0 {
+		t.Errorf("warnings = %q, stderr = %q", got["warnings"], h.stderr.String())
 	}
 }
 

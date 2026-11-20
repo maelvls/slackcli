@@ -49,6 +49,10 @@ type harness struct {
 	failOnce string
 	// failWith makes every call to a method fail with that error code.
 	failWith map[string]string
+	// gridRestricted makes the first call to each of these methods fail
+	// with team_is_restricted, as a workspace of an Enterprise Grid does:
+	// the next one (made with the session of the organisation) is answered.
+	gridRestricted []string
 	// onCall, when set, is told of every API call before it is answered.
 	onCall func(method string)
 
@@ -82,7 +86,13 @@ func newHarness(t *testing.T) *harness {
 		if code := h.failWith[method]; code != "" {
 			return map[string]any{"ok": false, "error": code}, nil
 		}
+		if i := slices.Index(h.gridRestricted, method); i >= 0 {
+			h.gridRestricted = slices.Delete(h.gridRestricted, i, i+1)
+			return map[string]any{"ok": false, "error": "team_is_restricted"}, nil
+		}
 		switch method {
+		case "auth.test":
+			return map[string]any{"ok": true, "enterprise_id": "E0ACME", "user_id": "U0ME"}, nil
 		case "drafts.list":
 			return map[string]any{"ok": true, "drafts": h.drafts}, nil
 		case "drafts.create":
@@ -650,6 +660,54 @@ func TestDelete(t *testing.T) {
 	})
 }
 
+// On an Enterprise Grid, Slack refuses drafts.list and drafts.delete to the
+// session of a workspace (team_is_restricted) and allows them to the
+// session of its organisation: "draft list" and "draft delete" work all
+// the same when that session is stored, and say what to do when it is not.
+func TestListAndDeleteOnEnterpriseGrid(t *testing.T) {
+	const orgURL = "https://acme.enterprise.slack.com"
+	org := browserWorkspace()
+	org.URL = orgURL
+
+	t.Run("with the session of the organisation", func(t *testing.T) {
+		h := newHarness(t)
+		if err := h.rt.Store.Upsert(org); err != nil {
+			t.Fatal(err)
+		}
+		h.drafts = []any{draft(map[string]any{"last_updated_ts": "1700000000.42"})}
+
+		h.gridRestricted = []string{"drafts.list"}
+		var listed struct {
+			Count int `json:"count"`
+		}
+		if err := json.Unmarshal([]byte(h.mustRun("list", "--workspace", workspaceURL)), &listed); err != nil || listed.Count != 1 {
+			t.Errorf("list: count = %d, err = %v, want the draft", listed.Count, err)
+		}
+		if n := len(h.callsTo("drafts.list")); n != 2 {
+			t.Errorf("%d drafts.list calls, want the refused one and its retry", n)
+		}
+
+		h.gridRestricted = []string{"drafts.list", "drafts.delete"}
+		wantJSON(t, h.mustRun("delete", "Dr123", "--workspace", workspaceURL), `{"ok": true, "draft_id": "Dr123"}`)
+		if n := len(h.callsTo("drafts.delete")); n != 2 {
+			t.Errorf("%d drafts.delete calls, want the refused one and its retry", n)
+		}
+		// The organisation is checked once per command, not once per call.
+		if n := len(h.callsTo("auth.test")); n != 4 {
+			t.Errorf("%d auth.test calls for two commands, want 2 each (the workspace and the organisation)", n)
+		}
+	})
+
+	t.Run("without it", func(t *testing.T) {
+		h := newHarness(t)
+		h.gridRestricted = []string{"drafts.list"}
+		h.mustFail("--workspace <org>.enterprise.slack.com", "list", "--workspace", workspaceURL)
+		if got := h.methods(); !reflect.DeepEqual(got, []string{"drafts.list"}) {
+			t.Errorf("calls = %v, want the one refused call", got)
+		}
+	})
+}
+
 func TestList(t *testing.T) {
 	h := newHarness(t)
 	h.drafts = []any{
@@ -926,7 +984,10 @@ func TestFailedDraftDeletesItsUploads(t *testing.T) {
 		if !slackapi.IsErrorCode(err, "denied") {
 			t.Fatalf("err = %v, want Slack's denied", err)
 		}
-		if !strings.Contains(h.stderr.String(), "F-a.png") {
+		// Nothing was printed for the warning to go in: the root command
+		// then writes it on stderr.
+		h.rt.FlushNotes()
+		if !strings.Contains(h.stderr.String(), "Warning: could not delete the uploaded files") || !strings.Contains(h.stderr.String(), "F-a.png") {
 			t.Errorf("stderr = %q, want a warning naming the orphaned file", h.stderr.String())
 		}
 	})

@@ -2,6 +2,7 @@ package channelcmd
 
 import (
 	"context"
+	"fmt"
 	"reflect"
 	"strings"
 	"testing"
@@ -76,9 +77,10 @@ func TestInviteResumesAfterAnAuthRefresh(t *testing.T) {
 		if n := len(h.only("users.list")); n != 1 {
 			t.Errorf("users.list calls = %d, want 1", n)
 		}
-		if n := strings.Count(h.stderr.String(), `could not resolve user "@ghost"`); n != 1 {
-			t.Errorf("the reason @ghost is unresolved is printed %d times: %q", n, h.stderr)
+		if n := strings.Count(fmt.Sprint(out["warnings"]), `could not resolve user "@ghost"`); n != 1 {
+			t.Errorf("the reason @ghost is unresolved is printed %d times: %s", n, h.stdout)
 		}
+		delete(out, "warnings")
 		want := map[string]any{
 			"channel_id":       "C000000001",
 			"invited_user_ids": []any{"U000000002", "U000000003"},

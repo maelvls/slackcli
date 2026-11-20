@@ -13,8 +13,8 @@ import (
 )
 
 // PrintList prints the result of a list-style command like
-// clictx.Context.Print (pruned JSON on stdout, indented on a terminal),
-// except that the top-level
+// clictx.Context.Print (pruned JSON on stdout, indented on a terminal,
+// with the pending warnings and hints), except that the top-level
 // collections named by keys are always present: an empty one is printed
 // as [] instead of being pruned, so that a consumer iterating over it
 // (jq '.messages[]') sees "nothing found" rather than a missing field.
@@ -30,13 +30,7 @@ func PrintList(rt *clictx.Context, v any, keys ...string) error {
 	if err != nil {
 		return err
 	}
-	if output.Indented(rt.Stdout) {
-		if out, err = output.Indent(out); err != nil {
-			return err
-		}
-	}
-	_, err = fmt.Fprintf(rt.Stdout, "%s\n", out)
-	return err
+	return rt.PrintCompact(out)
 }
 
 // withEmptyLists returns pruned, the output.MarshalCompact rendering of v,

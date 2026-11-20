@@ -244,38 +244,58 @@ func ResolveName(ctx context.Context, client *slackapi.Client, channelID string)
 	return channelID
 }
 
-// LookupName returns a human-readable name for a conversation ID: the
-// channel name ("general"), or for a DM the other user's display name,
-// else their real name, else their handle. It returns "" when Slack has
-// no name for the conversation.
+// Info is what Lookup learns about a conversation.
+type Info struct {
+	// Name is the channel name ("general"), or for a DM the other user's
+	// display name, else their real name, else their handle; "" when Slack
+	// has no name for the conversation.
+	Name string
+	// LastRead is the caller's read cursor, the ts of the last message
+	// read ("" when Slack does not give one).
+	LastRead string
+}
+
+// LookupName returns a human-readable name for a conversation ID (see
+// Info.Name).
 //
 // The error is that of the failed conversations.info or users.info call.
 // A name is an enrichment (see package enrich): callers go on without it,
 // except when enrich.MustAbort(ctx, err), and stop looking names up once
 // one lookup has been rate limited.
 func LookupName(ctx context.Context, client *slackapi.Client, channelID string) (string, error) {
+	info, err := Lookup(ctx, client, channelID)
+	return info.Name, err
+}
+
+// Lookup is LookupName with the read cursor of the conversation. When the
+// name of a DM cannot be had (the users.info call failed), the Info
+// returned with the error still holds the read cursor.
+func Lookup(ctx context.Context, client *slackapi.Client, channelID string) (Info, error) {
 	resp, err := client.API(ctx, "conversations.info", map[string]any{"channel": channelID})
 	if err != nil {
-		return "", err
+		return Info{}, err
 	}
 	ch := jsonx.Map(resp["channel"])
+	info := Info{LastRead: jsonx.Str(ch["last_read"])}
 	if !jsonx.Bool(ch["is_im"]) {
-		return cmp.Or(jsonx.Str(ch["name"]), jsonx.Str(ch["name_normalized"])), nil
+		info.Name = cmp.Or(jsonx.Str(ch["name"]), jsonx.Str(ch["name_normalized"]))
+		return info, nil
 	}
 	userID := jsonx.Str(ch["user"])
 	if userID == "" {
-		return "", nil
+		return info, nil
 	}
 	resp, err = client.API(ctx, "users.info", map[string]any{"user": userID})
 	if err != nil {
-		return "", err
+		return info, err
 	}
 	user := jsonx.Map(resp["user"])
 	profile := jsonx.Map(user["profile"])
-	return cmp.Or(
+	info.Name = cmp.Or(
 		jsonx.Str(profile["display_name"]),
 		jsonx.Str(user["real_name"]),
 		jsonx.Str(profile["real_name"]),
 		jsonx.Str(user["name"]),
-	), nil
+	)
+	return info, nil
 }

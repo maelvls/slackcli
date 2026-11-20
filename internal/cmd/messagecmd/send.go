@@ -21,7 +21,9 @@ import (
 )
 
 type sendOptions struct {
-	workspace      string
+	workspace string
+	// text is --text, the hidden alternative to the positional [text].
+	text           string
 	threadTS       string
 	replyBroadcast bool
 	attach         []string
@@ -66,7 +68,7 @@ as real Slack lists. It is required unless --attach or --blocks is given.
 Prints {ok, channel_id, ts, thread_ts, permalink}; with --schedule/--schedule-in
 {ok, channel_id, scheduled_message_id, post_at, thread_ts}; with --attach
 {ok, channel_id, thread_ts, files}. "permalink" is only left out, with a
-warning on stderr, when Slack would not give it for a token that names no
+warning in "warnings", when Slack would not give it for a token that names no
 workspace: the message is sent all the same.
 
 [text] of several words may start with a dash ("- one\n- two"). A single word
@@ -82,8 +84,11 @@ mode, and so is running in CI or without a browser, where no editor can open:
 the editor's link is never printed in safe mode.`, appinfo.EnvName("SAFE_MODE"), appinfo.Name),
 		Args: cobra.RangeArgs(1, 2),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			text := ""
+			text := opts.text
 			if len(args) == 2 {
+				if cmd.Flags().Changed("text") {
+					return errors.New("the text is given twice, as [text] and with --text: pass it once")
+				}
 				text = args[1]
 			}
 			return c.runSend(cmd, args[0], text, opts)
@@ -98,6 +103,10 @@ the editor's link is never printed in safe mode.`, appinfo.EnvName("SAFE_MODE"),
 	f.StringVar(&opts.schedule, "schedule", "", "Send later, at "+scheduled.AtHelp+"; within 120 days. Cannot be combined with --schedule-in or --attach")
 	f.StringVar(&opts.scheduleIn, "schedule-in", "", "Send later, after "+scheduled.InHelp+" of this process; within 120 days. Cannot be combined with --schedule or --attach")
 	f.BoolVar(&opts.noUnfurl, "no-unfurl", false, "Suppress link and media previews. Cannot be combined with --attach")
+	// agent-slack had --text, and agents still reach for it: it is taken
+	// for the positional [text], which the help documents alone.
+	f.StringVar(&opts.text, "text", "", "The message text: an alternative to the positional [text]")
+	_ = f.MarkHidden("text")
 	// [text] may start with "- ".
 	return cmdutil.AllowDashText(cmd)
 }
@@ -224,7 +233,7 @@ func (c *command) runSend(cmd *cobra.Command, targetInput, text string, opts sen
 func missingTextMessage(cmd *cobra.Command) string {
 	msg := "[text] is required unless --attach or --blocks is given"
 	if cmd.Flags().NFlag() > 0 {
-		msg += fmt.Sprintf(`; if the text is a single word starting with a dash, which is read as a flag, put it after "--": %s <target> -- "--text"`, cmd.CommandPath())
+		msg += fmt.Sprintf(`; if the text is a single word starting with a dash, which is read as a flag, put it after "--": %s <target> -- "-1"`, cmd.CommandPath())
 	}
 	return msg
 }
@@ -277,7 +286,7 @@ func (c *command) sendToChannel(ctx context.Context, loc cmdutil.Located, m outg
 		result.ScheduledMessageID = jsonx.Str(resp["scheduled_message_id"])
 		result.PostAt = cmp.Or(scheduled.UnixSeconds(resp["post_at"]), m.postAt)
 		if result.ScheduledMessageID == "" {
-			c.rt.Hintf(`Warning: Slack accepted the scheduled message but returned no scheduled_message_id; find it with "%s message scheduled list".`, appinfo.Name)
+			c.rt.Warnf(`Slack accepted the scheduled message but returned no scheduled_message_id; find it with "%s message scheduled list".`, appinfo.Name)
 		}
 
 	case len(m.attach) == 0:
@@ -292,7 +301,7 @@ func (c *command) sendToChannel(ctx context.Context, loc cmdutil.Located, m outg
 
 	default:
 		if m.blocks != nil {
-			c.rt.Hintf("Warning: rich text formatting is not supported with file attachments; sending as plain text.")
+			c.rt.Warnf("rich text formatting is not supported with file attachments; sending as plain text.")
 		}
 		uploaded, err := upload.ToChannel(ctx, loc.Client, upload.Destination{
 			ChannelID:      loc.ChannelID,

@@ -73,6 +73,10 @@ type CompactFile struct {
 	// Path is the local file, or the error file when Error is set.
 	Path  string `json:"path,omitempty"`
 	Error string `json:"error,omitempty"`
+	// External marks a file that is not hosted by Slack (a Google Docs
+	// link…): it has no Path, and URL is where to open it.
+	External bool   `json:"external,omitempty"`
+	URL      string `json:"url,omitempty"`
 }
 
 // CompactReaction is one emoji and who reacted with it.
@@ -134,7 +138,7 @@ func ToCompact(msg Message, opts CompactOptions) CompactMessage {
 		if !ok {
 			continue
 		}
-		file := CompactFile{Name: f.Name, Mimetype: f.Mimetype, Mode: f.Mode, Path: dl.Path}
+		file := CompactFile{Name: f.Name, Mimetype: f.Mimetype, Mode: f.Mode, Path: dl.Path, External: dl.External, URL: dl.URL}
 		if !dl.OK {
 			file.Error = dl.Error
 		}

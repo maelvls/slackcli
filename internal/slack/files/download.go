@@ -19,6 +19,7 @@ import (
 
 	"github.com/maelvls/slackcli/internal/appinfo"
 	"github.com/maelvls/slackcli/internal/slackapi"
+	"github.com/maelvls/slackcli/internal/trace"
 )
 
 const (
@@ -68,6 +69,21 @@ type DownloadResult struct {
 	// Error and HTTPStatus describe a failure.
 	Error      string `json:"error,omitempty"`
 	HTTPStatus int    `json:"http_status,omitempty"`
+	// External means the file is not hosted by Slack (a Google Docs link,
+	// for instance): there was nothing to download, which is not a
+	// failure (OK is set, Path is empty). URL is where it lives.
+	External bool   `json:"external,omitempty"`
+	URL      string `json:"url,omitempty"`
+}
+
+// IsExternal reports whether rawURL, the private URL of a file, points
+// outside Slack: the file is then only a link (to Google Drive, Dropbox…)
+// that Slack lists among the files of a message. A URL that cannot be
+// told (unparsable, without a host) is not external: downloading it fails
+// with an explanation.
+func IsExternal(rawURL string) bool {
+	u, err := url.Parse(rawURL)
+	return err == nil && u.Hostname() != "" && !slackapi.IsSlackHost(u.Hostname())
 }
 
 // DownloadOptions tunes Download.
@@ -174,7 +190,7 @@ func authorize(client *slackapi.Client, req *http.Request) {
 //
 // Failures to fetch are *DownloadError (use errors.Is with ErrLoginPage /
 // ErrNotSlackHost for the cause); see TryDownload to get them as a value.
-func Download(ctx context.Context, client *slackapi.Client, rawURL string, opts DownloadOptions) (string, error) {
+func Download(ctx context.Context, client *slackapi.Client, rawURL string, opts DownloadOptions) (_ string, retErr error) {
 	dir := opts.DestDir
 	if dir == "" {
 		d, err := appinfo.EnsureDownloadsDir()
@@ -204,6 +220,20 @@ func Download(ctx context.Context, client *slackapi.Client, rawURL string, opts 
 		}
 	}
 
+	// Not named: the name of a file is its author's.
+	span := trace.Begin("download", "")
+	defer func() {
+		var de *DownloadError
+		switch {
+		case retErr == nil:
+			span.End("")
+		case errors.As(retErr, &de) || ctx.Err() != nil:
+			span.EndErr(retErr)
+		default:
+			// An error of the disk, which names the file.
+			span.Fail("could not write the file")
+		}
+	}()
 	resp, err := Get(ctx, client, rawURL)
 	if err != nil {
 		return "", err
@@ -290,7 +320,11 @@ func writeAtomic(dest string, body io.Reader) error {
 // TryDownload is Download with fetch failures (*DownloadError) reported in
 // the result instead of as an error. The returned error is only non-nil
 // for local failures (disk, cancellation), which should abort the command.
+// An external file (IsExternal) is not fetched and not a failure either.
 func TryDownload(ctx context.Context, client *slackapi.Client, rawURL string, opts DownloadOptions) (DownloadResult, error) {
+	if IsExternal(rawURL) {
+		return DownloadResult{OK: true, External: true, URL: rawURL}, nil
+	}
 	p, err := Download(ctx, client, rawURL, opts)
 	if err == nil {
 		return DownloadResult{OK: true, Path: p}, nil

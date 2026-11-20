@@ -101,13 +101,13 @@ func TestHelpContracts(t *testing.T) {
 func TestCommandSurface(t *testing.T) {
 	root := New(&clictx.Context{})
 	allFlags := []string{
-		"workspace", "ts", "thread-ts", "max-body-chars", "include-reactions", "resolve-users", "refresh-users",
+		"workspace", "ts", "thread-ts", "max-body-chars", "max-content-chars", "no-download", "include-reactions", "resolve-users", "refresh-users",
 		"limit", "oldest", "latest", "with-reaction", "without-reaction", "reply-broadcast", "attach", "blocks",
 		"schedule", "schedule-in", "no-unfurl", "channel", "cursor",
 	}
 	for path, flags := range map[string][]string{
-		"get":              {"workspace", "ts", "thread-ts", "max-body-chars", "include-reactions", "resolve-users", "refresh-users"},
-		"list":             {"workspace", "thread-ts", "ts", "limit", "oldest", "latest", "with-reaction", "without-reaction", "max-body-chars", "include-reactions", "resolve-users", "refresh-users"},
+		"get":              {"workspace", "ts", "thread-ts", "max-body-chars", "max-content-chars", "no-download", "include-reactions", "resolve-users", "refresh-users"},
+		"list":             {"workspace", "thread-ts", "ts", "limit", "oldest", "latest", "with-reaction", "without-reaction", "max-body-chars", "max-content-chars", "no-download", "include-reactions", "resolve-users", "refresh-users"},
 		"send":             {"workspace", "thread-ts", "reply-broadcast", "attach", "blocks", "schedule", "schedule-in", "no-unfurl"},
 		"edit":             {"workspace", "ts", "blocks"},
 		"delete":           {"workspace", "ts"},
@@ -125,10 +125,19 @@ func TestCommandSurface(t *testing.T) {
 		}
 	}
 	// The implicit "get" takes the flags of "get".
-	for _, name := range []string{"workspace", "ts", "thread-ts", "max-body-chars", "include-reactions", "resolve-users", "refresh-users"} {
+	for _, name := range []string{"workspace", "ts", "thread-ts", "max-body-chars", "max-content-chars", "no-download", "include-reactions", "resolve-users", "refresh-users"} {
 		if root.Flags().Lookup(name) == nil {
 			t.Errorf("message: missing flag --%s", name)
 		}
+	}
+	// --max-content-chars, the name of the flag on "search" until it was
+	// made the same everywhere, is accepted but not advertised.
+	for _, path := range []string{"get", "list"} {
+		cmd := findCommand(t, root, path)
+		if !cmd.Flags().Lookup("max-content-chars").Hidden || strings.Contains(cmd.UsageString(), "max-content-chars") {
+			t.Errorf("%s: --max-content-chars is not a hidden alias", path)
+		}
+		wantContains(t, path+" help", cmd.Long, "--no-download")
 	}
 	// compose and draft are registered (by their own packages).
 	for _, name := range []string{"compose", "draft"} {

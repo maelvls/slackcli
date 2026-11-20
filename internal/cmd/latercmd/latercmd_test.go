@@ -159,7 +159,16 @@ func TestListFlags(t *testing.T) {
 	h := newHarness(t)
 	h.serve = serveSaved
 
-	out, err := h.run("--state", "completed", "--max-body-chars", "5")
+	out, err := h.run("--state", "completed", "--max-content-chars", "5")
+	if err != nil {
+		t.Fatal(err)
+	}
+	viaAlias := h.stdout.String()
+	h.stdout.Reset()
+	out, err = h.run("--state", "completed", "--max-body-chars", "5")
+	if got := h.stdout.String(); got != viaAlias {
+		t.Errorf("--max-content-chars 5 printed %s, --max-body-chars 5 printed %s", viaAlias, got)
+	}
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -218,6 +227,9 @@ func TestListRejectsGarbageFlags(t *testing.T) {
 		{[]string{"list", "--max-body-chars", "abc"}, "--max-body-chars"},
 		{[]string{"list", "--max-body-chars", "0"}, "--max-body-chars"},
 		{[]string{"list", "--max-body-chars", "-2"}, "--max-body-chars"},
+		// The hidden alias is validated too, under the name typed.
+		{[]string{"list", "--max-content-chars", "0"}, "invalid --max-content-chars value 0"},
+		{[]string{"--max-content-chars", "5", "--max-body-chars", "0"}, "invalid --max-body-chars value 0"},
 		{[]string{"list", "--state", "finished"}, "--state"},
 		{[]string{"list", "--cursor", "offset-x:abc"}, "invalid cursor"},
 		{[]string{"list", "extra"}, "unknown command"},
@@ -487,9 +499,13 @@ func TestHelp(t *testing.T) {
 		}
 	}
 	// `later` alone is `later list`: same flags.
-	for _, flag := range []string{"workspace", "state", "limit", "cursor", "max-body-chars", "counts-only"} {
+	for _, flag := range []string{"workspace", "state", "limit", "cursor", "max-body-chars", "max-content-chars", "counts-only"} {
 		if cmd.Flag(flag) == nil {
 			t.Errorf("later lacks --%s", flag)
 		}
+	}
+	// --max-content-chars is the hidden alias of --max-body-chars.
+	if f := cmd.Flag("max-content-chars"); f == nil || !f.Hidden {
+		t.Error("later: --max-content-chars is not a hidden flag")
 	}
 }

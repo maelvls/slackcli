@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/maelvls/slackcli/internal/appinfo"
+	"github.com/maelvls/slackcli/internal/trace"
 )
 
 // AuthType distinguishes standard tokens from browser session credentials.
@@ -82,6 +83,39 @@ type Client struct {
 	// loopbackForTesting lets credentials go to a loopback address (see
 	// WithLoopbackWorkspaceForTesting).
 	loopbackForTesting bool
+	// fallback retries some refused calls with other credentials (see
+	// WithFallback).
+	fallback *Fallback
+}
+
+// Fallback retries a refused call with the credentials of another client.
+//
+// It exists for Enterprise Grid: a few methods (drafts.list,
+// drafts.delete …) refuse the session of a workspace with
+// team_is_restricted and accept the session of the organisation the
+// workspace belongs to, which is the same person signed in one level up.
+type Fallback struct {
+	// Applies reports whether a call to method that failed with err is to
+	// be retried with the other client.
+	Applies func(method string, err error) bool
+	// Client returns the other client. When there is none, it returns nil
+	// and, if it knows, why: a sentence that takes the place of the
+	// general explanation of the code in the error (APIError.Hint). It is
+	// only called once a call was refused, and may be called again for
+	// the next one: it is expected to remember its answer.
+	Client func(ctx context.Context) (other *Client, why string)
+}
+
+// WithFallback makes the client retry the calls f applies to with the
+// client f provides. The retry is one call: the fallback of a client used
+// as a fallback is not looked at.
+//
+// When the other client is refused as well (its credentials are rejected,
+// or the method is restricted for it too), the error is the refusal of the
+// client that was asked, and says what was tried. Any other failure of the
+// retry is returned as it is.
+func WithFallback(f Fallback) Option {
+	return func(c *Client) { c.fallback = &f }
 }
 
 // Option customises a Client.
@@ -278,9 +312,77 @@ func (c *Client) APIMultipart(ctx context.Context, method string, params map[str
 	return c.call(ctx, method, params, true)
 }
 
+type noRateLimitRetryKey struct{}
+
+// WithoutRateLimitRetry makes the calls made under the returned context
+// fail at once with a *RateLimitError when Slack rate limits them,
+// whatever SLACKCLI_RATE_LIMIT_MAX_WAIT_MS allows. It is for a caller that
+// has a retry policy of its own (see Client.Sleep): the two would
+// otherwise multiply, each try of the caller being up to four of the
+// client.
+func WithoutRateLimitRetry(ctx context.Context) context.Context {
+	return context.WithValue(ctx, noRateLimitRetryKey{}, true)
+}
+
+// RateLimitRetryDisabled reports whether ctx was made by
+// WithoutRateLimitRetry.
+func RateLimitRetryDisabled(ctx context.Context) bool {
+	return ctx.Value(noRateLimitRetryKey{}) != nil
+}
+
+// Sleep waits for d, or until ctx is done, in which case it returns the
+// context's error. It is the wait the client itself makes when Slack rate
+// limits a call (tests replace it with WithSleep), for the callers that
+// have a retry of their own to space out.
+func (c *Client) Sleep(ctx context.Context, d time.Duration) error {
+	span := trace.Begin("wait", d.String())
+	err := c.sleep(ctx, d)
+	span.EndErr(err)
+	return err
+}
+
+// call makes the call and, when it is refused in a way the fallback
+// applies to, makes it once more with the fallback's client.
 func (c *Client) call(ctx context.Context, method string, params map[string]any, multi bool) (map[string]any, error) {
+	resp, err := c.callOnce(ctx, method, params, multi)
+	if err == nil || c.fallback == nil || c.fallback.Applies == nil || c.fallback.Client == nil || !c.fallback.Applies(method, err) {
+		return resp, err
+	}
+	other, why := c.fallback.Client(ctx)
+	if ctx.Err() != nil {
+		// Looking for the other client may take calls of its own. When
+		// the command was interrupted or timed out meanwhile, that is what
+		// happened to this call: the refusal would hide it.
+		return nil, ctx.Err()
+	}
+	if other == nil || other == c {
+		return nil, withHint(err, why)
+	}
+	trace.Logf("%s was refused for %s (%s): retrying with %s", method, c.workspaceURL, ErrorCode(err), other.workspaceURL)
+	resp, otherErr := other.callOnce(ctx, method, params, multi)
+	switch {
+	case otherErr == nil:
+		return resp, nil
+	case ctx.Err() != nil:
+		return nil, otherErr
+	case IsAuthError(otherErr):
+		// The other credentials are of no use: the refusal of the
+		// workspace that was asked for is the answer, with what would
+		// make the retry work.
+		return nil, withHint(err, fmt.Sprintf("these credentials are refused this method, and the ones stored for %s, tried next, were rejected by Slack (%s): import them again with `%s auth import-desktop` (or import-chrome, import-brave, import-firefox)",
+			other.workspaceURL, ErrorCode(otherErr), appinfo.Name))
+	case IsRestricted(otherErr):
+		return nil, withHint(err, fmt.Sprintf("these credentials are refused this method, and so are the ones stored for %s, tried next (%s)",
+			other.workspaceURL, ErrorCode(otherErr)))
+	}
+	return nil, otherErr
+}
+
+func (c *Client) callOnce(ctx context.Context, method string, params map[string]any, multi bool) (map[string]any, error) {
 	if c.handler != nil {
+		span := trace.Begin("api "+method, "")
 		resp, err := c.handler(ctx, method, params)
+		span.EndErr(err)
 		if err != nil {
 			return nil, err
 		}
@@ -307,48 +409,74 @@ func (c *Client) call(ctx context.Context, method string, params map[string]any,
 
 	timeout := APITimeout()
 	for attempt := 0; ; attempt++ {
+		detail := ""
+		if attempt > 0 {
+			detail = fmt.Sprintf("(attempt %d)", attempt+1)
+		}
+		span := trace.Begin("api "+method, detail)
 		status, header, body, err := c.post(ctx, endpoint, fields, multi, timeout)
 		if err != nil {
 			if ctx.Err() != nil {
+				span.Fail("cancelled: " + ctx.Err().Error())
 				return nil, ctx.Err()
 			}
 			var ne interface{ Timeout() bool }
 			if errors.Is(err, context.DeadlineExceeded) || (errors.As(err, &ne) && ne.Timeout()) {
-				return nil, timeoutError(method, timeout)
+				span.Fail("no answer after " + timeout.String())
+				return nil, &TimeoutError{Method: method, Timeout: timeout}
 			}
-			return nil, fmt.Errorf("calling Slack API %s: %w", method, err)
+			span.Fail("network error")
+			return nil, &NetworkError{Method: method, Err: err}
 		}
 
 		if status == http.StatusTooManyRequests {
 			retryAfter := parseRetryAfter(header.Get("Retry-After"))
 			maxWait := RateLimitMaxWait()
-			if attempt >= maxRateLimitRetry || retryAfter > maxWait {
+			span.Fail(fmt.Sprintf("HTTP 429, Retry-After %s", retryAfter))
+			if attempt >= maxRateLimitRetry || retryAfter > maxWait || RateLimitRetryDisabled(ctx) {
 				return nil, &RateLimitError{Method: method, RetryAfter: retryAfter, MaxWait: maxWait}
 			}
-			if err := c.sleep(ctx, retryAfter); err != nil {
+			wait := trace.Begin("rate-limit wait", method)
+			err := c.sleep(ctx, retryAfter)
+			wait.EndErr(err)
+			if err != nil {
 				return nil, err
 			}
 			continue
 		}
-
+		// The span ends as the call does: a failure for everything that
+		// is returned as an error.
 		if status >= 300 && status <= 399 {
+			span.Fail(fmt.Sprintf("HTTP %d, a redirect", status))
 			return nil, c.redirectError(method, status, header.Get("Location"))
 		}
 
 		var data map[string]any
 		_ = json.Unmarshal(body, &data)
-		if status < 200 || status > 299 {
-			if code, _ := data["error"].(string); code != "" {
-				return nil, newAPIError(method, data)
+		code, _ := data["error"].(string)
+		switch {
+		case status < 200 || status > 299:
+			if code != "" {
+				span.Fail(fmt.Sprintf("HTTP %d, %s", status, code))
+				apiErr := newAPIError(method, data)
+				apiErr.Status = status
+				return nil, apiErr
 			}
-			return nil, fmt.Errorf("Slack HTTP %d calling %s", status, method)
-		}
-		if data == nil {
+			span.Fail(fmt.Sprintf("HTTP %d", status))
+			return nil, &HTTPStatusError{Method: method, Status: status}
+		case data == nil:
+			span.Fail(fmt.Sprintf("HTTP %d, not JSON", status))
 			return nil, fmt.Errorf("Slack API %s returned a non-JSON response", method)
+		case data["ok"] != true:
+			if code == "" {
+				code = "not ok"
+			}
+			span.Fail(fmt.Sprintf("HTTP %d, %s", status, code))
+			apiErr := newAPIError(method, data)
+			apiErr.Status = status
+			return nil, apiErr
 		}
-		if data["ok"] != true {
-			return nil, newAPIError(method, data)
-		}
+		span.End(fmt.Sprintf("HTTP %d", status))
 		return data, nil
 	}
 }
@@ -430,18 +558,6 @@ func isReadOnlyMethod(method string) bool {
 		return true
 	}
 	return readOnlyVerbs[method[strings.LastIndex(method, ".")+1:]]
-}
-
-// timeoutError is returned when Slack did not answer in time. A request
-// that may have changed something says so: the caller must not blindly
-// retry it.
-func timeoutError(method string, timeout time.Duration) error {
-	note := ""
-	if !isReadOnlyMethod(method) {
-		note = "; the request may still have been processed, so check before retrying"
-	}
-	return fmt.Errorf("Slack API call %s timed out after %s%s. Set %s to adjust.",
-		method, timeout, note, appinfo.EnvName("API_TIMEOUT_MS"))
 }
 
 func (c *Client) post(ctx context.Context, endpoint string, fields map[string]string, multi bool, timeout time.Duration) (int, http.Header, []byte, error) {

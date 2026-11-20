@@ -533,7 +533,7 @@ func TestGetDMChannelForUsers(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		want := DMChannel{UserIDs: []string{"U00000001A"}, DMChannelID: "D00000001A", ChannelType: "dm"}
+		want := DMChannel{UserIDs: []string{"U00000001A"}, ChannelID: "D00000001A", DMChannelID: "D00000001A", ChannelType: "dm"}
 		if !reflect.DeepEqual(got, want) {
 			t.Errorf("got %+v", got)
 		}
@@ -551,7 +551,7 @@ func TestGetDMChannelForUsers(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		want := DMChannel{UserIDs: []string{"U00000002A", "U00000009A", "U00000003A", "U00000001A"}, DMChannelID: "G00000001A", ChannelType: "group_dm"}
+		want := DMChannel{UserIDs: []string{"U00000002A", "U00000009A", "U00000003A", "U00000001A"}, ChannelID: "G00000001A", DMChannelID: "G00000001A", ChannelType: "group_dm"}
 		if !reflect.DeepEqual(got, want) {
 			t.Errorf("got %+v", got)
 		}

@@ -34,8 +34,8 @@ type ConversationsPage struct {
 	// NextCursor is the cursor of the next page ("" on the last page).
 	NextCursor string `json:"next_cursor,omitempty"`
 	// Warnings say what is missing from Channels because Slack rate
-	// limited the lookups (ListViaCounts), for the caller to show on
-	// stderr.
+	// limited the lookups (ListViaCounts), for the caller to print in
+	// the "warnings" of the result.
 	Warnings []string `json:"-"`
 }
 
@@ -182,6 +182,8 @@ func ListAll(ctx context.Context, client *slackapi.Client, opts ListOptions) (Co
 // + conversations.info, the way the Slack web client fills its sidebar. It
 // works on Enterprise Grid, where users.conversations and
 // conversations.list answer enterprise_is_restricted to browser tokens.
+// Where client.counts is restricted as well (slackapi.IsRestricted),
+// users.counts gives the IDs instead (see UsersCounts).
 //
 // client.counts returns every conversation ID at once (channels, then
 // group DMs, then DMs) and no names, so the page is cut locally and each
@@ -202,17 +204,33 @@ func ListViaCounts(ctx context.Context, client *slackapi.Client, opts ListOption
 	}
 	limit := normalizeLimit(opts.Limit)
 
-	resp, err := client.API(ctx, "client.counts", map[string]any{"thread_count_by_channel": true})
-	if err != nil {
-		return ConversationsPage{}, err
-	}
 	var ids []string
-	for _, key := range []string{"channels", "mpims", "ims"} {
-		for _, entry := range jsonx.Maps(resp[key]) {
-			if id := jsonx.Str(entry["id"]); id != "" {
-				ids = append(ids, id)
+	resp, err := client.API(ctx, "client.counts", map[string]any{"thread_count_by_channel": true})
+	switch {
+	case err == nil:
+		for _, key := range []string{"channels", "mpims", "ims"} {
+			for _, entry := range jsonx.Maps(resp[key]) {
+				if id := jsonx.Str(entry["id"]); id != "" {
+					ids = append(ids, id)
+				}
 			}
 		}
+	case slackapi.IsRestricted(err):
+		// Some Grid organisations restrict client.counts too; users.counts
+		// still lists the sidebar (joined channels, open DMs and group
+		// DMs). It also lists archived channels and closed group DMs,
+		// which client.counts leaves out: so does this.
+		entries, err := UsersCounts(ctx, client)
+		if err != nil {
+			return ConversationsPage{}, err
+		}
+		for _, e := range entries {
+			if e.IsMember && !e.IsArchived {
+				ids = append(ids, e.ID)
+			}
+		}
+	default:
+		return ConversationsPage{}, err
 	}
 
 	page := ConversationsPage{}

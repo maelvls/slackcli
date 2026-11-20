@@ -111,11 +111,15 @@ func TestSearchFilesNeverSendsCredentialsOffSlack(t *testing.T) {
 	if len(f.gets) != 0 {
 		t.Fatalf("requests = %v", f.gets)
 	}
-	if got := res.Files[0]; !strings.Contains(got.Error, "Refusing to send Slack credentials") || got.Title != "Roadmap" {
+	// An external file is a link, not a failed download.
+	if got := res.Files[0]; !got.External || got.URL != "https://docs.google.com/document/d/1" || got.Error != "" || got.Path != "" || got.Title != "Roadmap" {
 		t.Errorf("external file = %+v", got)
 	}
 	if got := res.Files[1]; got.Error != "Slack gave no download URL for this file" || got.Title != "nourl.bin" {
 		t.Errorf("file without URL = %+v", got)
+	}
+	if len(res.Warnings) != 1 || !strings.Contains(res.Warnings[0], "F2") {
+		t.Errorf("warnings = %q, want one, about F2", res.Warnings)
 	}
 }
 

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -277,23 +278,24 @@ func TestNoMatchHint(t *testing.T) {
 	h.on("search.messages", func(map[string]any) (map[string]any, error) {
 		return map[string]any{"messages": map[string]any{"matches": []any{}}}, nil
 	})
-	if _, err := h.run("messages", "in:@alice"); err != nil {
+	out, err := h.run("messages", "in:@alice")
+	if err != nil {
 		t.Fatal(err)
 	}
-	if want := "Nothing matched. Slack's search requires every word of the query"; !strings.Contains(h.stderr.String(), want) {
-		t.Errorf("stderr = %q, want %q", h.stderr.String(), want)
+	if want := `"hints":["Nothing matched. Slack's search requires every word of the query`; !strings.Contains(out, want) || h.stderr.Len() != 0 {
+		t.Errorf("printed %s, stderr = %q, want %q", out, h.stderr.String(), want)
 	}
 
 	h.general()
-	if _, err := h.run("messages", "no such words anywhere", "--channel", "general"); err != nil {
+	if out, err = h.run("messages", "no such words anywhere", "--channel", "general"); err != nil {
 		t.Fatal(err)
 	}
-	if want := "only top-level messages are looked at, not thread replies"; !strings.Contains(h.stderr.String(), want) {
-		t.Errorf("--channel: stderr = %q, want %q", h.stderr.String(), want)
+	if want := "only top-level messages are looked at, not thread replies"; !strings.Contains(out, want) || h.stderr.Len() != 0 {
+		t.Errorf("--channel: printed %s, stderr = %q, want %q", out, h.stderr.String(), want)
 	}
 
 	// Something matched: nothing to say.
-	if _, err := h.run("messages", "hello", "--channel", "general"); err != nil || h.stderr.Len() != 0 {
+	if out, err = h.run("messages", "hello", "--channel", "general"); err != nil || h.stderr.Len() != 0 || strings.Contains(out, `"hints"`) {
 		t.Errorf("a match: err = %v, stderr = %q", err, h.stderr.String())
 	}
 }
@@ -365,7 +367,7 @@ func TestChannelFlagRepeatsAndSplitsOnCommas(t *testing.T) {
 	}
 }
 
-func TestFailedDownloadIsReportedOnStdoutAndStderr(t *testing.T) {
+func TestFailedDownloadIsReportedInTheResult(t *testing.T) {
 	h := newHarness(t)
 	h.on("search.files", func(map[string]any) (map[string]any, error) {
 		return map[string]any{"files": map[string]any{"matches": []any{
@@ -382,8 +384,40 @@ func TestFailedDownloadIsReportedOnStdoutAndStderr(t *testing.T) {
 	if !reflect.DeepEqual(out["files"], want) {
 		t.Errorf("files = %v, want %v", out["files"], want)
 	}
-	if got := h.stderr.String(); got != "Warning: file F1 could not be downloaded: Failed to download file (404)\n" {
-		t.Errorf("stderr = %q", got)
+	if want := []any{"file F1 could not be downloaded: Failed to download file (404)"}; !reflect.DeepEqual(out["warnings"], want) {
+		t.Errorf("warnings = %q, want %q", out["warnings"], want)
+	}
+	// Nothing on stderr: "2>&1 | jq" must still parse.
+	if h.stderr.Len() != 0 {
+		t.Errorf("stderr = %q", h.stderr.String())
+	}
+}
+
+// A file that Slack does not host (a Google Docs link) has nothing to
+// download: it is listed with its URL, without a warning.
+func TestExternalFilesAreMarkedNotWarnedAbout(t *testing.T) {
+	h := newHarness(t)
+	const doc = "https://docs.google.com/presentation/d/abc/edit"
+	h.on("search.files", func(map[string]any) (map[string]any, error) {
+		return map[string]any{"files": map[string]any{"matches": []any{
+			map[string]any{"id": "F1", "title": "Deck", "mimetype": "application/vnd.google-apps.presentation", "is_external": true, "url_private": doc},
+		}}}, nil
+	})
+	out := h.mustRun("files", "deck")
+	want := map[string]any{"files": []any{map[string]any{
+		"title":    "Deck",
+		"mimetype": "application/vnd.google-apps.presentation",
+		"external": true,
+		"url":      doc,
+	}}}
+	if !reflect.DeepEqual(out, want) {
+		t.Errorf("printed %v, want %v", out, want)
+	}
+	if h.stderr.Len() != 0 {
+		t.Errorf("stderr = %q", h.stderr.String())
+	}
+	if _, err := os.Stat(filepath.Join(h.downloadsDir(), "F1.download-error.txt")); err == nil {
+		t.Error("an error file was written for an external file")
 	}
 }
 
@@ -399,7 +433,8 @@ func TestInvalidFlagsFailBeforeAnyCall(t *testing.T) {
 		{[]string{"files", "x", "--limit", "201"}, "invalid --limit value 201"},
 		{[]string{"messages", "x", "--limit", "20.5"}, `invalid argument "20.5" for "--limit"`},
 		{[]string{"messages", "x", "--max-content-chars", "lots"}, `invalid argument "lots" for "--max-content-chars"`},
-		{[]string{"messages", "x", "--max-content-chars", "0"}, "-1 for unlimited"},
+		{[]string{"messages", "x", "--max-content-chars", "0"}, "invalid --max-content-chars value 0"},
+		{[]string{"messages", "x", "--max-body-chars", "0"}, "invalid --max-body-chars value 0"},
 		{[]string{"all", "x", "--content-type", "video"}, `--content-type: invalid content type "video": expected any, text, image, snippet or file`},
 		{[]string{"all", "x", "--after", "yesterday"}, `invalid --after date "yesterday": expected a calendar day as YYYY-MM-DD`},
 		{[]string{"all", "x", "--before", "2026-02-30"}, `invalid --before date "2026-02-30"`},
@@ -504,17 +539,17 @@ func TestHelpContracts(t *testing.T) {
 			t.Errorf("%s: use = %q", sub.Name(), sub.Use)
 		}
 		for flag, wants := range map[string][]string{
-			"workspace":         {"required if you have multiple workspaces"},
-			"channel":           {"#name, name or ID", "repeat the flag", "commas", "scanned", "search operators are then rejected"},
-			"user":              {"U…/W…", "@handle", "email", "display name"},
-			"after":             {"YYYY-MM-DD", "Exclusive", "starts on 2026-01-02", "time zone"},
-			"before":            {"YYYY-MM-DD", "Exclusive", "ends on 2026-01-31"},
-			"content-type":      {"any", "text", "image", "snippet", "file"},
-			"limit":             {"1 to 200", "more_messages / more_files"},
-			"max-content-chars": {"-1 for unlimited"},
-			"no-download":       {"without a local path"},
-			"resolve-users":     {"referenced_users"},
-			"refresh-users":     {"implies --resolve-users"},
+			"workspace":      {"required if you have multiple workspaces"},
+			"channel":        {"#name, name or ID", "repeat the flag", "commas", "scanned", "search operators are then rejected"},
+			"user":           {"U…/W…", "@handle", "email", "display name"},
+			"after":          {"YYYY-MM-DD", "Exclusive", "starts on 2026-01-02", "time zone"},
+			"before":         {"YYYY-MM-DD", "Exclusive", "ends on 2026-01-31"},
+			"content-type":   {"any", "text", "image", "snippet", "file"},
+			"limit":          {"1 to 200", "more_messages / more_files"},
+			"max-body-chars": {"-1 for unlimited"},
+			"no-download":    {"without a local path"},
+			"resolve-users":  {"referenced_users"},
+			"refresh-users":  {"implies --resolve-users"},
 		} {
 			f := sub.Flags().Lookup(flag)
 			if f == nil {
@@ -527,10 +562,15 @@ func TestHelpContracts(t *testing.T) {
 				}
 			}
 		}
-		for flag, def := range map[string]string{"limit": "20", "max-content-chars": "4000", "content-type": "any"} {
+		for flag, def := range map[string]string{"limit": "20", "max-body-chars": "8000", "max-content-chars": "8000", "content-type": "any"} {
 			if got := sub.Flags().Lookup(flag).DefValue; got != def {
 				t.Errorf("%s --%s default = %q, want %q", sub.Name(), flag, got, def)
 			}
+		}
+		// --max-content-chars, the flag's former name, is still accepted
+		// but no longer advertised.
+		if f := sub.Flags().Lookup("max-content-chars"); f == nil || !f.Hidden || strings.Contains(sub.UsageString(), "max-content-chars") {
+			t.Errorf("%s: --max-content-chars is not a hidden alias", sub.Name())
 		}
 	}
 	if want := []string{"all", "files", "messages"}; !reflect.DeepEqual(names, want) {
@@ -548,3 +588,20 @@ func jsonString(s string) string {
 // localDay is the day of a Unix time in the local time zone, as hints
 // print it.
 func localDay(sec int64) string { return time.Unix(sec, 0).Format("2006-01-02") }
+
+// The cap on message content has the same name as on "message get/list",
+// --max-body-chars; its former name is an alias.
+func TestMaxBodyCharsAndItsAlias(t *testing.T) {
+	for _, flag := range []string{"--max-body-chars", "--max-content-chars"} {
+		h := newHarness(t)
+		h.general()
+		h.on("conversations.history", func(map[string]any) (map[string]any, error) {
+			return map[string]any{"messages": []any{map[string]any{"ts": "1767225600.000100", "user": "U1", "text": "hello world"}}}, nil
+		})
+		out := h.mustRun("messages", "hello", "--channel", "C12345678", flag, "5")
+		msgs, _ := out["messages"].([]any)
+		if len(msgs) != 1 || msgs[0].(map[string]any)["content"] != "hello\n…" {
+			t.Errorf("%s 5: messages = %v", flag, out["messages"])
+		}
+	}
+}

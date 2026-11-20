@@ -47,8 +47,8 @@ const (
 	// DefaultLimit is the number of items listed when ListOptions.Limit is 0.
 	DefaultLimit = 20
 	// DefaultMaxBodyChars is the content length limit when
-	// ListOptions.MaxBodyChars is 0.
-	DefaultMaxBodyChars = 4000
+	// ListOptions.MaxBodyChars is 0: the same as everywhere else.
+	DefaultMaxBodyChars = messages.DefaultMaxBodyChars
 
 	// pageSize is the saved.list page size. Composite cursors (see
 	// encodeCursor) count items within a page, so it must not vary.
@@ -125,8 +125,8 @@ type ListResult struct {
 	// ListOptions.Cursor to continue right after the last item returned.
 	NextCursor string `json:"next_cursor,omitempty"`
 	// Warnings say what is missing from Items because Slack rate limited
-	// the lookups (channel names, messages), for the caller to show on
-	// stderr.
+	// the lookups (channel names, messages), for the caller to print in
+	// the "warnings" of the result.
 	Warnings []string `json:"-"`
 }
 
