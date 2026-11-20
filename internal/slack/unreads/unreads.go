@@ -165,9 +165,10 @@ var errNotLookedUp = errors.New("not looked up")
 // (channels.IsRestricted), the conversations come from users.counts
 // instead: those unread or mentioned, without the archived ones and the
 // muted ones nobody mentioned the caller in (client.counts lists the
-// muted ones with unreads, so this list can be shorter). users.counts has no read
-// cursor, so it is taken from the conversations.info call that gives the
-// name, and it says nothing about threads: Result.Threads is nil.
+// muted ones with unreads, so this list can be shorter). users.counts has
+// no read cursor, so it is taken from the conversations.info call that
+// gives the name, and it says nothing about threads: Result.Threads is
+// nil.
 //
 // Only client.counts, a cancelled context and dead credentials fail the
 // listing. Names and messages are enrichments (see package enrich): once

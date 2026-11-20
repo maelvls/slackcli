@@ -128,19 +128,38 @@ func (w *world) serve(method string, params map[string]any) map[string]any {
 				out = append(out, m)
 			}
 		}
-		// Slack answers newest first.
-		slices.Reverse(out)
-		return page(out, params, params["limit"].(int))
+		// Slack answers newest first within a page. With "latest" the
+		// pages go from the newest back; with "oldest" alone they go from
+		// the oldest forward.
+		if _, backward := params["latest"]; backward {
+			slices.Reverse(out)
+			return page(out, params, params["limit"].(int))
+		}
+		resp := page(out, params, params["limit"].(int))
+		slices.Reverse(resp["messages"].([]any))
+		return resp
 	case "conversations.replies":
 		msgs, ok := w.replies[id+":"+params["ts"].(string)]
 		if !ok {
 			return apiError("thread_not_found")
 		}
+		if _, ok := params["oldest"]; ok {
+			// Slack then loses messages from the second page on.
+			return apiError("oldest_must_not_be_used")
+		}
 		size := params["limit"].(int)
 		if w.replyPage > 0 {
 			size = w.replyPage
 		}
-		return page(msgs, params, size)
+		// As seen on Slack: every page starts with the root, followed by
+		// size replies, the newest ones on the first page.
+		replies := slices.Clone(msgs[1:])
+		slices.Reverse(replies)
+		resp := page(replies, params, size)
+		chunk := resp["messages"].([]any)
+		slices.Reverse(chunk)
+		resp["messages"] = append([]any{msgs[0]}, chunk...)
+		return resp
 	case "users.info":
 		user := params["user"].(string)
 		return map[string]any{"user": map[string]any{"id": user, "name": "name-" + user, "profile": map[string]any{}}}
@@ -332,9 +351,15 @@ func TestFetch(t *testing.T) {
 		t.Errorf("queries = %q, want %q", queries, want)
 	}
 
-	// Conversations are read from the start of the window, a few at a time.
+	// Conversations are read from the start of the window, a few at a time;
+	// threads are read whole.
+	for _, c := range w.only("conversations.history") {
+		if c.params["oldest"] == nil || c.params["latest"] == nil {
+			t.Errorf("conversations.history params = %v", c.params)
+		}
+	}
 	for _, c := range w.only("conversations.replies") {
-		if c.params["oldest"] != "1000.000000" || c.params["inclusive"] != true {
+		if _, ok := c.params["oldest"]; ok {
 			t.Errorf("conversations.replies params = %v", c.params)
 		}
 	}
@@ -404,12 +429,33 @@ func TestFetchReadsLongConversations(t *testing.T) {
 			history: map[string][]map[string]any{"D1": slices.Concat(burst("U00000001", 1001, 100), []map[string]any{msg(me, 1002)}, burst("U00000001", 1003, 250))},
 		}
 		res := w.fetch(t, Options{})
-		if len(res.Items) != 1 || res.Items[0].Count != 250 || res.Items[0].FirstTS != ts(1003) || res.Truncated {
+		// All of what came after my message, and the newest of it.
+		if len(res.Items) != 1 || res.Items[0].Count != 250 || res.Items[0].FirstTS != ts(1003) || res.Items[0].TS != ts(1003.249) || res.Truncated {
 			t.Errorf("result = %+v", res)
+		}
+		for _, c := range w.only("conversations.history") {
+			if c.params["latest"] == nil || c.params["oldest"] != "1000.000000" {
+				t.Errorf("history params = %v", c.params)
+			}
 		}
 		// The page that holds my message ends the reading.
 		if n := len(w.only("conversations.history")); n != 2 {
 			t.Errorf("history calls = %d, want 2", n)
+		}
+	})
+	t.Run("history, answered on the newest page", func(t *testing.T) {
+		// My message is among the newest 200: nothing older is read, and
+		// only what came after it waits.
+		w := &world{
+			to:      []map[string]any{match(d1, "U00000001", 1100, -1)},
+			history: map[string][]map[string]any{"D1": slices.Concat(burst("U00000001", 1001, 250), []map[string]any{msg(me, 1002)}, burst("U00000001", 1003, 50))},
+		}
+		res := w.fetch(t, Options{})
+		if len(res.Items) != 1 || res.Items[0].Count != 50 || res.Items[0].TS != ts(1003.049) || res.Truncated {
+			t.Errorf("result = %+v", res)
+		}
+		if n := len(w.only("conversations.history")); n != 1 {
+			t.Errorf("history calls = %d, want 1", n)
 		}
 	})
 	t.Run("history too long", func(t *testing.T) {
@@ -418,8 +464,9 @@ func TestFetchReadsLongConversations(t *testing.T) {
 			history: map[string][]map[string]any{"D1": burst("U00000001", 1001, pageSize*maxPages+50)},
 		}
 		res := w.fetch(t, Options{})
-		if len(res.Items) != 1 || res.Items[0].Count != pageSize*maxPages || !res.Truncated {
-			t.Errorf("count, truncated = %d, %v", res.Items[0].Count, res.Truncated)
+		// The newest 1000 are read: the item is about the newest message.
+		if len(res.Items) != 1 || res.Items[0].Count != pageSize*maxPages || res.Items[0].TS != ts(1002.049) || res.Items[0].FirstTS != ts(1001.050) || !res.Truncated {
+			t.Errorf("result = %+v, truncated %v", res.Items, res.Truncated)
 		}
 		if n := len(w.only("conversations.history")); n != maxPages {
 			t.Errorf("history calls = %d, want %d", n, maxPages)
@@ -431,24 +478,27 @@ func TestFetchReadsLongConversations(t *testing.T) {
 		return &world{
 			replyPage: 2,
 			mentions:  []map[string]any{match(c1, "U00000001", 1001, 1000)},
-			// My answer is the last message.
-			replies: map[string][]map[string]any{"C1:1000.000000": append(burst("U00000001", 1001, n-1), msg(me, 1900))},
+			// My answer is the oldest reply, after the mention.
+			replies: map[string][]map[string]any{"C1:1000.000000": slices.Concat(burst("U00000001", 1001, 1), []map[string]any{msg(me, 1001.5)}, burst("U00000002", 1002, n-2))},
 		}
 	}
 	t.Run("replies", func(t *testing.T) {
-		w := thread(2 * maxPages)
-		if res := w.fetch(t, Options{}); len(res.Items) != 0 || res.Truncated {
-			t.Errorf("result = %+v, want the thread answered", res)
+		// A root and 2*maxPages replies: read whole, down to my answer.
+		w := thread(2*maxPages + 1)
+		res := w.fetch(t, Options{})
+		if got := kinds(res); !reflect.DeepEqual(got, []string{"thread C1"}) || res.Items[0].Count != 2*maxPages-1 || res.Items[0].TS != ts(1002+float64(2*maxPages-2)/1000) || res.Truncated {
+			t.Errorf("result = %+v", res)
 		}
 		if n := len(w.only("conversations.replies")); n != maxPages {
 			t.Errorf("replies calls = %d, want %d", n, maxPages)
 		}
 	})
 	t.Run("replies too long", func(t *testing.T) {
-		// My answer is past what is read: the item may be wrong, and the
-		// result says that not everything was read.
-		res := thread(2*maxPages+1).fetch(t, Options{})
-		if got := kinds(res); !reflect.DeepEqual(got, []string{"mention C1"}) || !res.Truncated {
+		// My answer is past what is read: the item is wrong (a mention,
+		// when I answered it), and the result says that not everything
+		// was read.
+		res := thread(2*maxPages+3).fetch(t, Options{})
+		if got := kinds(res); !reflect.DeepEqual(got, []string{"mention C1"}) || res.Items[0].TS != ts(1002+float64(2*maxPages)/1000) || !res.Truncated {
 			t.Errorf("items, truncated = %q, %v", got, res.Truncated)
 		}
 	})

@@ -193,11 +193,14 @@ type draft struct {
 }
 
 type fetcher struct {
-	client       *slackapi.Client
-	sem          chan struct{}
-	me           string
-	sinceTS      float64
-	oldest       string
+	client  *slackapi.Client
+	sem     chan struct{}
+	me      string
+	sinceTS float64
+	oldest  string
+	// latest is when Fetch started, as a Slack timestamp: with it,
+	// conversations.history pages from the newest message back.
+	latest       string
 	baseURL      string
 	maxBodyChars int
 	noThreads    bool
@@ -224,8 +227,9 @@ type fetcher struct {
 //
 // A candidate that cannot be read (skippableCodes: channel_not_found,
 // thread_not_found …) is left out. Everything else fails the command,
-// rate limits, missing scopes and Slack's own failures included: an inbox with holes would read as "nobody else is
-// waiting". Names are an enrichment (see package enrich).
+// rate limits, missing scopes and Slack's own failures included: an inbox
+// with holes would read as "nobody else is waiting". Names are an
+// enrichment (see package enrich).
 func Fetch(ctx context.Context, client *slackapi.Client, opts Options) (Result, error) {
 	if opts.MaxBodyChars == 0 {
 		opts.MaxBodyChars = DefaultMaxBodyChars
@@ -249,6 +253,7 @@ func Fetch(ctx context.Context, client *slackapi.Client, opts Options) (Result, 
 		me:           me,
 		sinceTS:      sinceTS,
 		oldest:       strconv.FormatFloat(sinceTS, 'f', 6, 64),
+		latest:       strconv.FormatFloat(float64(time.Now().UnixMicro())/1e6, 'f', 6, 64),
 		baseURL:      strings.TrimRight(cmp.Or(jsonx.Str(auth["url"]), client.WorkspaceURL()), "/"),
 		maxBodyChars: opts.MaxBodyChars,
 		noThreads:    opts.NoThreads,
@@ -522,6 +527,7 @@ func (f *fetcher) evaluate(ctx context.Context, c *candidate) (*draft, error) {
 		later, err := f.pages(ctx, "conversations.history", map[string]any{
 			"channel":   c.channelID,
 			"oldest":    mention,
+			"latest":    f.latest,
 			"inclusive": false,
 		}, f.wrote)
 		if err != nil {
@@ -601,13 +607,20 @@ func (f *fetcher) pages(ctx context.Context, method string, params map[string]an
 }
 
 // history returns the top-level messages of a conversation since the
-// start of the window, oldest first. Slack gives the newest first: no
-// more is read once a page holds a sign of the caller (a message, a
-// reaction, a thread reply), which answers everything older.
+// start of the window, oldest first.
+//
+// With "oldest" alone, conversations.history starts at the oldest page
+// and moves forward; with "latest" as well it starts at the newest page
+// and moves back, which is what is wanted here: the newest messages are
+// the ones that wait, no more needs reading once a page holds a sign of the
+// caller (a message, a reaction, a thread reply), which answers everything
+// older, and a conversation too long to be read whole loses its oldest
+// messages, not its newest.
 func (f *fetcher) history(ctx context.Context, channelID string) ([]map[string]any, error) {
 	msgs, err := f.pages(ctx, "conversations.history", map[string]any{
 		"channel":   channelID,
 		"oldest":    f.oldest,
+		"latest":    f.latest,
 		"inclusive": true,
 	}, func(m map[string]any) bool { return f.acknowledged(m, true) })
 	if err != nil {
@@ -616,16 +629,19 @@ func (f *fetcher) history(ctx context.Context, channelID string) ([]map[string]a
 	return sortByTS(msgs), nil
 }
 
-// replies returns the messages of a thread from the start of the window on
-// (with the root, whatever its age, when Slack gives it), oldest first.
-// Slack gives the oldest first, so the whole thread is read: an answer of
-// the caller's can be on the last page.
+// replies returns the messages of a thread, oldest first, those from
+// before the window included (evaluate leaves them out).
+//
+// The whole thread is read, without "oldest": with it,
+// conversations.replies loses messages as soon as there is a second page
+// (seen on a thread of 5 with a limit of 3: the next page held the root
+// alone, and the newest reply was never given). Nor is the reading cut
+// short the way history's is: which end the pages start from is not
+// something Slack documents.
 func (f *fetcher) replies(ctx context.Context, channelID, root string) ([]map[string]any, error) {
 	msgs, err := f.pages(ctx, "conversations.replies", map[string]any{
-		"channel":   channelID,
-		"ts":        root,
-		"oldest":    f.oldest,
-		"inclusive": true,
+		"channel": channelID,
+		"ts":      root,
 	}, nil)
 	if err != nil {
 		return nil, err
