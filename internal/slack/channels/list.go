@@ -217,13 +217,15 @@ func ListViaCounts(ctx context.Context, client *slackapi.Client, opts ListOption
 		}
 	case IsRestricted(err):
 		// Some Grid organisations restrict client.counts too; users.counts
-		// still lists the sidebar (joined channels, open DMs).
+		// still lists the sidebar (joined channels, open DMs and group
+		// DMs). It also lists archived channels and closed group DMs,
+		// which client.counts leaves out: so does this.
 		entries, err := UsersCounts(ctx, client)
 		if err != nil {
 			return ConversationsPage{}, err
 		}
 		for _, e := range entries {
-			if e.IsMember {
+			if e.IsMember && !e.IsArchived {
 				ids = append(ids, e.ID)
 			}
 		}

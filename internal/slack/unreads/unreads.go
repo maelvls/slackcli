@@ -109,7 +109,7 @@ type Channel struct {
 	MessagesTruncated bool `json:"messages_truncated,omitempty"`
 	// MessagesError is Slack's error code when the unread messages could
 	// not be fetched ("ratelimited" when Slack was rate limiting the
-	// history calls: see Result.Warnings).
+	// history calls: see Result.Warnings), or NoReadCursorCode.
 	MessagesError string `json:"messages_error,omitempty"`
 }
 
@@ -144,6 +144,11 @@ type entry struct {
 	mentions int
 }
 
+// NoReadCursorCode is the Channel.MessagesError of a conversation listed
+// by users.counts for which Slack gave no read cursor: its unread messages
+// cannot be told from the others, so none is fetched.
+const NoReadCursorCode = "no_read_cursor"
+
 // errNotLookedUp is what lookup answers once Slack has rate limited the
 // name lookups.
 var errNotLookedUp = errors.New("not looked up")
@@ -159,7 +164,8 @@ var errNotLookedUp = errors.New("not looked up")
 // On an Enterprise Grid where client.counts answers team_is_restricted
 // (channels.IsRestricted), the conversations come from users.counts
 // instead: those unread or mentioned, without the archived ones and the
-// muted ones nobody mentioned the caller in. users.counts has no read
+// muted ones nobody mentioned the caller in (client.counts lists the
+// muted ones with unreads, so this list can be shorter). users.counts has no read
 // cursor, so it is taken from the conversations.info call that gives the
 // name, and it says nothing about threads: Result.Threads is nil.
 //
@@ -293,13 +299,18 @@ func Fetch(ctx context.Context, client *slackapi.Client, opts Options) (Result, 
 			if opts.CountsOnly || ctx.Err() != nil {
 				return
 			}
-			if err != nil && info.LastRead == "" {
+			if info.LastRead == "" {
 				// Without the cursor, the newest messages would be taken
 				// for the unread ones.
-				ch.MessagesError = errorCode(err)
-				if errors.Is(err, errNotLookedUp) || enrich.IsRateLimit(err) {
+				switch {
+				case err == nil:
+					// conversations.info answered without last_read.
+					ch.MessagesError = NoReadCursorCode
+				case errors.Is(err, errNotLookedUp) || enrich.IsRateLimit(err):
 					ch.MessagesError = enrich.RateLimitedCode
 					noCursor.Add(1)
+				default:
+					ch.MessagesError = errorCode(err)
 				}
 				return
 			}

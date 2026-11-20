@@ -35,7 +35,8 @@ type CountsEntry struct {
 	// message is one.
 	MentionCount int
 	// IsMember is false for a channel the caller is not in, and for a DM
-	// that is closed.
+	// or a group DM that is closed (the caller is still a member of a
+	// closed group DM, but the sidebar does not list it).
 	IsMember   bool
 	IsMuted    bool
 	IsArchived bool
@@ -80,14 +81,19 @@ func UsersCounts(ctx context.Context, client *slackapi.Client) ([]CountsEntry, e
 				UnreadCount:  firstInt(raw, "unread_count_display", "unread_count"),
 				MentionCount: firstInt(raw, "mention_count_display", "mention_count"),
 				// users.counts only lists joined channels, so a missing
-				// is_member means "member"; a group DM may carry is_open
-				// instead.
-				IsMember:   raw["is_member"] != false || jsonx.Bool(raw["is_open"]),
+				// is_member means "member".
+				IsMember:   raw["is_member"] != false,
 				IsMuted:    jsonx.Bool(raw["is_muted"]),
 				IsArchived: jsonx.Bool(raw["is_archived"]),
 			}
 			if jsonx.Bool(raw["is_mpim"]) {
 				e.Kind = CountsMPIM
+				// Every group DM the caller was ever in is listed, with
+				// is_member true: is_open says which ones the sidebar
+				// shows.
+				if open, ok := raw["is_open"].(bool); ok {
+					e.IsMember = open
+				}
 			}
 			out = append(out, e)
 		}

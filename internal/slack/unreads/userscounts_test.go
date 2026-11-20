@@ -138,7 +138,8 @@ func TestFetchFallbackWithoutReadCursor(t *testing.T) {
 		wantError string
 		warnings  int
 	}{
-		"unreadable": {func() (map[string]any, error) { return apiError("channel_not_found"), nil }, "channel_not_found", 0},
+		"no last_read": {func() (map[string]any, error) { return map[string]any{"channel": map[string]any{"id": "X"}}, nil }, "no_read_cursor", 0},
+		"unreadable":   {func() (map[string]any, error) { return apiError("channel_not_found"), nil }, "channel_not_found", 0},
 		"rate limited": {func() (map[string]any, error) {
 			return nil, &slackapi.RateLimitError{Method: "conversations.info", RetryAfter: time.Minute}
 		}, "ratelimited", 2},

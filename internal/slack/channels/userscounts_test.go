@@ -40,6 +40,12 @@ func TestUsersCounts(t *testing.T) {
 		"groups": []any{
 			map[string]any{"id": "G1", "is_mpim": true, "is_member": false, "is_open": true, "mention_count": 2.0},
 			map[string]any{"id": "G2"},
+			// A group DM the caller closed: still a member, not in the
+			// sidebar.
+			map[string]any{"id": "G3", "is_mpim": true, "is_member": true, "is_open": false},
+			map[string]any{"id": "G4", "is_mpim": true, "is_member": true},
+			// For a channel, is_open says nothing.
+			map[string]any{"id": "G5", "is_member": false, "is_open": true},
 		},
 		"ims": []any{
 			map[string]any{"id": "D1", "dm_count": 2.0, "is_open": true},
@@ -56,6 +62,9 @@ func TestUsersCounts(t *testing.T) {
 		{ID: "C2", Kind: CountsChannel, UnreadCount: 2, IsMuted: true, IsArchived: true},
 		{ID: "G1", Kind: CountsMPIM, MentionCount: 2, IsMember: true},
 		{ID: "G2", Kind: CountsChannel, IsMember: true},
+		{ID: "G3", Kind: CountsMPIM},
+		{ID: "G4", Kind: CountsMPIM, IsMember: true},
+		{ID: "G5", Kind: CountsChannel},
 		{ID: "D1", Kind: CountsDM, UnreadCount: 2, MentionCount: 2, IsMember: true},
 		{ID: "D2", Kind: CountsDM},
 	}
@@ -101,9 +110,18 @@ func TestListViaCountsFallsBackToUsersCounts(t *testing.T) {
 			return apiError("team_is_restricted"), nil
 		case "users.counts":
 			return map[string]any{
-				"channels": []any{map[string]any{"id": "C1", "is_member": true}, map[string]any{"id": "C2", "is_member": false}},
-				"groups":   []any{map[string]any{"id": "G1", "is_member": true, "is_mpim": true}},
-				"ims":      []any{map[string]any{"id": "D1", "is_open": true}, map[string]any{"id": "D2", "is_open": false}},
+				"channels": []any{
+					map[string]any{"id": "C1", "is_member": true},
+					map[string]any{"id": "C2", "is_member": false},
+					map[string]any{"id": "C3", "is_member": true, "is_archived": true},
+					// Slack lists group DMs here too.
+					map[string]any{"id": "G0", "is_member": true, "is_mpim": true, "is_open": false},
+				},
+				"groups": []any{
+					map[string]any{"id": "G1", "is_member": true, "is_mpim": true, "is_open": true},
+					map[string]any{"id": "G2", "is_member": true, "is_mpim": true, "is_open": false},
+				},
+				"ims": []any{map[string]any{"id": "D1", "is_open": true}, map[string]any{"id": "D2", "is_open": false}},
 			}, nil
 		case "conversations.info":
 			return map[string]any{"channel": map[string]any{"id": params["channel"]}}, nil
@@ -114,7 +132,8 @@ func TestListViaCountsFallsBackToUsersCounts(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Paged locally, like the client.counts listing.
+	// Without the archived channel and the closed group DMs. Paged locally,
+	// like the client.counts listing.
 	if !reflect.DeepEqual(ids(page), []string{"C1", "G1"}) || page.NextCursor != "2" {
 		t.Errorf("page = %+v", page)
 	}
