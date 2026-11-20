@@ -207,6 +207,39 @@ func TestStreamEndsWhenCredentialsAreRejectedLater(t *testing.T) {
 	}
 }
 
+// A rate limited rtm.connect is not asked for again before the time Slack
+// gave, whatever the backoff says.
+func TestStreamWaitsForTheRateLimitBeforeReconnecting(t *testing.T) {
+	const retryAfter = 300 * time.Millisecond
+	var (
+		calls     atomic.Int32
+		limitedAt time.Time
+		waited    time.Duration
+	)
+	server := httptest.NewServer(websocket.Handler(func(ws *websocket.Conn) { send(ws, `{"type":"hello"}`) }))
+	defer server.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	client := slackapi.NewFake(func(context.Context, string, map[string]any) (map[string]any, error) {
+		switch calls.Add(1) {
+		case 1:
+		case 2:
+			limitedAt = time.Now()
+			return nil, &slackapi.RateLimitError{Method: "rtm.connect", RetryAfter: retryAfter}
+		default:
+			waited = time.Since(limitedAt)
+			cancel()
+		}
+		return map[string]any{"ok": true, "url": "ws" + strings.TrimPrefix(server.URL, "http")}, nil
+	}, slackapi.WithLoopbackWorkspaceForTesting())
+	if err := Stream(ctx, client, fast, func(map[string]any) error { return nil }); err != nil {
+		t.Fatal(err)
+	}
+	if waited < retryAfter {
+		t.Errorf("reconnected %s after a rate limit of %s", waited, retryAfter)
+	}
+}
+
 func TestBackoff(t *testing.T) {
 	for attempt, want := range map[int]time.Duration{1: time.Second, 2: 2 * time.Second, 5: 16 * time.Second, 6: maxBackoff, 500: maxBackoff} {
 		if got := backoff(attempt); got != want {

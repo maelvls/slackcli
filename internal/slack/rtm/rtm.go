@@ -37,8 +37,10 @@ const (
 // Options tunes Stream.
 type Options struct {
 	// OnConnect is called each time the connection is ready, with how
-	// long the stream was down (0 the first time). The events of that gap
-	// are lost: Slack does not replay them.
+	// long the stream was down (0 the first time): the time since Slack
+	// was last heard on the lost connection, the sleep of the machine
+	// included. The events of that gap are lost: Slack does not replay
+	// them.
 	OnConnect func(gap time.Duration)
 	// OnDisconnect is called when the connection is lost and Stream is
 	// about to reconnect.
@@ -70,16 +72,23 @@ func Stream(ctx context.Context, client *slackapi.Client, opts Options, handle f
 	}
 
 	var (
-		// lostAt is when the connection was lost; zero while connected.
+		// lastFrame is when Slack was last heard. It is a wall clock time
+		// (no monotonic reading): the monotonic clock stops while the
+		// machine sleeps, which is when most events are missed.
+		lastFrame time.Time
+		// lostAt is since when events may be missing; zero while connected.
 		lostAt        time.Time
 		everConnected bool
 		attempt       int
 	)
-	// hello runs on this goroutine, from serve.
+	// alive and hello run on this goroutine, from serve.
+	alive := func() { lastFrame = time.Now().Round(0) }
 	hello := func() {
 		var gap time.Duration
 		if !lostAt.IsZero() {
-			gap = time.Since(lostAt)
+			// Never 0, which means the first connection, even if the
+			// clock was set back meanwhile.
+			gap = max(time.Since(lostAt), time.Nanosecond)
 		}
 		lostAt, everConnected, attempt = time.Time{}, true, 0
 		if opts.OnConnect != nil {
@@ -87,9 +96,11 @@ func Stream(ctx context.Context, client *slackapi.Client, opts Options, handle f
 		}
 	}
 	for {
+		served := false
 		ws, err := dial(ctx, client)
 		if err == nil {
-			err = serve(ctx, ws, opts, hello, handle)
+			served = true
+			err = serve(ctx, ws, opts, alive, hello, handle)
 			var he *handlerError
 			if errors.As(err, &he) {
 				return he.err
@@ -99,18 +110,32 @@ func Stream(ctx context.Context, client *slackapi.Client, opts Options, handle f
 		case ctx.Err() != nil:
 			return nil
 		case !everConnected:
+			if served {
+				// The error of a read alone ("EOF") says nothing.
+				return fmt.Errorf("the real-time connection ended before Slack said it was ready: %w", err)
+			}
 			return err
 		case slackapi.IsAuthError(err):
 			return err
 		}
 		if lostAt.IsZero() {
-			lostAt = time.Now()
+			// A connection found dead (no answer to the pings, a machine
+			// that slept) died some time after Slack was last heard, not
+			// when that was noticed.
+			lostAt = lastFrame
 		}
 		if opts.OnDisconnect != nil {
 			opts.OnDisconnect(err)
 		}
 		attempt++
-		pause := time.NewTimer(opts.Backoff(attempt))
+		wait := opts.Backoff(attempt)
+		// rtm.connect is rate limited: asking again before the time Slack
+		// gave only pushes the end of the limit further away.
+		var limited *slackapi.RateLimitError
+		if errors.As(err, &limited) {
+			wait = max(wait, limited.RetryAfter)
+		}
+		pause := time.NewTimer(wait)
 		select {
 		case <-ctx.Done():
 			pause.Stop()
@@ -175,8 +200,9 @@ func dial(ctx context.Context, client *slackapi.Client) (*websocket.Conn, error)
 }
 
 // serve reads ws until it fails, ctx is done or Slack says goodbye. It
-// calls hello when Slack says the connection is ready.
-func serve(ctx context.Context, ws *websocket.Conn, opts Options, hello func(), handle func(map[string]any) error) error {
+// calls alive each time something is received, and hello when Slack says
+// the connection is ready.
+func serve(ctx context.Context, ws *websocket.Conn, opts Options, alive, hello func(), handle func(map[string]any) error) error {
 	// A read cannot be cancelled: closing the connection is what ends it.
 	stop := context.AfterFunc(ctx, func() { ws.Close() })
 	defer stop()
@@ -209,6 +235,7 @@ func serve(ctx context.Context, ws *websocket.Conn, opts Options, hello func(), 
 		if err := websocket.Message.Receive(ws, &data); err != nil {
 			return err
 		}
+		alive()
 		var event map[string]any
 		if json.Unmarshal(data, &event) != nil {
 			continue

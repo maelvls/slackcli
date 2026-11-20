@@ -17,6 +17,9 @@ import (
 
 	"github.com/maelvls/slackcli/internal/auth"
 	"github.com/maelvls/slackcli/internal/clictx"
+	"github.com/maelvls/slackcli/internal/slack/channels"
+	"github.com/maelvls/slackcli/internal/slack/enrich"
+	"github.com/maelvls/slackcli/internal/slack/messages"
 	"github.com/maelvls/slackcli/internal/slack/rtm"
 	"github.com/maelvls/slackcli/internal/slackapi"
 	"github.com/maelvls/slackcli/internal/testenv"
@@ -238,5 +241,71 @@ func TestWatchFor(t *testing.T) {
 	}
 	if !clictx.HasNoTimeout(New(h.rt)) {
 		t.Error("watch is cut by the command timeout")
+	}
+}
+
+// A name Slack does not give is not asked for again with each message, and
+// a rate limited lookup, of a user as of a channel, pauses them all.
+func TestNamesAreNotLookedUpWithEachMessage(t *testing.T) {
+	testenv.Isolate(t)
+	var (
+		mu      sync.Mutex
+		calls   = map[string]int{}
+		limited bool
+	)
+	client := slackapi.NewFake(func(_ context.Context, method string, _ map[string]any) (map[string]any, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		calls[method]++
+		if limited {
+			return nil, &slackapi.RateLimitError{Method: method, RetryAfter: 30 * time.Second}
+		}
+		return map[string]any{"ok": false, "error": "not_found"}, nil
+	})
+	var stderr bytes.Buffer
+	w := &watcher{
+		rt: &clictx.Context{Stderr: &stderr}, client: client,
+		channelNames: map[string]string{}, userNames: map[string]string{}, unnamedUntil: map[string]time.Time{},
+	}
+	ctx, incomplete := enrich.Collect(context.Background())
+	channel := func(id string) {
+		t.Helper()
+		if name, err := w.name(ctx, w.channelNames, id, func() (string, error) { return channels.LookupName(ctx, client, id) }); name != "" || err != nil {
+			t.Fatalf("name of %s = %q, %v", id, name, err)
+		}
+	}
+	user := func(id string) {
+		t.Helper()
+		if name, err := w.name(ctx, w.userNames, id, func() (string, error) { return w.lookupUser(ctx, id) }); name != "" || err != nil {
+			t.Fatalf("name of %s = %q, %v", id, name, err)
+		}
+	}
+	for range 3 {
+		channel("C000000009")
+		user("U000000009")
+	}
+	if calls["conversations.info"] != 1 || calls["users.info"] != 1 {
+		t.Errorf("API calls for names Slack does not give = %v, want one each", calls)
+	}
+
+	limited = true
+	user("U000000008")
+	user("U000000007")
+	channel("C000000008")
+	if calls["conversations.info"] != 1 || calls["users.info"] != 2 {
+		t.Errorf("API calls once rate limited = %v, want a single users.info more", calls)
+	}
+	if !strings.Contains(stderr.String(), "rate limiting the name lookups") {
+		t.Errorf("stderr = %q, want the warning about the rate limit", stderr.String())
+	}
+	if got := incomplete.List(); len(got) != 0 {
+		t.Errorf("warnings left for the end of the command: %v", got)
+	}
+}
+
+func TestTextLineDropsControlCharacters(t *testing.T) {
+	got := textLine(Event{ChannelID: "C000000001", ChannelName: "gen\x1beral", Author: &messages.Author{Name: "Al\rice"}, Content: "a\x1b[2J\x07b\n\tc\u009b"})
+	if want := "#general Alice: a[2Jb\n    \tc"; got != want {
+		t.Errorf("textLine = %q, want %q", got, want)
 	}
 }

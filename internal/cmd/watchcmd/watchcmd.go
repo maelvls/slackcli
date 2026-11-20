@@ -8,6 +8,7 @@ import (
 	"slices"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/spf13/cobra"
 
@@ -106,7 +107,8 @@ and classic tokens, not with the token of a Slack app.`,
 			if cmd.Flags().Changed("for") && duration <= 0 {
 				return fmt.Errorf("--for must be a positive duration such as 30s or 10m, got %s", duration)
 			}
-			if err := rt.AssertWorkspaceForChannelNames(workspace, only...); err != nil {
+			ws := rt.EffectiveWorkspace(workspace)
+			if err := rt.AssertWorkspaceForChannelNames(ws, only...); err != nil {
 				return err
 			}
 			ctx := cmd.Context()
@@ -115,7 +117,6 @@ and classic tokens, not with the token of a Slack app.`,
 				ctx, cancel = context.WithTimeout(ctx, duration)
 				defer cancel()
 			}
-			ws := rt.EffectiveWorkspace(workspace)
 			_, err := clictx.WithAutoRefresh(ctx, rt, func() (struct{}, error) {
 				r, err := rt.Client(ctx, ws)
 				if err != nil {
@@ -125,6 +126,7 @@ and classic tokens, not with the token of a Slack app.`,
 					rt: rt, client: r.Client,
 					maxBodyChars: maxBodyChars, includeSystem: includeSystem, text: text,
 					channelNames: map[string]string{}, userNames: map[string]string{},
+					unnamedUntil: map[string]time.Time{},
 				}
 				if err := w.resolveFilter(ctx, only); err != nil {
 					return struct{}{}, err
@@ -176,9 +178,15 @@ type watcher struct {
 	// namesPausedUntil is when names may be looked up again after Slack
 	// rate limited a lookup.
 	namesPausedUntil time.Time
+	// unnamedUntil is, by channel or user ID, when a name that could not
+	// be found may be looked up again: without it, each message of a
+	// conversation or of an author Slack gives no name for (a channel of
+	// another organisation, a deleted user) would cost a call.
+	unnamedUntil map[string]time.Time
 }
 
-// namesPause is how long no name is looked up after a rate limit.
+// namesPause is how long no name is looked up after a rate limit, and how
+// long one name is not looked up again after it could not be found.
 const namesPause = time.Minute
 
 func (w *watcher) resolveFilter(ctx context.Context, only []string) error {
@@ -230,11 +238,7 @@ func (w *watcher) handle(ctx context.Context, raw map[string]any) error {
 	if user, bot := jsonx.Str(raw["user"]), jsonx.Str(raw["bot_id"]); user != "" || bot != "" {
 		ev.Author = &messages.Author{UserID: user, BotID: bot}
 		if user != "" {
-			ev.Author.Name, err = w.name(ctx, w.userNames, user, func() (string, error) {
-				found, err := users.ResolveByID(ctx, w.client, []string{user}, users.ResolveOptions{})
-				u := found[user]
-				return cmp.Or(u.DisplayName, u.RealName, u.Name), err
-			})
+			ev.Author.Name, err = w.name(ctx, w.userNames, user, func() (string, error) { return w.lookupUser(ctx, user) })
 			if err != nil {
 				return err
 			}
@@ -259,22 +263,40 @@ func (w *watcher) name(ctx context.Context, cache map[string]string, id string, 
 	if name, ok := cache[id]; ok {
 		return name, nil
 	}
-	if time.Now().Before(w.namesPausedUntil) {
+	if now := time.Now(); now.Before(w.namesPausedUntil) || now.Before(w.unnamedUntil[id]) {
 		return "", nil
 	}
 	name, err := lookup()
 	switch {
-	case err == nil:
-		if name != "" {
-			cache[id] = name
-		}
 	case enrich.MustAbort(ctx, err):
 		return "", err
 	case enrich.IsRateLimit(err):
 		w.namesPausedUntil = time.Now().Add(namesPause)
 		w.rt.Hintf("Warning: Slack is rate limiting the name lookups: messages are printed with IDs only for %s.", namesPause)
+	case err == nil && name != "":
+		cache[id] = name
+	default:
+		w.unnamedUntil[id] = time.Now().Add(namesPause)
 	}
 	return name, nil
+}
+
+// lookupUser returns the name to call a user by, "" when Slack has none.
+//
+// users.ResolveByID takes a rate limit for an incomplete result: it
+// returns no error and tells the collector of the context, which the
+// command only prints when it ends. Here the lookups must pause instead,
+// so the lookup gets a collector of its own and a rate limit is returned
+// as the error it is.
+func (w *watcher) lookupUser(ctx context.Context, id string) (string, error) {
+	lookupCtx, incomplete := enrich.Collect(ctx)
+	found, err := users.ResolveByID(lookupCtx, w.client, []string{id}, users.ResolveOptions{})
+	u := found[id]
+	name := cmp.Or(u.DisplayName, u.RealName, u.Name)
+	if err == nil && name == "" && len(incomplete.List()) > 0 {
+		return "", &slackapi.RateLimitError{Method: "users.info"}
+	}
+	return name, err
 }
 
 // channelType reads the type of conversation off a message event. Slack
@@ -315,7 +337,15 @@ func textLine(ev Event) string {
 	}
 	b.WriteString(" " + author + ": ")
 	b.WriteString(strings.ReplaceAll(ev.Content, "\n", "\n    "))
-	return b.String()
+	// The line goes to a terminal as it is (JSON escapes them): without
+	// its control characters, so that what someone wrote in Slack cannot
+	// move the cursor, rewrite the lines above or set the title.
+	return strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) && r != '\n' && r != '\t' {
+			return -1
+		}
+		return r
+	}, b.String())
 }
 
 // truncate cuts s to maxChars characters (negative: no limit), on a
