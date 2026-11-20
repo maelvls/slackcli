@@ -100,6 +100,8 @@ SLACK_TOKEN=xoxb-... slackcli auth add --workspace-url https://acme.slack.com --
 
 Your own session can do everything your Slack client can. An app token is limited to its scopes: it cannot use `later`, `unreads` or `message draft`, but it is the only way to run `canvas edit` and `canvas create --channel`.
 
+On Enterprise Grid, Slack refuses a few methods to the session of a workspace (`team_is_restricted`) and usually allows them to the session of the organisation, `https://<org>.enterprise.slack.com`, which `auth import-desktop` saves along with the workspaces. The `message draft` commands use it on their own when one of their calls is refused this way (`drafts.list` and `drafts.delete` are; `drafts.create` is not): the same call is made again with the organisation's session, once `auth.test` has confirmed that it is the organisation of that workspace and the same person. Nothing else is retried this way, and `SLACK_TOKEN` is never swapped for a saved session. For any other command that fails with `team_is_restricted`, pass `--workspace <org>.enterprise.slack.com` to run it as the organisation.
+
 Saved credentials live in `~/.config/slackcli/credentials.json`. On macOS the secrets are in the login keychain and the file only holds placeholders. Credentials are only ever sent to Slack, over https.
 
 ## Output
