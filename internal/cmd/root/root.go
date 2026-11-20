@@ -295,6 +295,8 @@ func (r runner) execute(args []string, stdout, stderr io.Writer) int {
 	// ran is the command cobra selected, once its command line was
 	// accepted.
 	var ran atomic.Pointer[cobra.Command]
+	// timedOutFlag is set once the command timeout has struck.
+	var timedOutFlag atomic.Bool
 	done := make(chan error, 1)
 	go func() {
 		rt := r.newContext()
@@ -317,6 +319,9 @@ func (r runner) execute(args []string, stdout, stderr io.Writer) int {
 			// A set-up that only got here once the command was timed out
 			// or interrupted must not start it: this process is about to
 			// exit, and has said that the command did not run to its end.
+			if timedOutFlag.Load() {
+				return errTimedOut
+			}
 			if err := ctx.Err(); err != nil {
 				return err
 			}
@@ -348,11 +353,11 @@ func (r runner) execute(args []string, stdout, stderr io.Writer) int {
 		return 130
 	}
 
-	var err error
-	select {
-	case err = <-done:
+	err, how, late := wait(done, timedOut, signalCtx.Done())
+	switch how {
+	case finished:
 		stopWatchdog()
-	case <-signalCtx.Done():
+	case interruptedBefore:
 		// The command sees the cancellation and returns, most of the
 		// time. One that does not (a set-up or a call that ignores its
 		// context) is not waited for: Ctrl-C must end the process, and
@@ -366,14 +371,18 @@ func (r runner) execute(args []string, stdout, stderr io.Writer) int {
 			within(r.grace, func() { interrupted() })
 			return 130
 		}
-	case late := <-timedOut:
+	case expired:
 		// The command is still running: what it was doing may or may not
 		// have reached Slack, and saying "timed out" alone invites a
 		// retry that posts twice.
 		//
-		// The messages are written before the command is told to stop,
-		// so that what it writes on its way out comes after them; but
-		// neither that nor the exit waits on a stderr that blocks.
+		// From here on nothing new is started: a set-up that ends now
+		// does not get to run its command (see the pre-run hook). The
+		// command itself is only told to stop once the messages are
+		// written, so that what it writes on its way out comes after
+		// them; but neither that nor the exit waits on a stderr that
+		// blocks.
+		timedOutFlag.Store(true)
 		within(r.grace, func() {
 			fmt.Fprintf(stderr, "%s command timed out after %s. If it was sending or changing something, that may still have gone through: check before retrying. Set %s (milliseconds) to adjust.\n",
 				appinfo.Name, timeout, appinfo.EnvName("COMMAND_TIMEOUT_MS"))
@@ -421,6 +430,53 @@ func (r runner) execute(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "Warning: "+w)
 	}
 	return ExitOK
+}
+
+// errTimedOut is what a command that was not started because the timeout
+// had struck fails with. Nobody sees it: the run ends with ExitTimeout.
+var errTimedOut = errors.New("the command timed out before it started")
+
+// ending is how the wait for a command ended.
+type ending int
+
+const (
+	// finished: the command returned.
+	finished ending = iota
+	// expired: the command timeout struck first.
+	expired
+	// interruptedBefore: a signal came first.
+	interruptedBefore
+)
+
+// wait waits for the command to return (done), for its timeout or for a
+// signal, and says which came first, with the error of the command or
+// what the watchdog saw.
+//
+// A command that has returned has returned, whatever else is true by
+// then: when the timeout or a signal is ready at the same time (a command
+// that ends on the tick the watchdog strikes on, typically right after
+// the machine woke up), it is the command's own result that counts.
+// Reporting a write that went through as timed out would invite sending
+// it again.
+func wait(done <-chan error, timedOut <-chan expiry, signalled <-chan struct{}) (error, ending, expiry) {
+	select {
+	case err := <-done:
+		return err, finished, expiry{}
+	case <-signalled:
+		select {
+		case err := <-done:
+			return err, finished, expiry{}
+		default:
+			return nil, interruptedBefore, expiry{}
+		}
+	case late := <-timedOut:
+		select {
+		case err := <-done:
+			return err, finished, expiry{}
+		default:
+			return nil, expired, late
+		}
+	}
 }
 
 // expiry is what the two clocks of the watchdog showed when the time of a
