@@ -27,7 +27,7 @@ A user ID (`U...` or `W...`, equivalent) means the direct message with that user
 - `message send`, `message compose`, `message draft create`, `message draft update --channel` and `message scheduled list/cancel --channel` write to it, opening it if need be.
 - `message edit/delete/react`, `channel mark` and the `later` write commands reject it: pass a message URL, or the DM's channel ID (`D…`, the `channel_id` that `message list U…` prints) with `--ts`.
 
-A `@handle` is not a target: get the ID with `user get <handle>`. For a group DM, `user dm-open <users...>` (2 to 8 other users; IDs or emails are fastest) prints its `dm_channel_id`; it is a write, as it opens the conversation.
+A `@handle` is not a target: get the ID with `user get <handle>`, or with `user search <words>` when you only know part of the name. For a group DM, `user dm-open <users...>` (2 to 8 other users; IDs or emails are fastest) prints its `dm_channel_id`; it is a write, as it opens the conversation.
 
 Other argument kinds:
 

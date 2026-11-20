@@ -42,8 +42,8 @@ slackcli
 ├── message   get | list | send | edit | delete | react add|remove |
 │             scheduled list|cancel | compose | draft list|create|update|delete
 ├── search    all | messages | files
-├── channel   list | new | invite | mark
-├── user      list | get | dm-open
+├── channel   list | info | new | invite | mark
+├── user      list | search | get | dm-open
 ├── later     list | save | complete | archive | reopen | remove | remind
 ├── unreads
 ├── canvas    create | get | edit
@@ -135,6 +135,8 @@ After a timeout or an interrupt, a command that writes may still have gone throu
 ## Coming from agent-slack
 
 The workspaces saved by agent-slack are copied over on the first run, and the old files are left untouched. `AGENT_SLACK_*` variables are still read when the `SLACKCLI_*` one is unset.
+
+`message send <target> --text "…"` still works: `--text` is taken for the positional text.
 
 ## Development
 
