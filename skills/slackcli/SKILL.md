@@ -1,6 +1,6 @@
 ---
 name: slackcli
-description: "Slack CLI for agents: read message URLs/threads/channel history/unreads/Later/canvases/workflows, search messages and files, download attachments, look up users, list/create/invite channels, open DMs, create/edit canvases from Markdown, hand a message to a human in the compose editor, manage Slack-native drafts, schedule sends, and explicit sends/edits/deletes/reactions/mark-read/uploads."
+description: "Slack CLI for agents: read message URLs/threads/channel history/unreads/inbox (who is waiting on the user)/Later/canvases/workflows, search messages and files, download attachments, look up users, list/create/invite channels, open DMs, create/edit canvases from Markdown, hand a message to a human in the compose editor, manage Slack-native drafts, schedule sends, and explicit sends/edits/deletes/reactions/mark-read/uploads."
 ---
 
 # slackcli
@@ -21,7 +21,7 @@ Use `slackcli` from `$PATH`. If it is missing, tell the user: it is installed fr
 
 1. Run the command you need: credentials are imported on the fly from Slack Desktop or a browser. Only if it reports none, run `auth import-desktop` (or `import-chrome`, `import-brave`, `import-firefox`), then `auth test`. `auth whoami` (local, redacted) lists the workspaces and the default one.
 2. Prefer a Slack message URL as the target: it carries workspace, channel and timestamp. Quote it.
-3. Choose the narrowest read: `message get` for one message, `message list` for a thread or channel history, `search messages|files|all` for discovery, `unreads` for the inbox.
+3. Choose the narrowest read: `message get` for one message, `message list` for a thread or channel history, `search messages|files|all` for discovery, `unreads` for what is unread, `inbox` for who is waiting on an answer.
 4. Bound the output with `--limit`, `--max-body-chars`, `--max-content-chars`, `--counts-only`, `--no-download`.
 5. For a requested write, run only that mutation and check the JSON it prints.
 
@@ -34,14 +34,15 @@ One call each. Messages carry `time` (their `ts` as a local date and time); add 
 - The DM with someone: `user get <handle|email|name>` for their ID, then `message list U…`. It fails when no DM exists; nothing is opened.
 - Who said what, anywhere: `search messages "<words> from:@handle in:#channel" --no-download`. Results carry `channel_name`, `time`, `author.name` and a `permalink` to pass to `message list`.
 - A channel whose exact name you do not know: `channel list --name <text>` (add `--all` for channels you are not in). A known name needs no lookup: pass `#name`.
-- The inbox: `unreads --counts-only`, then `message list` on what matters. Plain `unreads` prints up to 10 messages per conversation.
+- What is unread: `unreads --counts-only`, then `message list` on what matters. Plain `unreads` prints up to 10 messages per conversation.
+- Who is waiting on the user (read or not): `inbox` (`--since 12h`, `2d` or `2026-01-31`; 3 days by default). Each item is a DM (`dm`, `mpim`), an unanswered @mention (`mention`) or new replies in a thread the user posted in (`thread`), with the newest message (`ts`, `author`, `text`, `permalink`) and how many came since the user's last one (`count`, `first_ts`). Pass the `permalink` to `message list` for the thread. `truncated: true` means not everything was looked at: raise `--max-conversations` or shorten `--since`.
 
 ## Non-obvious behaviour
 
 - Channel history (`message list <channel>`) has top-level messages only; a message with `reply_count` started a thread: list it, or pass `--expand-threads`. System messages (joins, leaves, topic changes) are left out and counted in `system_messages_hidden`; `--include-system` lists them. `--oldest`/`--latest` take a day (`2026-01-31`, from 00:00 local time), a date and time (`2026-01-31T14:30`) or a ts. Thread listings reject history-only flags (`--limit`, `--oldest`, `--latest`, `--expand-threads`, `--include-system`, reaction filters). Reaction filters require `--oldest`.
 - Output is one line of JSON (indented only on a terminal). `channel list` prints `{id, name, user, is_private, is_im, is_mpim, is_archived, num_members}`; `--raw` prints Slack's own objects, twenty times larger.
 - `search` without `--channel` uses Slack's search API (operators allowed; not available to bot tokens). With `--channel` (repeatable or comma-separated) the channels are scanned and matched locally: operators are rejected, thread replies are not seen, and it can be slow: bound it with `--after`. `--after`/`--before` are exclusive days.
-- `later`, `unreads`, `message draft` and `channel list --via-counts` need browser credentials (xoxc + cookie). `canvas edit` and `canvas create --channel` need a standard token with `canvases:write`; browser credentials can only create standalone canvases.
+- `later`, `unreads`, `message draft` and `channel list --via-counts` need browser credentials (xoxc + cookie); `inbox` needs search, so not a bot token. On an Enterprise Grid that restricts `client.counts`, `unreads` and `channel list --via-counts` read `users.counts` instead: `unreads` then has no `threads`. `canvas edit` and `canvas create --channel` need a standard token with `canvases:write`; browser credentials can only create standalone canvases.
 - `message send` text is Slack mrkdwn; lists are converted to real Slack lists. Inside them write links as `<URL|label>`: CommonMark `[label](URL)` is not converted. `--blocks` replaces that conversion; with `--attach` the text is the files' plain comment. Several `--attach` flags make one message.
 - Text that starts with a dash: `message send`, `edit`, `compose` and `draft create/update` take it as text when it has several words (`- item`, `-1 for me`). A single dash-word (`-1`, `--force`) is read as a flag: put it after `--`. For `message react`, write the `-1` emoji as `:-1:`.
 - Scheduling: prefer `--schedule` with an ISO 8601 timestamp and explicit offset. `--schedule-in` day names, and `later remind --in` day names, use the local timezone of the machine running slackcli (9:00 by default): confirm it matches the user's intent or pass a Unix timestamp.

@@ -46,6 +46,7 @@ slackcli
 ├── user      list | get | dm-open
 ├── later     list | save | complete | archive | reopen | remove | remind
 ├── unreads
+├── inbox
 ├── canvas    create | get | edit
 └── workflow  list | preview | get | run
 ```
@@ -57,6 +58,40 @@ Most commands take a target:
 - **A user ID** (`U…`), for a direct message. Reading never opens one: `message list U…` fails when you have no DM with that user.
 
 With several workspaces saved, a channel name needs `--workspace <url-or-name>`, or a default set with `slackcli auth set-default`.
+
+## What is waiting on you
+
+`unreads` lists what you have not read. `inbox` lists who is waiting for an answer, read or not: DMs and group DMs whose newest message is not yours (`dm`, `mpim`), @mentions you have not answered (`mention`), and new replies in threads you posted in (`thread`). Your last message or your reaction answers what came before it. It marks nothing as read.
+
+```bash
+slackcli inbox                      # the last 3 days
+slackcli inbox --since 12h          # or 2d, or 2026-01-31 (UTC)
+slackcli inbox --no-threads --max-body-chars 120
+```
+
+```json
+{
+  "user_id": "U123",
+  "since": "2026-11-07T00:00:00.000Z",
+  "truncated": false,
+  "items": [
+    {
+      "kind": "mention",
+      "channel_id": "C123",
+      "channel_name": "general",
+      "thread_ts": "1794219159.861309",
+      "ts": "1794222538.567359",
+      "first_ts": "1794222538.567359",
+      "count": 1,
+      "author": { "user_id": "U456", "name": "jane" },
+      "text": "...",
+      "permalink": "https://acme.slack.com/archives/C123/p1794222538567359?thread_ts=1794219159.861309&cid=C123"
+    }
+  ]
+}
+```
+
+Items are newest first. `count` and `first_ts` cover the messages from others since your last one there; `ts`, `author`, `text` and `permalink` describe the newest. `thread_ts` is absent for the top level of a DM. `truncated` means there was more to look at than `--max-conversations` (60) allowed.
 
 ## Letting a human review
 
@@ -98,7 +133,7 @@ To use a token from a Slack app instead of your own session:
 SLACK_TOKEN=xoxb-... slackcli auth add --workspace-url https://acme.slack.com --from-env
 ```
 
-Your own session can do everything your Slack client can. An app token is limited to its scopes: it cannot use `later`, `unreads` or `message draft`, but it is the only way to run `canvas edit` and `canvas create --channel`.
+Your own session can do everything your Slack client can. An app token is limited to its scopes: it cannot use `later`, `unreads` or `message draft` (nor, for a bot token, `inbox` and `search`), but it is the only way to run `canvas edit` and `canvas create --channel`.
 
 Saved credentials live in `~/.config/slackcli/credentials.json`. On macOS the secrets are in the login keychain and the file only holds placeholders. Credentials are only ever sent to Slack, over https.
 

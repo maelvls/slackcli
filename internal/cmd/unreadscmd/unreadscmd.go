@@ -58,7 +58,15 @@ Prints JSON:
 
 Nothing is marked as read. This command uses Slack's internal client.counts
 API: it needs browser session credentials (xoxc- token and "d" cookie), not
-a bot or user token.`,
+a bot or user token.
+
+On an Enterprise Grid where client.counts answers team_is_restricted,
+users.counts is read instead. It gives the same conversations (muted ones
+only when you are mentioned), with Slack's own unread_count; it knows
+nothing of threads, so threads is absent there.
+
+To see who is waiting for an answer rather than what is unread, use
+"inbox".`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if err := cmdutil.CheckRange("--max-messages", maxMessages, unreads.MaxMessagesLimit, "use --counts-only to fetch no messages"); err != nil {
