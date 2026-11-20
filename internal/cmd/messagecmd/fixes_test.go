@@ -114,7 +114,7 @@ func TestSendWithoutTextMentionsDashText(t *testing.T) {
 	if strings.Contains(err.Error(), `"--"`) {
 		t.Errorf("no flag was given, yet the error talks about flags: %v", err)
 	}
-	h.mustFail(`if the text is a single word starting with a dash, which is read as a flag, put it after "--": message send <target> -- "--text"`,
+	h.mustFail(`if the text is a single word starting with a dash, which is read as a flag, put it after "--": message send <target> -- "-1"`,
 		"send", testChannel, "--no-unfurl")
 	h.wantCalls()
 }
