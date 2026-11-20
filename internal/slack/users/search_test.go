@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"reflect"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -170,7 +171,9 @@ func tokenClient(rec *recorder, token string) *slackapi.Client {
 		slackapi.WithHandler(func(_ context.Context, method string, params map[string]any) (map[string]any, error) {
 			rec.calls = append(rec.calls, call{method, params})
 			return rec.serve(method, params)
-		}))
+		}),
+		// The pauses between the tries of users.lookupByEmail.
+		slackapi.WithSleep(func(context.Context, time.Duration) error { return nil }))
 }
 
 // searchDirectoryPages is a directory of two pages for the scan.
@@ -331,7 +334,8 @@ func TestSearchUsersFailures(t *testing.T) {
 	}
 
 	// Slack also says "ratelimited" in the body of an HTTP 200: it is the
-	// same rate limit, for the email lookup and for the scan.
+	// same rate limit, for the email lookup (asked again, like the one of
+	// "user get", before it fails the search) and for the scan.
 	coded := func(methods ...string) *recorder {
 		rec := limited()
 		serve := rec.serve
@@ -350,7 +354,7 @@ func TestSearchUsersFailures(t *testing.T) {
 	}
 	rec = coded("users.lookupByEmail")
 	if _, err := SearchUsers(ctx, tokenClient(rec, "xoxp-test"), "jane@example.com", 0); err == nil || !strings.Contains(err.Error(), "ratelimited") ||
-		!reflect.DeepEqual(rec.methods(), []string{"users.lookupByEmail"}) {
+		!reflect.DeepEqual(rec.methods(), slices.Repeat([]string{"users.lookupByEmail"}, emailLookupAttempts)) {
 		t.Errorf("ratelimited email lookup: error = %v, calls = %v", err, rec.methods())
 	}
 	rec = coded("search.modules.people")

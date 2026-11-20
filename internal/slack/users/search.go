@@ -59,7 +59,8 @@ type SearchResult struct {
 //
 // A query that is an email address is first looked up as such
 // (users.lookupByEmail), with the tokens that may: Slack answers
-// not_allowed_token_type to browser credentials.
+// not_allowed_token_type to browser credentials. As for "user get", a
+// lookup that Slack did not answer is tried again (see lookupByEmail).
 func SearchUsers(ctx context.Context, client *slackapi.Client, query string, limit int) (SearchResult, error) {
 	query = strings.TrimSpace(query)
 	terms := searchTerms(query)
@@ -72,7 +73,7 @@ func SearchUsers(ctx context.Context, client *slackapi.Client, query string, lim
 	limit = min(limit, MaxSearchLimit)
 
 	if emailRe.MatchString(query) && !client.Auth().IsBrowser() {
-		user, err := lookupByEmail(ctx, client, query)
+		user, _, err := lookupByEmail(ctx, client, query)
 		switch {
 		case user != nil:
 			found := ToCompactUser(user)
