@@ -213,12 +213,28 @@ func TestOrgFallbackIsOnlyForRestrictedDraftCalls(t *testing.T) {
 // organisation of the workspace, signed in as the same person. When it is
 // not, the call fails as it did, and the error says what is stored.
 func TestOrgFallbackNeverUsesAnotherOrganisationOrPerson(t *testing.T) {
-	for name, who := range map[string]map[string]any{
-		"another organisation": {"team_id": "E0OTHER", "enterprise_id": "E0OTHER", "user_id": "U0ME"},
-		"another person":       {"team_id": "E0ACME", "enterprise_id": "E0ACME", "user_id": "U0SOMEONE"},
-		"no identity":          {},
+	for name, tc := range map[string]struct {
+		who  map[string]any
+		says []string
+		not  string
+	}{
+		"another organisation": {
+			who:  map[string]any{"team_id": "E0OTHER", "enterprise_id": "E0OTHER", "user_id": "U0ME"},
+			says: []string{"is another organisation (E0OTHER, when this workspace belongs to E0ACME)"},
+			not:  "another person",
+		},
+		"another person": {
+			who:  map[string]any{"team_id": "E0ACME", "enterprise_id": "E0ACME", "user_id": "U0SOMEONE"},
+			says: []string{"is signed in as another person (U0SOMEONE, when this workspace is signed in as U0ME)"},
+			not:  "another organisation",
+		},
+		"no identity": {
+			who:  map[string]any{},
+			says: []string{"is another organisation (none, ", " and is signed in as another person (none, "},
+		},
 	} {
 		t.Run(name, func(t *testing.T) {
+			who := tc.who
 			c, s := grid(t)
 			s.sites["acme.enterprise.slack.com"].who = who
 
@@ -226,10 +242,13 @@ func TestOrgFallbackNeverUsesAnotherOrganisationOrPerson(t *testing.T) {
 			if !slackapi.IsErrorCode(err, "team_is_restricted") {
 				t.Fatalf("err = %v, want team_is_restricted", err)
 			}
-			for _, want := range []string{"Slack API error calling drafts.list: team_is_restricted: ", orgURL, "another organisation, or of another person", "`" + appinfo.Name + " auth import-desktop`"} {
+			for _, want := range append([]string{"Slack API error calling drafts.list: team_is_restricted: ", orgURL, "`" + appinfo.Name + " auth import-desktop`"}, tc.says...) {
 				if !strings.Contains(err.Error(), want) {
 					t.Errorf("err = %v, does not say %q", err, want)
 				}
+			}
+			if tc.not != "" && strings.Contains(err.Error(), tc.not) {
+				t.Errorf("err = %v, says %q, which is not what differs", err, tc.not)
 			}
 			for _, call := range s.took() {
 				if call == "acme.enterprise.slack.com drafts.list" {
@@ -308,6 +327,8 @@ func TestOrgFallbackWhenTheOrganisationCannotAnswer(t *testing.T) {
 		}
 	})
 
+	// --workspace <org> would run the command with that token, which the
+	// draft commands refuse: the generic advice is not given.
 	t.Run("the organisation is stored with a standard token", func(t *testing.T) {
 		c, s := grid(t)
 		mustUpsert(t, c, standard(orgURL, "xoxp-org"))
@@ -315,10 +336,53 @@ func TestOrgFallbackWhenTheOrganisationCannotAnswer(t *testing.T) {
 		if !slackapi.IsErrorCode(err, "team_is_restricted") {
 			t.Fatalf("err = %v, want team_is_restricted", err)
 		}
+		for _, want := range []string{orgURL + " is stored with a standard token", "`" + appinfo.Name + " auth remove " + orgURL + "`"} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("err = %v, does not say %q", err, want)
+			}
+		}
+		if strings.Contains(err.Error(), "--workspace <org>") {
+			t.Errorf("err = %v: suggests --workspace <org>, which would use the standard token", err)
+		}
 		if got := s.took(); !reflect.DeepEqual(got, []string{"acme-eng.slack.com drafts.list"}) {
 			t.Errorf("calls = %q, want the one refused call", got)
 		}
 	})
+
+	// An identity check that got no answer says nothing about whose
+	// session is stored: the error says to try again, not to import.
+	for name, host := range map[string]string{
+		"the check of the workspace fails for a moment":    "acme-eng.slack.com",
+		"the check of the organisation fails for a moment": "acme.enterprise.slack.com",
+	} {
+		t.Run(name, func(t *testing.T) {
+			c, s := grid(t)
+			if s.sites[host].refuses == nil {
+				s.sites[host].refuses = map[string]string{}
+			}
+			s.sites[host].refuses["auth.test"] = "internal_error"
+
+			_, err := mustClient(t, c, "").API(context.Background(), "drafts.list", nil)
+			if !slackapi.IsErrorCode(err, "team_is_restricted") {
+				t.Fatalf("err = %v, want team_is_restricted", err)
+			}
+			for _, want := range []string{"could not be checked just now (auth.test of https://" + host + ": internal_error)", "run the command again"} {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("err = %v, does not say %q", err, want)
+				}
+			}
+			for _, not := range []string{"another organisation", "another person", "import-desktop"} {
+				if strings.Contains(err.Error(), not) {
+					t.Errorf("err = %v, says %q about a check that got no answer", err, not)
+				}
+			}
+			for _, call := range s.took() {
+				if call == "acme.enterprise.slack.com drafts.list" {
+					t.Error("drafts.list was sent to an organisation that was not checked")
+				}
+			}
+		})
+	}
 }
 
 // SLACK_TOKEN is one identity: a stored session is never used in its

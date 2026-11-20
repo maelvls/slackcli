@@ -2,6 +2,7 @@ package clictx
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/url"
 	"strings"
@@ -39,6 +40,11 @@ func IsOrgURL(workspaceURL string) bool {
 // workspace, cannot all read. The commands that use it have a fallback of
 // their own, and --workspace <org>.enterprise.slack.com runs a whole
 // command as the organisation.
+//
+// Only the drafts.* call itself changes session. What "draft list" asks
+// next (conversations.info, for the names of the channels) is still asked
+// as the workspace: a draft for a channel of another workspace of the
+// organisation may be listed with its channel ID and no name.
 //
 // enterprise_is_restricted is the opposite refusal (a method that the
 // organisation itself is not allowed), and user_is_restricted is about a
@@ -90,14 +96,29 @@ func (c *Context) orgClient(ctx context.Context, a slackapi.Auth, workspaceURL s
 		enterpriseID, userID string
 		why                  string
 	)
+	// The first reason found is the one given: it is about the first
+	// organisation stored, which is the likeliest to be the right one.
+	decline := func(format string, args ...any) {
+		if why == "" {
+			why = refused + fmt.Sprintf(format, args...)
+		}
+	}
 	for _, w := range creds.Workspaces {
-		if w.URL == workspaceURL || !w.Auth.IsBrowser() || !IsOrgURL(w.URL) {
+		if w.URL == workspaceURL || !IsOrgURL(w.URL) {
+			continue
+		}
+		if !w.Auth.IsBrowser() {
+			// Not the generic advice: --workspace <org> would run the
+			// command with that token, which the commands that need a
+			// browser session refuse.
+			trace.Logf("organisation %s is stored with a standard token, not a browser session: not used", w.URL)
+			decline("The organisation %[1]s is stored with a standard token (xoxb-/xoxp-), and only its browser session may be allowed this method: to use that session instead, run `%[2]s auth remove %[1]s`, then %[3]s", w.URL, appinfo.Name, reimport)
 			continue
 		}
 		orgAuth, err := c.Store.Resolve(w)
 		if err != nil {
 			trace.Logf("organisation %s: its stored secrets cannot be read", w.URL)
-			why = fmt.Sprintf("%sThe session stored for the organisation %s may be allowed it, but its secrets cannot be read (keychain locked?): unlock the keychain, or %s", refused, w.URL, reimport)
+			decline("The session stored for the organisation %s may be allowed it, but its secrets cannot be read (keychain locked?): unlock the keychain, or %s", w.URL, reimport)
 			continue
 		}
 		if enterpriseID == "" {
@@ -105,7 +126,11 @@ func (c *Context) orgClient(ctx context.Context, a slackapi.Auth, workspaceURL s
 			// with.
 			who, err := slackapi.New(a, workspaceURL, c.ClientOptions...).API(ctx, "auth.test", nil)
 			if err != nil {
-				return nil, ""
+				trace.Logf("workspace %s: auth.test failed (%v)", workspaceURL, err)
+				if slackapi.IsTransient(err) {
+					decline("The session stored for the organisation %s may be allowed it, but whether it is the organisation of this workspace could not be checked just now (%s): run the command again", w.URL, checkFailure(workspaceURL, err))
+				}
+				return nil, why
 			}
 			enterpriseID, userID = jsonx.Str(who["enterprise_id"]), jsonx.Str(who["user_id"])
 			if enterpriseID == "" || userID == "" {
@@ -116,19 +141,58 @@ func (c *Context) orgClient(ctx context.Context, a slackapi.Auth, workspaceURL s
 		who, err := org.API(ctx, "auth.test", nil)
 		if err != nil {
 			trace.Logf("organisation %s: auth.test failed (%v)", w.URL, err)
-			if slackapi.IsAuthError(err) {
-				why = fmt.Sprintf("%sThe session stored for the organisation %s may be allowed it, but Slack rejected it (%s): %s", refused, w.URL, slackapi.ErrorCode(err), reimport)
+			switch {
+			case slackapi.IsAuthError(err):
+				decline("The session stored for the organisation %s may be allowed it, but Slack rejected it (%s): %s", w.URL, slackapi.ErrorCode(err), reimport)
+			case slackapi.IsTransient(err):
+				decline("The session stored for the organisation %s may be allowed it, but whether it is the organisation of this workspace could not be checked just now (%s): run the command again", w.URL, checkFailure(w.URL, err))
 			}
 			continue
 		}
-		sameOrg := jsonx.Str(who["enterprise_id"]) == enterpriseID || jsonx.Str(who["team_id"]) == enterpriseID
-		if sameOrg && jsonx.Str(who["user_id"]) == userID {
+		// The organisation's own session names it as its enterprise, or
+		// as its team.
+		orgEnterprise, orgTeam, orgUser := jsonx.Str(who["enterprise_id"]), jsonx.Str(who["team_id"]), jsonx.Str(who["user_id"])
+		sameOrg := orgEnterprise == enterpriseID || orgTeam == enterpriseID
+		sameUser := orgUser == userID
+		if sameOrg && sameUser {
 			return org, ""
 		}
-		trace.Logf("organisation %s is not that of %s, or is signed in as somebody else: not used", w.URL, workspaceURL)
-		if why == "" {
-			why = fmt.Sprintf("%sThe session of its organisation is allowed it, but the one that is stored (%s) is that of another organisation, or of another person: %s", refused, w.URL, reimport)
+		var differs []string
+		if !sameOrg {
+			if orgEnterprise == "" {
+				orgEnterprise = orgTeam
+			}
+			differs = append(differs, fmt.Sprintf("is another organisation (%s, when this workspace belongs to %s)", orNone(orgEnterprise), enterpriseID))
 		}
+		if !sameUser {
+			differs = append(differs, fmt.Sprintf("is signed in as another person (%s, when this workspace is signed in as %s)", orNone(orgUser), userID))
+		}
+		mismatch := strings.Join(differs, " and ")
+		trace.Logf("organisation %s %s: not used for %s", w.URL, mismatch, workspaceURL)
+		decline("The session of its organisation may be allowed it, but the one that is stored (%s) %s: %s", w.URL, mismatch, reimport)
 	}
 	return nil, why
+}
+
+// checkFailure says, in a few words, why the auth.test of workspaceURL gave
+// no answer: the full error carries advice of its own, which would read as
+// advice about the command.
+func checkFailure(workspaceURL string, err error) string {
+	cause := "no answer"
+	var limited *slackapi.RateLimitError
+	switch {
+	case errors.As(err, &limited):
+		cause = "rate limited"
+	case slackapi.ErrorCode(err) != "":
+		cause = slackapi.ErrorCode(err)
+	}
+	return fmt.Sprintf("auth.test of %s: %s", workspaceURL, cause)
+}
+
+// orNone is s, or "none" when Slack gave no value.
+func orNone(s string) string {
+	if s == "" {
+		return "none"
+	}
+	return s
 }

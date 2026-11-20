@@ -111,7 +111,7 @@ func explain(code string) string {
 	case "channel_not_found":
 		return fmt.Sprintf("no conversation has that ID in this workspace, or it is a private one these credentials are not a member of: check the ID (`%s channel list`), and the workspace (--workspace, or pass a Slack URL, which names its own)", appinfo.Name)
 	case "team_is_restricted":
-		return fmt.Sprintf("this workspace belongs to an Enterprise Grid organisation, and Slack refuses this method to the session of a workspace. The session of the organisation is allowed it: run the command again with --workspace <org>.enterprise.slack.com (`%[1]s auth whoami` lists the configured workspaces; `%[1]s auth import-desktop` imports the organisation along with its workspaces)", appinfo.Name)
+		return fmt.Sprintf("this workspace belongs to an Enterprise Grid organisation, and Slack refuses this method to the session of a workspace. The session of the organisation usually works: run the command again with --workspace <org>.enterprise.slack.com (`%[1]s auth whoami` lists the configured workspaces; `%[1]s auth import-desktop` imports the organisation along with its workspaces)", appinfo.Name)
 	case "ratelimited":
 		return fmt.Sprintf("Slack is rate limiting this method: run the command again in a minute, or set %s to wait and retry automatically", appinfo.EnvName("RATE_LIMIT_MAX_WAIT_MS"))
 	}
