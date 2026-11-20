@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -144,6 +145,49 @@ func TestAuthorizeOnlyAddsCredentialsForSlackHosts(t *testing.T) {
 	New(Auth{Type: AuthStandard, Token: "xoxb-1"}, "", WithLoopbackWorkspaceForTesting()).Authorize(req)
 	if req.Header.Get("Authorization") != "Bearer xoxb-1" {
 		t.Error("the test option did not allow a loopback request")
+	}
+}
+
+func TestWebSocketHeaderOnlyGivesCredentialsForSlackHosts(t *testing.T) {
+	browser := New(Auth{Type: AuthBrowser, XoxcToken: "xoxc-1", XoxdCookie: "xoxd+1"}, "https://acme.slack.com")
+	for target, want := range map[string]bool{
+		"wss://wss-primary.slack.com/websocket/abc": true,
+		"ws://wss-primary.slack.com/websocket/abc":  false,
+		"https://wss-primary.slack.com/x":           false,
+		"wss://user@wss-primary.slack.com/x":        false,
+		"wss://attacker.example/websocket/abc":      false,
+		"wss://slack.com.attacker.example/x":        false,
+		"ws://127.0.0.1:8080/x":                     false,
+	} {
+		u, err := url.Parse(target)
+		if err != nil {
+			t.Fatal(err)
+		}
+		h, err := browser.WebSocketHeader(u)
+		if (err == nil) != want {
+			t.Errorf("WebSocketHeader(%s) = %v, %v; allowed should be %v", target, h, err, want)
+		}
+		if err != nil && (h != nil || strings.Contains(err.Error(), "abc")) {
+			t.Errorf("WebSocketHeader(%s) = %v, %v: a refusal gives no header and does not quote the path", target, h, err)
+		}
+		if err == nil && (h.Get("Cookie") != "d=xoxd%2B1" || h.Get("Origin") != "https://app.slack.com" || h.Get("User-Agent") == "") {
+			t.Errorf("WebSocketHeader(%s) = %v", target, h)
+		}
+	}
+	if _, err := browser.WebSocketHeader(nil); err == nil {
+		t.Error("WebSocketHeader(nil) = nil error")
+	}
+
+	// A standard token is carried by the URL Slack gave: no cookie.
+	u, _ := url.Parse("wss://wss-primary.slack.com/websocket/abc")
+	h, err := New(Auth{Type: AuthStandard, Token: "xoxp-1"}, "").WebSocketHeader(u)
+	if err != nil || h.Get("Cookie") != "" || h.Get("Authorization") != "" {
+		t.Errorf("standard token: %v, %v", h, err)
+	}
+
+	u, _ = url.Parse("ws://127.0.0.1:8080/x")
+	if _, err := New(Auth{Type: AuthBrowser, XoxcToken: "xoxc-1", XoxdCookie: "xoxd-1"}, "https://acme.slack.com", WithLoopbackWorkspaceForTesting()).WebSocketHeader(u); err != nil {
+		t.Errorf("the test option did not allow a loopback WebSocket: %v", err)
 	}
 }
 

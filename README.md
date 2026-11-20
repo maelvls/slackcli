@@ -47,6 +47,7 @@ slackcli
 ├── later     list | save | complete | archive | reopen | remove | remind
 ├── unreads
 ├── inbox
+├── watch
 ├── canvas    create | get | edit
 └── workflow  list | preview | get | run
 ```
@@ -135,16 +136,16 @@ To use a token from a Slack app instead of your own session:
 SLACK_TOKEN=xoxb-... slackcli auth add --workspace-url https://acme.slack.com --from-env
 ```
 
-Your own session can do everything your Slack client can. An app token is limited to its scopes: it cannot use `later`, `unreads` or `message draft` (nor, for a bot token, `inbox` and `search`), but it is the only way to run `canvas edit` and `canvas create --channel`.
+Your own session can do everything your Slack client can. An app token is limited to its scopes: it cannot use `later`, `unreads`, `watch` or `message draft` (nor, for a bot token, `inbox` and `search`), but it is the only way to run `canvas edit` and `canvas create --channel`.
 
 On Enterprise Grid, Slack refuses a few methods to the session of a workspace (`team_is_restricted`) and usually allows them to the session of the organisation, `https://<org>.enterprise.slack.com`, which `auth import-desktop` saves along with the workspaces. The `message draft` commands use it on their own when one of their calls is refused this way (`drafts.list` and `drafts.delete` are; `drafts.create` is not): the same call is made again with the organisation's session, once `auth.test` has confirmed that it is the organisation of that workspace and the same person. Nothing else is retried this way, and `SLACK_TOKEN` is never swapped for a saved session. For any other command that fails with `team_is_restricted`, pass `--workspace <org>.enterprise.slack.com` to run it as the organisation.
 
-Saved credentials live in `~/.config/slackcli/credentials.json`. On macOS the secrets are in the login keychain and the file only holds placeholders. Credentials are only ever sent to Slack, over https.
+Saved credentials live in `~/.config/slackcli/credentials.json`. On macOS the secrets are in the login keychain and the file only holds placeholders. Credentials are only ever sent to Slack, over https (and wss for `watch`).
 
 ## Output
 
 - Results are JSON on stdout, with empty fields removed: on one line, or indented when stdout is a terminal.
-- Warnings and hints are part of the result, in its `warnings` and `hints` arrays, so a successful command that prints JSON writes nothing on stderr and `slackcli … 2>&1 | jq` still parses. Stderr gets the error of a command that failed (and the warnings that came before it), the notes of the few `auth` commands that print text, and, when it is a terminal, the progress of `message compose` while it waits for a human. An error is not JSON: keep stderr apart (`2>err.txt`) and check the exit code before parsing.
+- Warnings and hints are part of the result, in its `warnings` and `hints` arrays, so a successful command that prints JSON writes nothing on stderr and `slackcli … 2>&1 | jq` still parses. Stderr gets the error of a command that failed (and the warnings that came before it), the notes of the few `auth` commands that print text, the connection notes of `watch` (a stream, not one result), and, when it is a terminal, the progress of `message compose` while it waits for a human. An error is not JSON: keep stderr apart (`2>err.txt`) and check the exit code before parsing.
 - Messages have `ts`, which identifies them, and `time`, the same instant as a local date and time.
 - A list command always prints its list, `[]` when empty, and `next_cursor` when there is more (pass it to `--cursor`).
 - Files attached to messages are downloaded to the cache directory and listed with their local `path`. A file that Slack does not host, such as a Google Docs link, is listed with `"external": true` and its `url` instead. `--no-download` (`message get`, `message list`, `search`) lists them without downloading anything.

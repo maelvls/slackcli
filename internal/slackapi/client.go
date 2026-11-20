@@ -225,6 +225,32 @@ func (c *Client) Authorize(req *http.Request) {
 	}
 }
 
+// WebSocketHeader returns the headers to open the WebSocket at u with, as
+// Authorize does for an HTTP request: the User-Agent, and for a browser
+// session the Origin of the Slack client and the "d" cookie. It refuses a
+// URL that credentials must not be sent to: anything but wss to a Slack
+// host (IsSlackHost). The URL comes from Slack (rtm.connect) and carries a
+// token of its own, so it is not trusted more than a workspace URL.
+func (c *Client) WebSocketHeader(u *url.URL) (http.Header, error) {
+	if u == nil {
+		return nil, errors.New("missing WebSocket URL")
+	}
+	allowed := u.Scheme == "wss" && u.User == nil && IsSlackHost(u.Hostname())
+	if !allowed && c.loopbackForTesting && (u.Scheme == "ws" || u.Scheme == "wss") {
+		allowed = isLoopbackURL(&url.URL{Scheme: "http", Host: u.Host})
+	}
+	if !allowed {
+		return nil, fmt.Errorf("refusing to open the WebSocket at %s://%s: it is not a wss address of a Slack host, and the credentials are only sent to Slack", u.Scheme, u.Host)
+	}
+	h := http.Header{}
+	h.Set("User-Agent", appinfo.UserAgent())
+	if c.auth.IsBrowser() {
+		h.Set("Origin", "https://app.slack.com")
+		h.Set("Cookie", "d="+EncodeCookieD(c.auth.XoxdCookie))
+	}
+	return h, nil
+}
+
 // APITimeout is the per-request timeout (SLACKCLI_API_TIMEOUT_MS, legacy
 // SLACK_API_TIMEOUT_MS; default 20s).
 func APITimeout() time.Duration {
