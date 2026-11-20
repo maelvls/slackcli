@@ -16,6 +16,7 @@ import (
 	"github.com/maelvls/slackcli/internal/auth"
 	"github.com/maelvls/slackcli/internal/authextract"
 	"github.com/maelvls/slackcli/internal/output"
+	"github.com/maelvls/slackcli/internal/slack/enrich"
 	"github.com/maelvls/slackcli/internal/slackapi"
 	"github.com/maelvls/slackcli/internal/slackid"
 )
@@ -31,7 +32,8 @@ type Extractor func(ctx context.Context) (*authextract.Extracted, error)
 type Context struct {
 	// Store persists credentials.
 	Store *auth.Store
-	// Stdout receives command results; Stderr receives hints and warnings.
+	// Stdout receives command results, with their warnings and hints;
+	// Stderr receives errors and what is said while a command runs.
 	Stdout io.Writer
 	Stderr io.Writer
 	// SafeModeFlag is bound to the global --safe-mode flag.
@@ -46,7 +48,16 @@ type Context struct {
 	// ClientOptions are passed to every slackapi.New call (tests).
 	ClientOptions []slackapi.Option
 
-	mu              sync.Mutex
+	// Incomplete, when set, collects the warnings of optional lookups
+	// (enrich.Collect): they are printed with those of Warnf.
+	Incomplete *enrich.Warnings
+
+	mu sync.Mutex
+	// warnings and hints are the notes about the result that are not
+	// printed yet (see Warnf); incompleteSeen is how many warnings of
+	// Incomplete are.
+	warnings, hints []string
+	incompleteSeen  int
 	disableWatchdog func()
 	// last is what Client resolved most recently (nil if it failed):
 	// WithAutoRefresh uses it to know whose credentials were rejected.
@@ -64,14 +75,27 @@ func New() *Context {
 		Brave:   authextract.Brave,
 		Firefox: authextract.Firefox,
 	}
-	c.Store.Warnf = c.Hintf
+	// A warning of the store is one about the result, like the others.
+	c.Store.Warnf = func(format string, args ...any) {
+		c.Warnf(strings.TrimPrefix(format, "warning: "), args...)
+	}
 	return c
 }
 
-// Print writes a command result to Stdout as pruned JSON.
-func (c *Context) Print(v any) error { return output.Write(c.Stdout, v) }
+// Print writes a command result to Stdout as pruned JSON, with the
+// warnings and hints recorded so far (Warnf, ResultHintf).
+func (c *Context) Print(v any) error {
+	compact, err := output.MarshalCompact(v)
+	if err != nil {
+		return err
+	}
+	return c.PrintCompact(compact)
+}
 
-// Hintf writes a line to Stderr (warnings, hints; never results).
+// Hintf writes a line to Stderr at once: what a human has to read while
+// the command runs, and the notes of commands that print text. Never
+// results; and not what is said about a JSON result either, which goes in
+// it (Warnf, ResultHintf).
 func (c *Context) Hintf(format string, args ...any) {
 	fmt.Fprintf(c.Stderr, strings.TrimRight(format, "\n")+"\n", args...)
 }

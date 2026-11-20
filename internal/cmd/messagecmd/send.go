@@ -66,7 +66,7 @@ as real Slack lists. It is required unless --attach or --blocks is given.
 Prints {ok, channel_id, ts, thread_ts, permalink}; with --schedule/--schedule-in
 {ok, channel_id, scheduled_message_id, post_at, thread_ts}; with --attach
 {ok, channel_id, thread_ts, files}. "permalink" is only left out, with a
-warning on stderr, when Slack would not give it for a token that names no
+warning in "warnings", when Slack would not give it for a token that names no
 workspace: the message is sent all the same.
 
 [text] of several words may start with a dash ("- one\n- two"). A single word
@@ -277,7 +277,7 @@ func (c *command) sendToChannel(ctx context.Context, loc cmdutil.Located, m outg
 		result.ScheduledMessageID = jsonx.Str(resp["scheduled_message_id"])
 		result.PostAt = cmp.Or(scheduled.UnixSeconds(resp["post_at"]), m.postAt)
 		if result.ScheduledMessageID == "" {
-			c.rt.Hintf(`Warning: Slack accepted the scheduled message but returned no scheduled_message_id; find it with "%s message scheduled list".`, appinfo.Name)
+			c.rt.Warnf(`Slack accepted the scheduled message but returned no scheduled_message_id; find it with "%s message scheduled list".`, appinfo.Name)
 		}
 
 	case len(m.attach) == 0:
@@ -292,7 +292,7 @@ func (c *command) sendToChannel(ctx context.Context, loc cmdutil.Located, m outg
 
 	default:
 		if m.blocks != nil {
-			c.rt.Hintf("Warning: rich text formatting is not supported with file attachments; sending as plain text.")
+			c.rt.Warnf("rich text formatting is not supported with file attachments; sending as plain text.")
 		}
 		uploaded, err := upload.ToChannel(ctx, loc.Client, upload.Destination{
 			ChannelID:      loc.ChannelID,

@@ -118,6 +118,10 @@ type File struct {
 	// It is empty when downloads are off.
 	Path  string `json:"path,omitempty"`
 	Error string `json:"error,omitempty"`
+	// External marks a file that is not hosted by Slack (a Google Docs
+	// link…): it has no Path, and URL is where to open it.
+	External bool   `json:"external,omitempty"`
+	URL      string `json:"url,omitempty"`
 	// Permalink opens the file in Slack.
 	Permalink string `json:"permalink,omitempty"`
 }
@@ -144,7 +148,7 @@ type Result struct {
 	MoreMessages *More `json:"more_messages,omitempty"`
 	MoreFiles    *More `json:"more_files,omitempty"`
 	// Warnings are non-fatal problems (failed downloads, a scan cut short
-	// by a rate limit) for the caller to show on stderr.
+	// by a rate limit) for the caller to print in the "warnings" of the result.
 	Warnings []string `json:"-"`
 }
 

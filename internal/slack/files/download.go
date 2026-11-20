@@ -69,6 +69,21 @@ type DownloadResult struct {
 	// Error and HTTPStatus describe a failure.
 	Error      string `json:"error,omitempty"`
 	HTTPStatus int    `json:"http_status,omitempty"`
+	// External means the file is not hosted by Slack (a Google Docs link,
+	// for instance): there was nothing to download, which is not a
+	// failure (OK is set, Path is empty). URL is where it lives.
+	External bool   `json:"external,omitempty"`
+	URL      string `json:"url,omitempty"`
+}
+
+// IsExternal reports whether rawURL, the private URL of a file, points
+// outside Slack: the file is then only a link (to Google Drive, Dropbox…)
+// that Slack lists among the files of a message. A URL that cannot be
+// told (unparsable, without a host) is not external: downloading it fails
+// with an explanation.
+func IsExternal(rawURL string) bool {
+	u, err := url.Parse(rawURL)
+	return err == nil && u.Hostname() != "" && !slackapi.IsSlackHost(u.Hostname())
 }
 
 // DownloadOptions tunes Download.
@@ -305,7 +320,11 @@ func writeAtomic(dest string, body io.Reader) error {
 // TryDownload is Download with fetch failures (*DownloadError) reported in
 // the result instead of as an error. The returned error is only non-nil
 // for local failures (disk, cancellation), which should abort the command.
+// An external file (IsExternal) is not fetched and not a failure either.
 func TryDownload(ctx context.Context, client *slackapi.Client, rawURL string, opts DownloadOptions) (DownloadResult, error) {
+	if IsExternal(rawURL) {
+		return DownloadResult{OK: true, External: true, URL: rawURL}, nil
+	}
 	p, err := Download(ctx, client, rawURL, opts)
 	if err == nil {
 		return DownloadResult{OK: true, Path: p}, nil

@@ -74,11 +74,11 @@ func runImport(ctx context.Context, rt *clictx.Context, source, advice string, e
 	creds, _ := rt.Store.Load()
 	for _, u := range kept {
 		if creds != nil && creds.Find(u) == nil {
-			rt.Hintf(`note: the browser session found in %[2]s was not imported for %[1]s: %[4]s has a standard token for that workspace, which could not be migrated yet (see the warning above) and which an import must not replace with a browser session. The workspace is not configured until that migration goes through: fix what the warning says, then run this command again`,
+			rt.ResultHintf(`the browser session found in %[2]s was not imported for %[1]s: %[4]s has a standard token for that workspace, which could not be migrated yet (the warning says why) and which an import must not replace with a browser session. The workspace is not configured until that migration goes through: fix what the warning says, then run this command again`,
 				u, source, appinfo.Name, appinfo.LegacyName)
 			continue
 		}
-		rt.Hintf(`note: %[1]s keeps its standard token (saved with "auth add"); the browser session found in %[2]s was not imported for it. To use the browser session instead, run "%[3]s auth remove %[1]s" and import again`,
+		rt.ResultHintf(`%[1]s keeps its standard token (saved with "auth add"); the browser session found in %[2]s was not imported for it. To use the browser session instead, run "%[3]s auth remove %[1]s" and import again`,
 			u, source, appinfo.Name)
 	}
 	hintNoDefault(rt)
@@ -106,10 +106,11 @@ func (e *rewordedError) Error() string { return e.msg }
 func (e *rewordedError) Unwrap() error { return e.err }
 
 // hintNoDefault tells the user, after credentials were saved, that several
-// workspaces are configured and none is the default.
+// workspaces are configured and none is the default: in the "hints" of a
+// command that prints JSON, on stderr for one that prints text.
 func hintNoDefault(rt *clictx.Context) {
 	if advice := noDefaultAdvice(rt); advice != "" {
-		rt.Hintf("note: %s", advice)
+		rt.ResultHintf("%s", advice)
 	}
 }
 
@@ -140,7 +141,7 @@ On macOS the cookie is decrypted with the "Slack Safe Storage" keychain item:
 macOS may ask for permission the first time.
 
 A workspace saved with a standard token ("auth add") keeps it: it is skipped,
-with a note on stderr. When several workspaces are imported at once and none
+with a note in "hints". When several workspaces are imported at once and none
 was configured before, no default workspace is set: choose one with
 "auth set-default", or pass --workspace to every command.
 

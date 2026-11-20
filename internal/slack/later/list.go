@@ -125,8 +125,8 @@ type ListResult struct {
 	// ListOptions.Cursor to continue right after the last item returned.
 	NextCursor string `json:"next_cursor,omitempty"`
 	// Warnings say what is missing from Items because Slack rate limited
-	// the lookups (channel names, messages), for the caller to show on
-	// stderr.
+	// the lookups (channel names, messages), for the caller to print in
+	// the "warnings" of the result.
 	Warnings []string `json:"-"`
 }
 

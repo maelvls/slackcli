@@ -16,15 +16,15 @@ func TestNoMatchPrintsEmptyLists(t *testing.T) {
 		return map[string]any{"files": map[string]any{"matches": []any{}}}, nil
 	})
 	for kind, want := range map[string]string{
-		"messages": "{\"messages\":[]}\n",
-		"files":    "{\"files\":[]}\n",
-		"all":      "{\"messages\":[],\"files\":[]}\n",
+		"messages": "{\"messages\":[],\"hints\":[\"Nothing matched.",
+		"files":    "{\"files\":[],\"hints\":[\"Nothing matched.",
+		"all":      "{\"messages\":[],\"files\":[],\"hints\":[\"Nothing matched.",
 	} {
 		got, err := h.run(kind, "nothing like this")
 		if err != nil {
 			t.Fatalf("search %s: %v", kind, err)
 		}
-		if got != want {
+		if !strings.HasPrefix(got, want) {
 			t.Errorf("search %s printed %s, want %s", kind, got, want)
 		}
 	}

@@ -85,7 +85,7 @@ a bot or user token.`,
 				return err
 			}
 			for _, w := range payload.Warnings {
-				rt.Hintf("Warning: %s", w)
+				rt.Warnf("%s", w)
 			}
 			return cmdutil.PrintList(rt, payload, "channels")
 		},

@@ -226,7 +226,7 @@ Prints {channel_id, messages: [{channel_id, ts, time, thread_ts, reply_count,
 author: {user_id, bot_id, name}, content, files, reactions,
 forwarded_threads}], system_messages_hidden, referenced_users}, oldest
 message first, in the same shape for a channel and for a thread.
-"messages" is [] when there are none, with a hint on stderr. "time" is "ts"
+"messages" is [] when there are none, with a hint in "hints". "time" is "ts"
 as a local date and time. "content" is Markdown. "thread_ts" is the root of
 the thread a message belongs to: every message of a listed thread has it,
 and in channel history only the messages that started a thread, which also
@@ -422,10 +422,10 @@ func (c *command) listHistory(ctx context.Context, target cmdutil.Target, opts l
 	switch {
 	case len(result.Messages) > 0:
 	case result.SystemMessagesHidden > 0:
-		c.rt.Hintf("No messages matched in %s, other than %d system messages (joins, leaves, topic changes …): pass --include-system to see them.",
+		c.rt.ResultHintf("No messages matched in %s, other than %d system messages (joins, leaves, topic changes …): pass --include-system to see them.",
 			describeRange(oldest, latest), result.SystemMessagesHidden)
 	default:
-		c.rt.Hintf("No messages matched in %s.", describeRange(oldest, latest))
+		c.rt.ResultHintf("No messages matched in %s.", describeRange(oldest, latest))
 	}
 	return cmdutil.PrintList(c.rt, result, "messages")
 }

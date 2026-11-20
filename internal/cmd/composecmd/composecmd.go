@@ -124,8 +124,8 @@ unless they press Send.
 Prints {ok, sent, channel_id, ts, thread_ts, permalink, text}, where text is
 what the human sent. If they cancel, close the tab, or never open the editor
 (30 minutes), prints {ok, cancelled, reason}. "permalink" is only left out,
-with a warning on stderr, when Slack would not give it for a token that names
-no workspace: the message is sent all the same.
+with a warning in "warnings", when Slack would not give it for a token that
+names no workspace: the message is sent all the same.
 
 The command does not time out: it waits for the human. Stop it with Ctrl-C.
 
@@ -282,8 +282,12 @@ func (c *composer) compose(ctx context.Context, targetInput, initialText string,
 		rt.Hintf("Could not open a browser (%v).\nOpen this one-time link yourself, in a browser on this machine (over SSH, forward the port first):\n  %s", err, sess.url())
 		where = "is not open yet: it waits for a human to open the link above"
 	}
-	rt.Hintf("Compose editor for %s %s (%s). Waiting for a human to send or cancel there; Ctrl-C aborts.",
-		dest.label(), where, sess.origin())
+	// Progress, for a human at a terminal. An agent that captures stderr
+	// ("2>&1 | jq") gets nothing here, so that the result still parses.
+	if c.humanAtStderr() {
+		rt.Hintf("Compose editor for %s %s (%s). Waiting for a human to send or cancel there; Ctrl-C aborts.",
+			dest.label(), where, sess.origin())
+	}
 
 	out, err := sess.wait(ctx)
 	if err != nil {
@@ -291,7 +295,7 @@ func (c *composer) compose(ctx context.Context, targetInput, initialText string,
 	}
 	if out.Sent == nil {
 		if out.Reason != endCancelled {
-			rt.Hintf("Nothing was sent: %s.", out.Reason)
+			rt.ResultHintf("Nothing was sent: %s.", out.Reason)
 		}
 		return Result{OK: true, Cancelled: true, Reason: string(out.Reason)}, nil
 	}

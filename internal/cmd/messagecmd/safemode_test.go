@@ -1,6 +1,7 @@
 package messagecmd
 
 import (
+	"fmt"
 	"reflect"
 	"strings"
 	"testing"
@@ -154,19 +155,26 @@ func TestSafeModeSendOpensComposeEditor(t *testing.T) {
 	if !reflect.DeepEqual(h.composed, want) {
 		t.Errorf("compose calls = %+v\nwant %+v", h.composed, want)
 	}
+	// The redirection is said in the result, and nothing is on stderr:
+	// "message send … 2>&1 | jq -r .permalink" must parse.
+	hints, _ := got["hints"].([]any)
+	if len(hints) != 1 || !strings.Contains(fmt.Sprint(hints[0]), `Safe mode active (turned on by `) || !strings.Contains(fmt.Sprint(hints[0]), "redirected to the compose editor") {
+		t.Errorf("hints = %q", hints)
+	}
+	if h.stderr.Len() != 0 {
+		t.Errorf("stderr = %q", h.stderr.String())
+	}
+	delete(got, "hints")
 	wantJSON(t, got, `{"safe_mode": true, "redirected_from": "send", "ok": true, "sent": true,
 		"channel_id": "C12345678", "ts": "1770165109.628379", "permalink": "`+testURL+`", "text": "reviewed"}`)
 	// The fields are printed in the documented order, not sorted.
-	if order := jsonKeys(t, h.stdout.String()); !reflect.DeepEqual(order, []string{"safe_mode", "redirected_from", "ok", "sent", "channel_id", "ts", "permalink", "text"}) {
+	if order := jsonKeys(t, h.stdout.String()); !reflect.DeepEqual(order, []string{"safe_mode", "redirected_from", "ok", "sent", "channel_id", "ts", "permalink", "text", "hints"}) {
 		t.Errorf("fields are printed in the order %v", order)
 	}
 	// Nothing is sent by "send" itself, and the editor may take forever.
 	h.wantCalls()
 	if !watchdogStopped {
 		t.Error("the command timeout was not disabled before waiting on the editor")
-	}
-	if !strings.Contains(h.stderr.String(), "Safe mode active") {
-		t.Errorf("stderr = %q", h.stderr.String())
 	}
 }
 
@@ -186,6 +194,7 @@ func TestSafeModeSendPassesWorkspaceFlag(t *testing.T) {
 	if last := h.composed[len(h.composed)-1]; last.target != "#general" || last.opts.Workspace != "acme" {
 		t.Errorf("compose calls = %+v", h.composed)
 	}
+	delete(got, "hints") // the redirection, checked above
 	wantJSON(t, got, `{"safe_mode": true, "redirected_from": "send", "ok": true, "cancelled": true}`)
 }
 

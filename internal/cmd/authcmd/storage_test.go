@@ -162,8 +162,13 @@ func TestImportNoteForAWorkspacePendingMigration(t *testing.T) {
 	if got.Imported != 1 || len(got.Workspaces) != 1 || got.Workspaces[0].WorkspaceURL != "https://zeta.slack.com" {
 		t.Errorf("import-desktop printed %s", out)
 	}
-	stderr := h.stderr.String()
+	// Said in the "hints" of the JSON, not on stderr.
+	if h.stderr.Len() != 0 {
+		t.Errorf("stderr = %q", h.stderr)
+	}
+	stderr := out
 	for _, want := range []string{
+		`"hints":["the browser session found`,
 		"the browser session found in Slack Desktop was not imported for https://acme.slack.com",
 		appinfo.LegacyName + " has a standard token for that workspace, which could not be migrated yet",
 		"not configured until that migration goes through",

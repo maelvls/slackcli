@@ -81,6 +81,8 @@ func (h *harness) run(stdin string, args ...string) (string, error) {
 	cmd.SetOut(io.Discard)
 	cmd.SetErr(io.Discard)
 	err := cmd.ExecuteContext(context.Background())
+	// As the root command does: what no JSON result carried goes to stderr.
+	h.rt.FlushNotes()
 	return h.stdout.String(), err
 }
 
@@ -212,16 +214,19 @@ func TestWhoami(t *testing.T) {
 
 func TestWhoamiEmptyAndEnvironment(t *testing.T) {
 	h := newHarness(t, nil)
-	// Nothing configured: "workspaces" is there, empty, and stderr says
-	// how to add credentials.
+	// Nothing configured: "workspaces" is there, empty, and a hint in the
+	// result says how to add credentials.
 	out := h.mustRun("", "whoami")
-	if want := "{\"version\":1,\"workspaces\":[]}\n"; out != want {
-		t.Errorf("empty store: output %q, want %q", out, want)
+	if want := "{\"version\":1,\"workspaces\":[],\"hints\":["; !strings.HasPrefix(out, want) {
+		t.Errorf("empty store: output %q, want it to start with %q", out, want)
 	}
 	for _, want := range []string{"No Slack credentials are configured", "slackcli auth import-desktop", "slackcli auth add", "SLACK_TOKEN"} {
-		if !strings.Contains(h.stderr.String(), want) {
-			t.Errorf("empty store: stderr %q does not contain %q", h.stderr, want)
+		if !strings.Contains(out, want) {
+			t.Errorf("empty store: output %q does not contain %q", out, want)
 		}
+	}
+	if h.stderr.Len() != 0 {
+		t.Errorf("empty store: stderr = %q", h.stderr)
 	}
 
 	// A SLACK_TOKEN that is not a token is reported as such, and nothing
@@ -369,8 +374,9 @@ func TestAuthTestNeverSwapsAStandardTokenForABrowserSession(t *testing.T) {
 	if got.Imported != 1 || len(got.Workspaces) != 1 || got.Workspaces[0].WorkspaceURL != "https://zeta.slack.com" {
 		t.Errorf("import-desktop printed %s", out)
 	}
-	if !strings.Contains(h.stderr.String(), "https://acme.slack.com keeps its standard token") {
-		t.Errorf("stderr = %q", h.stderr)
+	// In the "hints" of the JSON, with nothing on stderr.
+	if !strings.Contains(out, `"hints":["https://acme.slack.com keeps its standard token`) || h.stderr.Len() != 0 {
+		t.Errorf("import-desktop printed %s, stderr = %q", out, h.stderr)
 	}
 	if _, a := h.stored("https://acme.slack.com"); a.Type != slackapi.AuthStandard {
 		t.Errorf("import-desktop replaced the standard token: %+v", a)
@@ -433,9 +439,9 @@ func TestWhoamiWithoutDefaultAndWithALockedKeychain(t *testing.T) {
 	kc := fakeKeychain{}
 	h := newHarness(t, kc)
 	h.rt.Desktop = func(context.Context) (*authextract.Extracted, error) { return extraction("Slack Desktop"), nil }
-	h.mustRun("", "import-desktop")
-	if !strings.Contains(h.stderr.String(), "no default workspace is set") || !strings.Contains(h.stderr.String(), "auth set-default") {
-		t.Errorf("import-desktop did not say that no default is set: %q", h.stderr)
+	imported := h.mustRun("", "import-desktop")
+	if !strings.Contains(imported, `"hints":["no default workspace is set`) || !strings.Contains(imported, "auth set-default") || h.stderr.Len() != 0 {
+		t.Errorf("import-desktop did not say that no default is set: %s, stderr = %q", imported, h.stderr)
 	}
 
 	got := decodeJSON[whoamiOutput](t, h.mustRun("", "whoami"))
@@ -484,6 +490,9 @@ func TestImportDesktop(t *testing.T) {
       "workspace_url": "https://zeta.slack.com",
       "workspace_name": "Zeta"
     }
+  ],
+  "hints": [
+    "no default workspace is set: commands need --workspace \"<url-or-unique-substring>\" (or SLACK_WORKSPACE_URL) until you choose one with \"slackcli auth set-default <url>\""
   ]
 }
 `

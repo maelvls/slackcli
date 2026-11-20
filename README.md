@@ -106,10 +106,11 @@ Saved credentials live in `~/.config/slackcli/credentials.json`. On macOS the se
 
 ## Output
 
-- Results are JSON on stdout, with empty fields removed: on one line, or indented when stdout is a terminal. Hints and warnings go to stderr.
+- Results are JSON on stdout, with empty fields removed: on one line, or indented when stdout is a terminal.
+- Warnings and hints are part of the result, in its `warnings` and `hints` arrays, so a successful command that prints JSON writes nothing on stderr and `slackcli … 2>&1 | jq` still parses. Stderr gets the error of a command that failed (and the warnings that came before it), the notes of the few `auth` commands that print text, and, when it is a terminal, the progress of `message compose` while it waits for a human. An error is not JSON: keep stderr apart (`2>err.txt`) and check the exit code before parsing.
 - Messages have `ts`, which identifies them, and `time`, the same instant as a local date and time.
 - A list command always prints its list, `[]` when empty, and `next_cursor` when there is more (pass it to `--cursor`).
-- Files attached to messages are downloaded to the cache directory and listed with their local `path`. `--no-download` (`message get`, `message list`, `search`) lists them without downloading anything.
+- Files attached to messages are downloaded to the cache directory and listed with their local `path`. A file that Slack does not host, such as a Google Docs link, is listed with `"external": true` and its `url` instead. `--no-download` (`message get`, `message list`, `search`) lists them without downloading anything.
 - Message content is cut at `--max-body-chars` (8000 characters by default, `-1` for no limit): the same flag and default on `message get`, `message list`, `search`, `unreads` and `later list`.
 
 | Exit code | Meaning |

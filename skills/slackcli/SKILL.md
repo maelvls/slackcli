@@ -24,6 +24,7 @@ Use `slackcli` from `$PATH`. If it is missing, tell the user: it is installed fr
 3. Choose the narrowest read: `message get` for one message, `message list` for a thread or channel history, `search messages|files|all` for discovery, `unreads` for the inbox.
 4. Bound the output with `--limit`, `--max-body-chars` (the same flag on `message get/list`, `search`, `unreads` and `later list`; 8000 by default), `--counts-only`, and `--no-download` (`message get/list` and `search`: files are listed, not downloaded, which is faster when only the text matters).
 5. For a requested write, run only that mutation and check the JSON it prints.
+6. Never write `slackcli … 2>&1 | jq …`: an error is plain text on stderr, so jq answers `parse error` and you learn neither the result nor the reason, nor whether a send went through. Write `slackcli … 2>err.txt | jq …`, and `cat err.txt` when the exit code is not 0 or the output is empty (in a pipeline the exit code is jq's: check `${PIPESTATUS[0]}`, or run the command first and jq after).
 
 ## Common reads
 
@@ -39,7 +40,7 @@ One call each. Messages carry `time` (their `ts` as a local date and time); add 
 ## Non-obvious behaviour
 
 - Channel history (`message list <channel>`) has top-level messages only; a message with `reply_count` started a thread: list it, or pass `--expand-threads`. System messages (joins, leaves, topic changes) are left out and counted in `system_messages_hidden`; `--include-system` lists them. `--oldest`/`--latest` take a day (`2026-01-31`, from 00:00 local time), a date and time (`2026-01-31T14:30`) or a ts. Thread listings reject history-only flags (`--limit`, `--oldest`, `--latest`, `--expand-threads`, `--include-system`, reaction filters). Reaction filters require `--oldest`.
-- Output is one line of JSON (indented only on a terminal). `channel list` prints `{id, name, user, is_private, is_im, is_mpim, is_archived, num_members}`; `--raw` prints Slack's own objects, twenty times larger.
+- Output is one line of JSON (indented only on a terminal). Warnings and hints are inside it, in `warnings` and `hints` (why a list is empty, what could not be fetched): read them: a command that succeeds and prints JSON writes nothing on stderr. `channel list` prints `{id, name, user, is_private, is_im, is_mpim, is_archived, num_members}`; `--raw` prints Slack's own objects, twenty times larger.
 - `search` without `--channel` uses Slack's search API (operators allowed; not available to bot tokens). With `--channel` (repeatable or comma-separated) the channels are scanned and matched locally: operators are rejected, thread replies are not seen, and it can be slow: bound it with `--after`. `--after`/`--before` are exclusive days.
 - `later`, `unreads`, `message draft` and `channel list --via-counts` need browser credentials (xoxc + cookie). `canvas edit` and `canvas create --channel` need a standard token with `canvases:write`; browser credentials can only create standalone canvases.
 - `message send` text is Slack mrkdwn; lists are converted to real Slack lists. Inside them write links as `<URL|label>`: CommonMark `[label](URL)` is not converted. `--blocks` replaces that conversion; with `--attach` the text is the files' plain comment. Several `--attach` flags make one message.

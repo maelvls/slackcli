@@ -220,16 +220,16 @@ func TestInvalidDurationVariablesAreReported(t *testing.T) {
 		}
 		t.Setenv(slackapi.LegacyAPITimeoutEnv, "")
 	}
-	const ignored = ". The variable is ignored and the default applies.\n"
+	const ignored = `. The variable is ignored and the default applies."]}` + "\n"
 	for _, tc := range []struct{ name, value, want string }{
-		{"SLACKCLI_COMMAND_TIMEOUT_MS", "0", `Warning: SLACKCLI_COMMAND_TIMEOUT_MS="0" is not valid: expected a positive number of milliseconds, e.g. 30000` + ignored},
-		{"SLACKCLI_COMMAND_TIMEOUT_MS", "-1", `Warning: SLACKCLI_COMMAND_TIMEOUT_MS="-1" is not valid: expected a positive number of milliseconds, e.g. 30000` + ignored},
-		{"SLACKCLI_API_TIMEOUT_MS", "abc", `Warning: SLACKCLI_API_TIMEOUT_MS="abc" is not valid: expected a positive number of milliseconds, e.g. 30000` + ignored},
-		{"SLACKCLI_RATE_LIMIT_MAX_WAIT_MS", "abc", `Warning: SLACKCLI_RATE_LIMIT_MAX_WAIT_MS="abc" is not valid: expected a number of milliseconds, 0 or more, e.g. 30000` + ignored},
-		{"SLACKCLI_KEYCHAIN_TIMEOUT_MS", "3s", `Warning: SLACKCLI_KEYCHAIN_TIMEOUT_MS="3s" is not valid: expected a positive number of milliseconds, e.g. 30000` + ignored},
-		{"AGENT_SLACK_API_TIMEOUT_MS", "abc", `Warning: AGENT_SLACK_API_TIMEOUT_MS="abc" is not valid: expected a positive number of milliseconds, e.g. 30000` + ignored},
-		{"SLACK_API_TIMEOUT_MS", "abc", `Warning: SLACK_API_TIMEOUT_MS="abc" is not valid: expected a positive number of milliseconds, e.g. 30000` + ignored},
-		{"SLACK_API_TIMEOUT_MS", "0", `Warning: SLACK_API_TIMEOUT_MS="0" is not valid: expected a positive number of milliseconds, e.g. 30000` + ignored},
+		{"SLACKCLI_COMMAND_TIMEOUT_MS", "0", `SLACKCLI_COMMAND_TIMEOUT_MS=\"0\" is not valid: expected a positive number of milliseconds, e.g. 30000` + ignored},
+		{"SLACKCLI_COMMAND_TIMEOUT_MS", "-1", `SLACKCLI_COMMAND_TIMEOUT_MS=\"-1\" is not valid: expected a positive number of milliseconds, e.g. 30000` + ignored},
+		{"SLACKCLI_API_TIMEOUT_MS", "abc", `SLACKCLI_API_TIMEOUT_MS=\"abc\" is not valid: expected a positive number of milliseconds, e.g. 30000` + ignored},
+		{"SLACKCLI_RATE_LIMIT_MAX_WAIT_MS", "abc", `SLACKCLI_RATE_LIMIT_MAX_WAIT_MS=\"abc\" is not valid: expected a number of milliseconds, 0 or more, e.g. 30000` + ignored},
+		{"SLACKCLI_KEYCHAIN_TIMEOUT_MS", "3s", `SLACKCLI_KEYCHAIN_TIMEOUT_MS=\"3s\" is not valid: expected a positive number of milliseconds, e.g. 30000` + ignored},
+		{"AGENT_SLACK_API_TIMEOUT_MS", "abc", `AGENT_SLACK_API_TIMEOUT_MS=\"abc\" is not valid: expected a positive number of milliseconds, e.g. 30000` + ignored},
+		{"SLACK_API_TIMEOUT_MS", "abc", `SLACK_API_TIMEOUT_MS=\"abc\" is not valid: expected a positive number of milliseconds, e.g. 30000` + ignored},
+		{"SLACK_API_TIMEOUT_MS", "0", `SLACK_API_TIMEOUT_MS=\"0\" is not valid: expected a positive number of milliseconds, e.g. 30000` + ignored},
 		{"SLACK_API_TIMEOUT_MS", "1500", ""},
 		{"SLACKCLI_RATE_LIMIT_MAX_WAIT_MS", "0", ""},
 		{"SLACKCLI_COMMAND_TIMEOUT_MS", "5000", ""},
@@ -237,7 +237,12 @@ func TestInvalidDurationVariablesAreReported(t *testing.T) {
 		clear()
 		t.Setenv(tc.name, tc.value)
 		got := runWith(t, time.Second, ok, "ok")
-		if got.code != ExitOK || got.stderr != tc.want || !strings.Contains(got.stdout, `"ok":true`) {
+		// The warning is part of the result, so that stderr stays empty.
+		want := `{"ok":true}` + "\n"
+		if tc.want != "" {
+			want = `{"ok":true,"warnings":["` + tc.want
+		}
+		if got.code != ExitOK || got.stderr != "" || got.stdout != want {
 			t.Errorf("%s=%s: %+v", tc.name, tc.value, got)
 		}
 	}

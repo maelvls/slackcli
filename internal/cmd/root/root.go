@@ -81,8 +81,9 @@ func newRoot(rt *clictx.Context, subcommands []*cobra.Command) *cobra.Command {
 		Short: appinfo.Description,
 		Long: fmt.Sprintf(`%s.
 
-Commands print JSON on stdout and hints and warnings on stderr; see the help
-of each command for what it prints.
+Commands print JSON on stdout, with their warnings and hints in it
+("warnings", "hints"), and errors on stderr; see the help of each command
+for what it prints.
 
 %s
 It fails closed: --safe-mode=false does not turn off a safe mode that the
@@ -244,7 +245,8 @@ func (r runner) execute(args []string, stdout, stderr io.Writer) int {
 	defer cancel()
 
 	// Optional lookups that Slack rate limited do not fail a command: they
-	// report here, and the user is told the result is incomplete.
+	// report here, and the user is told the result is incomplete (the
+	// command's context is handed the collector below).
 	ctx, incomplete := enrich.Collect(ctx)
 	// What may last (one more try of a call that timed out) can ask how
 	// long the command has left.
@@ -262,10 +264,31 @@ func (r runner) execute(args []string, stdout, stderr io.Writer) int {
 	// that one is done.
 	var ran *cobra.Command
 	done := make(chan error, 1)
+	// The context of the command is set up by the goroutine below, under
+	// the watchdog like the rest: it is handed over here once it is ready,
+	// for its warnings and hints to be written when the command is over.
+	ready := make(chan *clictx.Context, 1)
+	var rt *clictx.Context
+	// flushNotes writes on stderr the warnings and hints that no result
+	// carried (clictx.Context.FlushNotes). It does nothing when the time
+	// was up before there was a context to record one.
+	flushNotes := func() {
+		if rt == nil {
+			select {
+			case rt = <-ready:
+			default:
+			}
+		}
+		if rt != nil {
+			rt.FlushNotes()
+		}
+	}
 	go func() {
 		rt := r.newContext()
 		rt.Stdout, rt.Stderr = stdout, stderr
 		rt.SetWatchdogCanceller(stopWatchdog)
+		rt.Incomplete = incomplete
+		ready <- rt
 
 		// Run the root's PersistentPreRunE even if a sub-command defines
 		// its own.
@@ -276,7 +299,7 @@ func (r runner) execute(args []string, stdout, stderr io.Writer) int {
 		cmd.SetOut(stdout)
 		cmd.SetErr(stderr)
 
-		warnAboutEnvironment(stderr)
+		warnAboutEnvironment(rt)
 
 		cmd.PersistentPreRunE = func(c *cobra.Command, _ []string) error {
 			// cobra checks these itself, later; doing it here words the
@@ -322,6 +345,8 @@ func (r runner) execute(args []string, stdout, stderr io.Writer) int {
 		} else if summary != "" {
 			fmt.Fprintf(stderr, "Before the timeout, %s. Set %s=1 to trace every call as it is made.\n", summary, appinfo.EnvName(trace.EnvSuffix))
 		}
+		// The warnings and hints no result carried.
+		flushNotes()
 		// Let the command see the cancellation and return, so that its
 		// deferred cleanups run; do not wait for one that ignores it.
 		cancel()
@@ -331,9 +356,14 @@ func (r runner) execute(args []string, stdout, stderr io.Writer) int {
 		case <-done:
 		case <-grace.C:
 		}
+		// What the command said while it was cleaning up.
+		flushNotes()
 		return ExitTimeout
 	}
 
+	// The warnings and hints are in the JSON the command printed. Those
+	// it did not print (it failed, or prints text) go to stderr.
+	flushNotes()
 	if err != nil {
 		if errors.Is(err, context.Canceled) && signalCtx.Err() != nil {
 			// As for a timeout: what a writing command was doing may
@@ -355,9 +385,6 @@ func (r runner) execute(args []string, stdout, stderr io.Writer) int {
 		}
 		fmt.Fprintln(stderr, ErrorMessage(err))
 		return ExitError
-	}
-	for _, w := range incomplete.List() {
-		fmt.Fprintln(stderr, "Warning: "+w)
 	}
 	return ExitOK
 }
@@ -439,16 +466,16 @@ var durationVariables = []struct {
 // that applies instead is a sound one, and a stray variable must not keep
 // "--help" or "auth whoami" from running; but whoever set it, to a value
 // that does nothing, has to be told.
-func warnAboutEnvironment(stderr io.Writer) {
-	const ignored = "Warning: %v. The variable is ignored and the default applies.\n"
+func warnAboutEnvironment(rt *clictx.Context) {
+	const ignored = "%v. The variable is ignored and the default applies."
 	for _, v := range durationVariables {
 		if err := appinfo.CheckEnvDurationMS(v.suffix, v.allowZero); err != nil {
-			fmt.Fprintf(stderr, ignored, err)
+			rt.Warnf(ignored, err)
 		}
 	}
 	// The one duration variable that is not tool-specific.
 	if err := slackapi.CheckLegacyAPITimeout(); err != nil {
-		fmt.Fprintf(stderr, ignored, err)
+		rt.Warnf(ignored, err)
 	}
 }
 

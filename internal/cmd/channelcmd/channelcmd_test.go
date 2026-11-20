@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"path/filepath"
 	"reflect"
@@ -259,24 +260,24 @@ func TestListName(t *testing.T) {
 		t.Errorf("calls = %+v", h.calls)
 	}
 
-	// --limit bounds what is printed, and stderr says that more match.
+	// --limit bounds what is printed, and a hint says that more match.
 	out, err = h.run("list", "--name", "cert", "--limit", "1")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := out["channels"].([]any); len(got) != 1 || !strings.Contains(h.stderr.String(), `2 conversations match --name "cert", the first 1 are listed`) {
+	if got := out["channels"].([]any); len(got) != 1 || !strings.Contains(fmt.Sprint(out["hints"]), `2 conversations match --name "cert", the first 1 are listed`) || h.stderr.Len() != 0 {
 		t.Errorf("--limit 1 printed %s, stderr %s", h.stdout, h.stderr)
 	}
 
-	// Nothing matches: "channels" is [] and stderr says where else to look.
+	// Nothing matches: "channels" is [] and a hint says where else to look.
 	out, err = h.run("list", "--name", "nothing")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got, ok := out["channels"].([]any); !ok || len(got) != 0 || !strings.Contains(h.stderr.String(), "add --all") {
+	if got, ok := out["channels"].([]any); !ok || len(got) != 0 || !strings.Contains(fmt.Sprint(out["hints"]), "add --all") {
 		t.Errorf("no match printed %s, stderr %s", h.stdout, h.stderr)
 	}
-	if _, err = h.run("list", "--all", "--name", "nothing"); err != nil || strings.Contains(h.stderr.String(), "add --all") || len(h.only("conversations.list")) != 2 {
+	if out, err = h.run("list", "--all", "--name", "nothing"); err != nil || out["hints"] == nil || strings.Contains(h.stdout.String(), "add --all") || len(h.only("conversations.list")) != 2 {
 		t.Errorf("--all, no match: err = %v, stderr %s, calls %v", err, h.stderr, h.methods())
 	}
 
@@ -478,6 +479,8 @@ func TestInviteScansTheDirectoryOnce(t *testing.T) {
 		"invited_user_ids": []any{"U000000123"},
 		"unresolved_users": []any{"@ghost", "@nobody"},
 	}
+	warnings := fmt.Sprint(out["warnings"])
+	delete(out, "warnings")
 	if !reflect.DeepEqual(out, want) {
 		t.Errorf("printed %s", h.stdout)
 	}
@@ -485,8 +488,8 @@ func TestInviteScansTheDirectoryOnce(t *testing.T) {
 		t.Errorf("users.list calls = %d, want 1 for the four handles", n)
 	}
 	for _, handle := range []string{"@ghost", "@nobody"} {
-		if !strings.Contains(h.stderr.String(), `could not resolve user "`+handle+`"`) {
-			t.Errorf("stderr = %q, want the reason %s is unresolved", h.stderr, handle)
+		if !strings.Contains(warnings, `could not resolve user "`+handle+`"`) {
+			t.Errorf("warnings = %q, want the reason %s is unresolved", warnings, handle)
 		}
 	}
 }
@@ -508,11 +511,12 @@ func TestInviteReportsPartialFailure(t *testing.T) {
 		"unresolved_users":            []any{"@ghost"},
 		"failed":                      []any{map[string]any{"target": "U000000003", "error": "user_is_restricted"}},
 	}
+	if warnings := fmt.Sprint(out["warnings"]); !strings.Contains(warnings, `could not resolve user "@ghost"`) {
+		t.Errorf("warnings = %q, want the reason @ghost is unresolved", warnings)
+	}
+	delete(out, "warnings")
 	if !reflect.DeepEqual(out, want) {
 		t.Errorf("printed %s", h.stdout)
-	}
-	if !strings.Contains(h.stderr.String(), `could not resolve user "@ghost"`) {
-		t.Errorf("stderr = %q, want the reason @ghost is unresolved", h.stderr)
 	}
 }
 

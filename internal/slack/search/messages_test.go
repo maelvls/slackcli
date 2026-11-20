@@ -489,11 +489,11 @@ func TestMessageDownloads(t *testing.T) {
 	if three.Error != "Failed to download file (404)" || filepath.Base(three.Path) != "F2.download-error.txt" || three.Mimetype != "image/png" {
 		t.Errorf("failed file = %+v", three)
 	}
-	if !strings.Contains(four.Error, "Refusing to send Slack credentials") {
+	if !four.External || four.URL != "https://docs.google.com/document/d/1" || four.Error != "" || four.Path != "" {
 		t.Errorf("external file = %+v", four)
 	}
-	if len(res.Warnings) != 2 {
-		t.Errorf("warnings = %q, want one per failed download", res.Warnings)
+	if len(res.Warnings) != 1 || !strings.Contains(res.Warnings[0], "F2") {
+		t.Errorf("warnings = %q, want one for the failed download and none for the external file", res.Warnings)
 	}
 
 	// --no-download: the files are listed, nothing is fetched.
