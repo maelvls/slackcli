@@ -119,6 +119,22 @@ Saved credentials live in `~/.config/slackcli/credentials.json`. On macOS the se
 
 After a timeout or an interrupt, a command that writes may still have gone through: check before retrying.
 
+A command that times out says on stderr what it spent its time on and what it was still waiting for (Slack calls by method, rate-limit waits, downloads, keychain reads, the credentials lock, credential imports). The limit also holds on the wall clock: a command that the machine slept through is ended when it wakes up. (One thing can still hold a timed-out command: a stderr that is a full pipe nobody reads.)
+
+To see where the time of any command goes, set `SLACKCLI_DEBUG=1`. Every Slack call, with its duration, HTTP status, error code and attempt number, every wait and the exit code are written to stderr as they happen, one line each, prefixed with `[slackcli +<time since start>]`. Nothing of it is written otherwise. The trace, like the timeout message, names Slack methods and never their parameters: no token, cookie, command argument, channel, file name or message text. Of an error it keeps the first line, with URLs cut down to their host, and file paths and anything between double quotes removed. Calls made in parallel each count their own time, so the total of a kind can exceed the time that went by.
+
+```console
+$ SLACKCLI_DEBUG=1 slackcli message list general --limit 3 --resolve-users >/dev/null
+[slackcli +1ms] slackcli 1.0.0, command "message list": command timeout 30s, API timeout 20s
+[slackcli +30ms] keychain find-generic-password: 28ms
+[slackcli +60ms] keychain find-generic-password: 27ms
+[slackcli +294ms] api search.messages: 231ms, HTTP 200
+[slackcli +441ms] api conversations.history: 146ms, HTTP 200
+[slackcli +732ms] api users.info: 127ms, HTTP 200
+[slackcli +737ms] api users.info: 131ms, HTTP 200
+[slackcli +739ms] exit code 0; time spent: api users.info 258ms (2 calls), api search.messages 231ms, api conversations.history 146ms, keychain 55ms (2 calls)
+```
+
 ## Environment variables
 
 | Variable | Effect |
@@ -131,6 +147,7 @@ After a timeout or an interrupt, a command that writes may still have gone throu
 | `SLACKCLI_API_TIMEOUT_MS` | Time limit of one Slack request (default 20000). |
 | `SLACKCLI_RATE_LIMIT_MAX_WAIT_MS` | How long to wait and retry when Slack rate-limits (default 0: fail at once). |
 | `SLACKCLI_KEYCHAIN_TIMEOUT_MS` | Time limit of a macOS keychain call (default 3000). |
+| `SLACKCLI_DEBUG` | Set to 1 to trace every Slack call and wait on stderr, with durations (see [Output](#output)). |
 | `CI` | When set, `message compose` sends the text without opening the editor. |
 
 ## Coming from agent-slack

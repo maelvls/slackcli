@@ -12,6 +12,7 @@ import (
 	"github.com/maelvls/slackcli/internal/slack/files"
 	"github.com/maelvls/slackcli/internal/slack/slacktext"
 	"github.com/maelvls/slackcli/internal/slackapi"
+	"github.com/maelvls/slackcli/internal/trace"
 )
 
 const (
@@ -89,7 +90,9 @@ func Fetch(ctx context.Context, client *slackapi.Client, canvasID string, maxCha
 }
 
 // download returns the HTML of a canvas.
-func download(ctx context.Context, client *slackapi.Client, rawURL string) ([]byte, error) {
+func download(ctx context.Context, client *slackapi.Client, rawURL string) (_ []byte, retErr error) {
+	span := trace.Begin("download", "canvas")
+	defer func() { span.EndErr(retErr) }()
 	resp, err := files.Get(ctx, client, rawURL)
 	if err != nil {
 		return nil, err

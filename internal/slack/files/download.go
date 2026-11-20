@@ -19,6 +19,7 @@ import (
 
 	"github.com/maelvls/slackcli/internal/appinfo"
 	"github.com/maelvls/slackcli/internal/slackapi"
+	"github.com/maelvls/slackcli/internal/trace"
 )
 
 const (
@@ -174,7 +175,7 @@ func authorize(client *slackapi.Client, req *http.Request) {
 //
 // Failures to fetch are *DownloadError (use errors.Is with ErrLoginPage /
 // ErrNotSlackHost for the cause); see TryDownload to get them as a value.
-func Download(ctx context.Context, client *slackapi.Client, rawURL string, opts DownloadOptions) (string, error) {
+func Download(ctx context.Context, client *slackapi.Client, rawURL string, opts DownloadOptions) (_ string, retErr error) {
 	dir := opts.DestDir
 	if dir == "" {
 		d, err := appinfo.EnsureDownloadsDir()
@@ -204,6 +205,20 @@ func Download(ctx context.Context, client *slackapi.Client, rawURL string, opts 
 		}
 	}
 
+	// Not named: the name of a file is its author's.
+	span := trace.Begin("download", "")
+	defer func() {
+		var de *DownloadError
+		switch {
+		case retErr == nil:
+			span.End("")
+		case errors.As(retErr, &de) || ctx.Err() != nil:
+			span.EndErr(retErr)
+		default:
+			// An error of the disk, which names the file.
+			span.Fail("could not write the file")
+		}
+	}()
 	resp, err := Get(ctx, client, rawURL)
 	if err != nil {
 		return "", err

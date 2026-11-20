@@ -5,7 +5,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -16,7 +18,9 @@ import (
 	"github.com/maelvls/slackcli/internal/appinfo"
 	"github.com/maelvls/slackcli/internal/auth"
 	"github.com/maelvls/slackcli/internal/clictx"
+	"github.com/maelvls/slackcli/internal/slackapi"
 	"github.com/maelvls/slackcli/internal/testenv"
+	"github.com/maelvls/slackcli/internal/trace"
 )
 
 // result is what one run of the CLI produced.
@@ -30,23 +34,38 @@ type result struct {
 // top-level commands, with an empty credentials store.
 func runWith(t *testing.T, grace time.Duration, build func(rt *clictx.Context) []*cobra.Command, args ...string) result {
 	t.Helper()
+	return runRunner(t, runner{commands: build, grace: grace}, args...)
+}
+
+// runRunner is runWith for a runner the test set up itself (r.newContext
+// is replaced).
+func runRunner(t *testing.T, r runner, args ...string) result {
+	t.Helper()
 	for _, name := range []string{"SLACK_TOKEN", "SLACK_COOKIE_D", "SLACK_WORKSPACE_URL"} {
 		t.Setenv(name, "")
 	}
 	// The real commands must not find the developer's configuration.
 	testenv.Isolate(t)
 	var stdout, stderr bytes.Buffer
-	var rt *clictx.Context
-	r := runner{
-		newContext: func() *clictx.Context {
-			rt = &clictx.Context{Store: &auth.Store{Path: filepath.Join(t.TempDir(), "credentials.json")}}
-			return rt
-		},
-		commands: build,
-		grace:    grace,
+	// Set by the goroutine of the command, which a run that timed out
+	// does not wait for.
+	var rt atomic.Pointer[clictx.Context]
+	path := filepath.Join(t.TempDir(), "credentials.json")
+	r.newContext = func() *clictx.Context {
+		c := &clictx.Context{Store: &auth.Store{Path: path}}
+		rt.Store(c)
+		return c
 	}
 	code := r.run(args, &stdout, &stderr)
-	return result{code: code, stdout: stdout.String(), stderr: stderr.String(), rt: rt}
+	return result{code: code, stdout: stdout.String(), stderr: stderr.String(), rt: rt.Load()}
+}
+
+// The tests expect an exact stderr: a live trace that the developer left
+// on in their shell must not reach them.
+func TestMain(m *testing.M) {
+	os.Unsetenv(appinfo.EnvName(trace.EnvSuffix))
+	os.Unsetenv(appinfo.LegacyEnvPrefix + trace.EnvSuffix)
+	os.Exit(m.Run())
 }
 
 // one wraps a single test command.
@@ -161,10 +180,199 @@ func TestRunTimeoutDoesNotWaitForACommandThatIgnoresCancellation(t *testing.T) {
 	<-finished
 }
 
-func TestRunNoTimeout(t *testing.T) {
+// The watchdog is running before anything else is: what a command does
+// while it is being set up (reading the credentials, building the command
+// tree) is bounded like the command itself.
+func TestRunTimeoutCoversTheSetUpOfTheCommand(t *testing.T) {
 	t.Setenv(appinfo.EnvName("COMMAND_TIMEOUT_MS"), "30")
+	release := make(chan struct{})
+	defer close(release)
+	start := time.Now()
+	got := runWith(t, 50*time.Millisecond, func(*clictx.Context) []*cobra.Command {
+		<-release // e.g. a keychain that does not answer
+		return nil
+	}, "anything")
+	if got.code != ExitTimeout || time.Since(start) > 2*time.Second {
+		t.Errorf("code = %d after %s (%q)", got.code, time.Since(start), got.stderr)
+	}
+}
+
+// A command that times out says what it spent its time on and what it was
+// still waiting for, without SLACKCLI_DEBUG.
+func TestRunTimeoutSaysWhereTheTimeWent(t *testing.T) {
+	t.Setenv(appinfo.EnvName("COMMAND_TIMEOUT_MS"), "40")
+	slow := &cobra.Command{Use: "slow", RunE: func(cmd *cobra.Command, _ []string) error {
+		trace.Begin("api conversations.info", "").End("HTTP 200")
+		trace.Begin("api users.info", "").Fail("HTTP 429")
+		trace.Begin("api users.info", "").End("HTTP 200")
+		span := trace.Begin("api conversations.history", "(attempt 2)")
+		<-cmd.Context().Done()
+		span.EndErr(cmd.Context().Err())
+		return cmd.Context().Err()
+	}}
+	got := runWith(t, time.Second, one(slow), "slow")
+	if got.code != ExitTimeout {
+		t.Fatalf("%+v", got)
+	}
+	lines := strings.Split(strings.TrimSuffix(got.stderr, "\n"), "\n")
+	if len(lines) != 2 || !strings.HasPrefix(lines[0], appinfo.Name+" command timed out after 40ms.") {
+		t.Fatalf("stderr = %q", got.stderr)
+	}
+	want := regexp.MustCompile(`^Before the timeout, time spent: api (conversations|users)\.info \S+( \(2 calls, 1 failed\))?, api (conversations|users)\.info \S+( \(2 calls, 1 failed\))?; ` +
+		`still running: api conversations\.history \(attempt 2\) for \S+\. Set SLACKCLI_DEBUG=1 to trace every call as it is made\.$`)
+	if !want.MatchString(lines[1]) || !strings.Contains(lines[1], "api users.info") || !strings.Contains(lines[1], "(2 calls, 1 failed)") {
+		t.Errorf("summary = %q", lines[1])
+	}
+}
+
+// Timers stand still while a Mac sleeps: the watchdog also reads the wall
+// clock, and says so when that is what ended the command.
+func TestRunTimeoutEndsACommandTheMachineSleptThrough(t *testing.T) {
+	t.Setenv(appinfo.EnvName("COMMAND_TIMEOUT_MS"), "30000")
+	var asleep atomic.Bool
+	real := stopwatch()
+	r := runner{
+		grace: time.Second,
+		commands: one(&cobra.Command{Use: "slow", RunE: func(cmd *cobra.Command, _ []string) error {
+			asleep.Store(true) // the lid is closed, and opened 8 minutes later
+			<-cmd.Context().Done()
+			return cmd.Context().Err()
+		}}),
+		elapsed: func() (time.Duration, time.Duration) {
+			awake, _ := real()
+			if asleep.Load() {
+				return awake, awake + 8*time.Minute
+			}
+			return awake, awake
+		},
+	}
+	start := time.Now()
+	got := runRunner(t, r, "slow")
+	if got.code != ExitTimeout || time.Since(start) > 5*time.Second {
+		t.Fatalf("code = %d after %s (%q)", got.code, time.Since(start), got.stderr)
+	}
+	for _, want := range []string{
+		appinfo.Name + " command timed out after 30s.",
+		"\nThe clock moved 8m0", "s forward while the command only ran for ", "the machine was asleep",
+	} {
+		if !strings.Contains(got.stderr, want) {
+			t.Errorf("stderr %q does not contain %q", got.stderr, want)
+		}
+	}
+}
+
+func TestWatch(t *testing.T) {
+	clock := func(awake, wall time.Duration) func() (time.Duration, time.Duration) {
+		return func() (time.Duration, time.Duration) { return awake, wall }
+	}
+	for name, tc := range map[string]struct {
+		awake, wall time.Duration
+		expires     bool
+		asleep      bool
+	}{
+		"within the limit":                        {awake: time.Millisecond, wall: time.Millisecond},
+		"limit reached":                           {awake: time.Minute, wall: time.Minute, expires: true},
+		"slept through the limit":                 {awake: time.Millisecond, wall: time.Hour, expires: true, asleep: true},
+		"wall clock set backwards":                {awake: time.Millisecond, wall: -time.Hour},
+		"wall clock set backwards, limit reached": {awake: time.Minute, wall: -time.Hour, expires: true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			const timeout = 20 * time.Millisecond // a tick every millisecond
+			stopped, timedOut := make(chan struct{}), make(chan expiry, 1)
+			exited := make(chan struct{})
+			go func() {
+				defer close(exited)
+				watch(timeout, clock(tc.awake, tc.wall), stopped, timedOut)
+			}()
+			if !tc.expires {
+				select {
+				case late := <-timedOut:
+					t.Fatalf("expired: %+v", late)
+				case <-time.After(30 * time.Millisecond):
+				}
+				close(stopped)
+				<-exited // stopping it ends it
+				return
+			}
+			select {
+			case late := <-timedOut:
+				if late.awake != tc.awake || late.wall != tc.wall || late.asleep(timeout) != tc.asleep {
+					t.Errorf("expiry = %+v, asleep = %v", late, late.asleep(timeout))
+				}
+			case <-time.After(5 * time.Second):
+				t.Fatal("did not expire")
+			}
+			<-exited
+		})
+	}
+}
+
+// SLACKCLI_DEBUG=1 traces the run on stderr, and nothing of it is written
+// without it.
+func TestRunLiveTrace(t *testing.T) {
+	work := one(&cobra.Command{Use: "work", RunE: func(*cobra.Command, []string) error {
+		trace.Begin("api conversations.history", "").End("HTTP 200")
+		return nil
+	}})
+	if got := runWith(t, time.Second, work, "work", "secret-argument"); got.code != ExitOK || got.stderr != "" {
+		t.Errorf("without the variable: %+v", got)
+	}
+
+	t.Setenv(appinfo.EnvName(trace.EnvSuffix), "1")
+	t.Setenv(appinfo.EnvName("COMMAND_TIMEOUT_MS"), "30000")
+	t.Setenv(appinfo.EnvName("API_TIMEOUT_MS"), "20000")
+	got := runWith(t, time.Second, work, "work", "secret-argument")
+	lines := strings.Split(strings.TrimSuffix(got.stderr, "\n"), "\n")
+	if got.code != ExitOK || got.stdout != "" || len(lines) != 3 {
+		t.Fatalf("%+v", got)
+	}
+	for i, want := range []string{
+		`^\[slackcli \+\S+\] slackcli \S+, command "work": command timeout 30s, API timeout 20s$`,
+		`^\[slackcli \+\S+\] api conversations\.history: \S+, HTTP 200$`,
+		`^\[slackcli \+\S+\] exit code 0; time spent: api conversations\.history \S+$`,
+	} {
+		if !regexp.MustCompile(want).MatchString(lines[i]) {
+			t.Errorf("line %d = %q, want %s", i, lines[i], want)
+		}
+	}
+	if strings.Contains(got.stderr, "secret-argument") {
+		t.Errorf("the arguments are traced: %q", got.stderr)
+	}
+
+	// A failure is traced too, after the error itself.
+	got = runWith(t, time.Second, work, "nope")
+	if got.code != ExitError || !regexp.MustCompile(`\n\[slackcli \+\S+\] exit code 1\n$`).MatchString(got.stderr) {
+		t.Errorf("unknown command: %+v", got)
+	}
+}
+
+// A command can ask how long it has left, for as long as it has a limit.
+func TestRunTellsTheCommandHowLongItHasLeft(t *testing.T) {
+	t.Setenv(appinfo.EnvName("COMMAND_TIMEOUT_MS"), "30000")
+	var left, after time.Duration
+	var limited, limitedAfter bool
+	got := runWith(t, time.Second, func(rt *clictx.Context) []*cobra.Command {
+		return []*cobra.Command{{Use: "work", RunE: func(cmd *cobra.Command, _ []string) error {
+			left, limited = slackapi.TimeLeft(cmd.Context())
+			rt.DisableTimeout()
+			after, limitedAfter = slackapi.TimeLeft(cmd.Context())
+			return nil
+		}}}
+	}, "work")
+	if got.code != ExitOK || !limited || left > 30*time.Second || left < 20*time.Second {
+		t.Errorf("%+v: %s left, limited = %v", got, left, limited)
+	}
+	if limitedAfter || after != 0 {
+		t.Errorf("without a timeout: %s left, limited = %v", after, limitedAfter)
+	}
+}
+
+func TestRunNoTimeout(t *testing.T) {
+	// Long enough for a loaded machine to get to the command before the
+	// watchdog, which runs from the very start, strikes.
+	t.Setenv(appinfo.EnvName("COMMAND_TIMEOUT_MS"), "200")
 	wait := func(*cobra.Command, []string) error {
-		time.Sleep(150 * time.Millisecond)
+		time.Sleep(600 * time.Millisecond)
 		return nil
 	}
 

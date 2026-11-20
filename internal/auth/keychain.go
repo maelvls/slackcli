@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/maelvls/slackcli/internal/appinfo"
+	"github.com/maelvls/slackcli/internal/trace"
 )
 
 // Keychain stores secrets outside the credentials file. The only real
@@ -61,13 +62,28 @@ type securityResult struct {
 type securityRunner func(ctx context.Context, stdin string, args ...string) securityResult
 
 func runSecurity(ctx context.Context, stdin string, args ...string) securityResult {
+	// The subcommand (args[0]) is traced; the item names are not.
+	what := "set"
+	if len(args) > 0 && args[0] != "-i" {
+		what = args[0]
+	}
+	span := trace.Begin("keychain", what)
 	cmd := exec.CommandContext(ctx, "security", args...)
+	// Once the timeout has killed security(1), do not wait for whatever
+	// it started (a password prompt) to let go of its output: Run would
+	// otherwise block for as long as that lives.
+	cmd.WaitDelay = time.Second
 	if stdin != "" {
 		cmd.Stdin = strings.NewReader(stdin)
 	}
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
 	err := cmd.Run()
+	if ctx.Err() != nil {
+		span.Fail("no answer in time (locked, or waiting on a prompt?)")
+	} else {
+		span.End("")
+	}
 	res := securityResult{stdout: stdout.Bytes(), stderr: stderr.Bytes()}
 	var exit *exec.ExitError
 	if errors.As(err, &exit) && exit.Exited() {

@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/maelvls/slackcli/internal/appinfo"
+	"github.com/maelvls/slackcli/internal/trace"
 )
 
 // Timings of the advisory lock on the credentials file; variables so that
@@ -46,6 +47,9 @@ func lockFile(path string) (unlock func(), err error) {
 	}
 	token := newLockToken()
 	deadline := time.Now().Add(lockWait)
+	// Traced only when there is a wait: the usual case takes no time.
+	var waiting *trace.Span
+	defer func() { waiting.EndErr(err) }()
 	for {
 		err := createLock(lock, token)
 		if err == nil {
@@ -59,6 +63,9 @@ func lockFile(path string) (unlock func(), err error) {
 				continue
 			}
 			return nil, fmt.Errorf("creating the lock file of the credentials file (%s; is its directory writable?): %w", lock, err)
+		}
+		if waiting == nil {
+			waiting = trace.Begin("credentials lock", "held by another process")
 		}
 		if removeStaleLock(lock) {
 			continue

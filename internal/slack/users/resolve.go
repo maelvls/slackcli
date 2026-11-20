@@ -1,12 +1,14 @@
 package users
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/maelvls/slackcli/internal/appinfo"
 	"github.com/maelvls/slackcli/internal/jsonx"
@@ -127,6 +129,9 @@ type want struct {
 	// that email: only a deactivated member can still have it, so the
 	// scan may stop at the first one found.
 	deactivated bool
+	// emailErr is why users.lookupByEmail could not be used for this
+	// email (a refusal: missing scope, token type), nil otherwise.
+	emailErr error
 
 	active   map[string]any   // handle or email match
 	inactive map[string]any   // same, but a deactivated member
@@ -171,7 +176,7 @@ func lookup(ctx context.Context, client *slackapi.Client, inputs []string) ([]fo
 		w := &want{index: i, input: input, handle: strings.ToLower(strings.TrimPrefix(trimmed, "@"))}
 		if emailRe.MatchString(trimmed) {
 			w.email = strings.ToLower(trimmed)
-			user, err := lookupByEmail(ctx, client, trimmed)
+			user, tries, err := lookupByEmail(ctx, client, trimmed)
 			switch {
 			case user != nil:
 				out[i] = found{id: jsonx.Str(user["id"]), raw: user}
@@ -180,11 +185,26 @@ func lookup(ctx context.Context, client *slackapi.Client, inputs []string) ([]fo
 				// No active member has that address. A deactivated one
 				// may: the directory is the only place to find them.
 				w.deactivated = true
-			case enrich.MustAbortRequired(ctx, err):
+			case enrich.MustAbort(ctx, err):
 				return nil, fmt.Errorf("looking up user %s: %w", trimmed, err)
+			case slackapi.IsTransient(err):
+				// Slack did not answer, even when asked again. That says
+				// nothing about the user, and the directory scan is not
+				// the answer to it: in a large workspace it runs for
+				// half a minute and then fails for another reason.
+				return nil, &emailLookupError{email: trimmed, tries: tries, err: err}
+			case slackapi.IsErrorCode(err, emailLookupRefusals...):
+				// users.lookupByEmail is not for these credentials: look
+				// for the email in the directory instead.
+				w.emailErr = err
+			default:
+				// Anything else (a proxy or a captive portal answering
+				// in Slack's place, a redirect, an HTTP 4xx, an error
+				// code that is about the request) says nothing about the
+				// user either, and the directory would be asked through
+				// the same broken path: the failure is the answer.
+				return nil, fmt.Errorf("looking up user %s by email: %w", trimmed, err)
 			}
-			// users.lookupByEmail unavailable (missing users:read.email
-			// scope …): look for the email in the directory instead.
 		}
 		if w.handle == "" {
 			out[i].err = &NotFoundError{Input: input}
@@ -238,16 +258,113 @@ func lookup(ctx context.Context, client *slackapi.Client, inputs []string) ([]fo
 	return out, nil
 }
 
-func lookupByEmail(ctx context.Context, client *slackapi.Client, email string) (map[string]any, error) {
-	resp, err := client.API(ctx, "users.lookupByEmail", map[string]any{"email": email})
-	if err != nil {
-		return nil, err
+const (
+	// emailLookupAttempts is how many times users.lookupByEmail is called
+	// before a failure that says nothing about the user (see
+	// slackapi.IsTransient) is given up on.
+	emailLookupAttempts = 3
+	// maxEmailLookupWait is the longest pause Slack may ask for (the
+	// Retry-After of a rate limit) that is still waited out: beyond it,
+	// failing with that delay in the message is of more use.
+	maxEmailLookupWait = 10 * time.Second
+	emailLookupBackoff = 500 * time.Millisecond
+)
+
+// emailLookupRefusals are the error codes with which users.lookupByEmail
+// says that it is not for the credentials at hand, whoever is looked up:
+// the address is then looked for in the directory (users.list), which
+// asks for less.
+//
+//   - missing_scope: the token lacks users:read.email;
+//   - not_allowed_token_type: the method does not take this kind of token.
+//     It is what browser credentials (xoxc) get, so this is the usual path
+//     of an imported session;
+//   - no_permission, access_denied: the workspace or its administrators
+//     keep the method, or email addresses, from this user or app.
+//
+// Other codes are about the request or about Slack, and are errors.
+var emailLookupRefusals = []string{"missing_scope", "not_allowed_token_type", "no_permission", "access_denied"}
+
+// lookupByEmail returns the active member with that email address, or the
+// error of users.lookupByEmail ("users_not_found" when there is none), and
+// how many times the method was called.
+//
+// The lookup is one cheap call that either names the user or says there
+// is none, so a failure that does neither is not taken for an answer: the
+// call is made again, after the pause Slack asks for when it is rate
+// limiting, a short one otherwise. The client's own policy of failing fast
+// on a rate limit suits the lookups a command can do without; this one it
+// cannot.
+//
+// A call that timed out is made once more only, and only when the command
+// has the time for it: a try may last the whole API timeout, and one that
+// the command timeout would cut short ends the command with exit code 124
+// instead of an error that says what happened. With the default timeouts
+// (20 s per call, 30 s per command) a timeout is therefore not retried.
+func lookupByEmail(ctx context.Context, client *slackapi.Client, email string) (user map[string]any, tries int, err error) {
+	for tries = 1; ; tries++ {
+		resp, err := client.API(ctx, "users.lookupByEmail", map[string]any{"email": email})
+		if err == nil {
+			if user := jsonx.Map(resp["user"]); jsonx.Str(user["id"]) != "" {
+				return user, tries, nil
+			}
+			return nil, tries, nil
+		}
+		if ctx.Err() != nil || !slackapi.IsTransient(err) || tries >= emailLookupAttempts {
+			return nil, tries, err
+		}
+		wait := time.Duration(tries) * emailLookupBackoff
+		var (
+			limited *slackapi.RateLimitError
+			timeout *slackapi.TimeoutError
+		)
+		switch {
+		case errors.As(err, &limited):
+			if wait = limited.RetryAfter; wait > maxEmailLookupWait {
+				return nil, tries, err
+			}
+		case errors.As(err, &timeout):
+			if tries >= 2 {
+				return nil, tries, err
+			}
+			if left, limited := slackapi.TimeLeft(ctx); limited && left < wait+slackapi.APITimeout() {
+				return nil, tries, err
+			}
+		}
+		if sleepErr := client.Sleep(ctx, wait); sleepErr != nil {
+			return nil, tries, sleepErr
+		}
 	}
-	if user := jsonx.Map(resp["user"]); jsonx.Str(user["id"]) != "" {
-		return user, nil
-	}
-	return nil, nil
 }
+
+// emailLookupError says that users.lookupByEmail gave no answer about an
+// email address. It wraps the cause (errors.As still finds a
+// *slackapi.RateLimitError) and words it for somebody who passed an email:
+// the advice of the cause, or of a failed directory scan, to pass "the
+// email address instead" would be of no use.
+type emailLookupError struct {
+	email string
+	// tries is how many times the method was called.
+	tries int
+	err   error
+}
+
+func (e *emailLookupError) Error() string {
+	cause := e.err.Error()
+	var limited *slackapi.RateLimitError
+	if errors.As(e.err, &limited) {
+		cause = limited.Summary()
+	}
+	after := "after 1 try"
+	if e.tries > 1 {
+		after = fmt.Sprintf("after %d tries", e.tries)
+	}
+	return fmt.Sprintf("could not look up user %q by email: users.lookupByEmail gave no answer %s (%s). "+
+		"This is temporary and says nothing about whether the user exists: run the command again in a moment, or pass the user ID (U…) if you know it.",
+		e.email, after, strings.TrimSuffix(cause, "."))
+}
+
+func (e *emailLookupError) Unwrap() error { return e.err }
 
 // canSearch reports whether the search.messages shortcut is worth trying:
 // bot tokens cannot call search.*, and something with spaces or quotes is
@@ -352,7 +469,8 @@ func scanError(err error, wants []*want) error {
 		return fmt.Errorf("searching the user directory: %w", err)
 	}
 	var missing []string
-	onlyEmails := true
+	onlyEmails, onlyRefused := true, true
+	var refusal error
 	for _, w := range wants {
 		// Settled, as in scanDirectory: an active match, or the deactivated
 		// member an email no active member has was looked for.
@@ -361,18 +479,54 @@ func scanError(err error, wants []*want) error {
 		}
 		missing = append(missing, strconv.Quote(w.input))
 		onlyEmails = onlyEmails && w.deactivated
+		onlyRefused = onlyRefused && w.emailErr != nil
+		refusal = cmp.Or(refusal, w.emailErr)
+	}
+	wait := fmt.Sprintf("Setting %s to a large value makes the scan wait and carry on, which can take very long (%s)",
+		appinfo.EnvName("RATE_LIMIT_MAX_WAIT_MS"), rl.Summary())
+	if onlyRefused && len(missing) > 0 {
+		// Every input is an email address that users.lookupByEmail would
+		// not look up: "pass the email address instead" is no advice.
+		//
+		// The way out is a token that may: never a browser session,
+		// which is what users.lookupByEmail answers
+		// not_allowed_token_type to, and most likely what is in use.
+		token := "a token that has the users:read.email scope (xoxp- or xoxb-, in SLACK_TOKEN or saved with `" + appinfo.Name + " auth add`)"
+		if slackapi.IsErrorCode(refusal, "not_allowed_token_type") {
+			token += "; a browser session, as imported from Slack Desktop or a browser, cannot use this method"
+		}
+		return &scanLimitError{err: err, msg: fmt.Sprintf("could not resolve user %s: these credentials may not look a user up by email (users.lookupByEmail: %s), "+
+			"and the other way, a scan of the user directory, cannot finish in a workspace this large (users.list was rate limited). "+
+			"Pass the user ID (U…) instead, or use %s. %s",
+			strings.Join(missing, ", "), refusalCode(refusal), token, wait)}
 	}
 	if onlyEmails && len(missing) > 0 {
 		return &scanLimitError{err: err, msg: fmt.Sprintf("could not resolve user %s: no active member of this workspace has that email address (users.lookupByEmail), "+
 			"and looking for a deactivated one takes a scan of the user directory, which this workspace is too large for (users.list was rate limited). "+
-			"Pass the user ID (U…) instead. "+
-			"Setting %s to a large value makes the scan wait and carry on, which can take very long (%s)",
-			strings.Join(missing, ", "), appinfo.EnvName("RATE_LIMIT_MAX_WAIT_MS"), rl.Summary())}
+			"Pass the user ID (U…) instead. %s",
+			strings.Join(missing, ", "), wait)}
+	}
+	instead := "Pass the user ID (U…) or the email address instead"
+	if refusal != nil {
+		// Some of the inputs are emails that could not be looked up as
+		// such: an email is no way out for those.
+		instead = fmt.Sprintf("Pass the user ID (U…) instead (an email address is no help here: users.lookupByEmail answered %s)", refusalCode(refusal))
 	}
 	return &scanLimitError{err: err, msg: fmt.Sprintf("could not resolve user %s: this workspace is too large to scan its user directory (users.list was rate limited). "+
-		"Pass the user ID (U…) or the email address instead: a handle is only found without a scan when it is the exact @handle of somebody who posted a message you can see. "+
-		"Setting %s to a large value makes the scan wait and carry on, which can take very long (%s)",
-		strings.Join(missing, ", "), appinfo.EnvName("RATE_LIMIT_MAX_WAIT_MS"), rl.Summary())}
+		"%s: a handle is only found without a scan when it is the exact @handle of somebody who posted a message you can see. %s",
+		strings.Join(missing, ", "), instead, wait)}
+}
+
+// refusalCode names why users.lookupByEmail refused: Slack's error code,
+// or the error itself when it has none.
+func refusalCode(err error) string {
+	if code := slackapi.ErrorCode(err); code != "" {
+		return code
+	}
+	if err == nil {
+		return "no user"
+	}
+	return err.Error()
 }
 
 // scanLimitError is the explanation of a rate-limited directory scan. It

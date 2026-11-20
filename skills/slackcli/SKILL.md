@@ -49,6 +49,7 @@ One call each. Messages carry `time` (their `ts` as a local date and time); add 
 - `canvas edit` applies one operation per call; the default `replace` without `--section-id` overwrites the whole canvas.
 - `channel invite` exits non-zero on partial failure but still prints which invites went through: read the JSON before retrying.
 - Commands are cut after 30 s (exit code 124; `SLACKCLI_COMMAND_TIMEOUT_MS`), except `message compose` and the uploading ones (`message send --attach`, `message draft create/update`). A rate-limited call fails at once unless `SLACKCLI_RATE_LIMIT_MAX_WAIT_MS` is set. After a timeout or an interrupt (exit code 130) of a write, the change may still have gone through: check before retrying.
+- A slow or timed-out command: the timeout message on stderr says where the time went (which Slack calls, rate-limit waits, keychain) and what was still running. To see it for any command, run it again with `SLACKCLI_DEBUG=1`: each call and wait is traced on stderr with its duration (`[slackcli +1.2s] api conversations.history: 800ms, HTTP 200`). Do not combine it with `2>&1 | jq`.
 
 ## Conditional references
 
