@@ -37,8 +37,10 @@ Slackbot, system messages and the DM with yourself are ignored.
 Prints JSON:
   user_id    you
   since      start of the window, in UTC
-  truncated  true when there was more to look at than was looked at: raise
-             --max-conversations, or shorten --since
+  truncated  true when there was more to look at than was looked at: more
+             candidates than --max-conversations (raise it), or more
+             matches than the 200 read from each search (only a shorter
+             --since helps then)
   items      newest first, each with:
     kind          dm, mpim, mention or thread
     channel_id, channel_name

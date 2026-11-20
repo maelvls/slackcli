@@ -91,7 +91,7 @@ slackcli inbox --no-threads --max-body-chars 120
 }
 ```
 
-Items are newest first. `count` and `first_ts` cover the messages from others since your last one there; `ts`, `author`, `text` and `permalink` describe the newest. `thread_ts` is absent for the top level of a DM. `truncated` means there was more to look at than `--max-conversations` (60) allowed.
+Items are newest first. `count` and `first_ts` cover the messages from others since your last one there; `ts`, `author`, `text` and `permalink` describe the newest. `thread_ts` is absent for the top level of a DM. `truncated` means there was more to look at than was: more candidates than `--max-conversations` (60), in which case raise it, or more matches than the 200 read from each of the three searches behind the inbox, in which case only a shorter `--since` helps.
 
 ## Letting a human review
 

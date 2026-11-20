@@ -408,6 +408,9 @@ func TestFetchErrors(t *testing.T) {
 		"rate limit":       {"conversations.replies", rateLimit},
 		"dead credentials": {"conversations.history", &slackapi.APIError{Method: "conversations.history", Code: "invalid_auth"}},
 		"network":          {"conversations.history", errors.New("connection reset")},
+		"missing scope":    {"conversations.history", &slackapi.APIError{Method: "conversations.history", Code: "missing_scope"}},
+		"Slack failure":    {"conversations.replies", &slackapi.APIError{Method: "conversations.replies", Code: "internal_error"}},
+		"unknown code":     {"conversations.replies", &slackapi.APIError{Method: "conversations.replies", Code: "something_new"}},
 		"search":           {"search.messages", &slackapi.APIError{Method: "search.messages", Code: "not_allowed_token_type"}},
 		"auth.test":        {"auth.test", &slackapi.APIError{Method: "auth.test", Code: "invalid_auth"}},
 	} {
@@ -429,13 +432,14 @@ func TestParseSince(t *testing.T) {
 		"6h":         "2026-11-10T06:00:00Z",
 		" 12h ":      "2026-11-10T00:00:00Z",
 		"2026-11-07": "2026-11-07T00:00:00Z",
+		"36500d":     "1926-12-05T12:00:00Z",
 	} {
 		got, err := ParseSince(input, now)
 		if err != nil || got.UTC().Format(time.RFC3339) != want {
 			t.Errorf("ParseSince(%q) = %v, %v; want %s", input, got, err, want)
 		}
 	}
-	for _, input := range []string{"", "3 days", "3w", "-3d", "2026-13-45", "2026-11-07T10:00", "99999999999999999999d", "9999999999h"} {
+	for _, input := range []string{"", "3 days", "3w", "-3d", "2026-13-45", "2026-11-07T10:00", "99999999999999999999d", "9999999999h", "200000d", "36501d", "876001h"} {
 		if _, err := ParseSince(input, now); err == nil || !strings.Contains(err.Error(), "invalid --since value") {
 			t.Errorf("ParseSince(%q) = %v, want an error", input, err)
 		}

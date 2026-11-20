@@ -83,10 +83,12 @@ type Item struct {
 	// message there; Author, Text and Permalink describe that message.
 	TS string `json:"ts"`
 	// FirstTS is the oldest such message, and Count their number.
-	FirstTS   string `json:"first_ts"`
-	Count     int    `json:"count"`
-	Author    Author `json:"author"`
-	Text      string `json:"text,omitempty"`
+	FirstTS string `json:"first_ts"`
+	Count   int    `json:"count"`
+	Author  Author `json:"author"`
+	// Text is the message as Markdown. Like every blank string it is
+	// pruned when printed, should a message render to nothing.
+	Text      string `json:"text"`
 	Permalink string `json:"permalink,omitempty"`
 }
 
@@ -121,6 +123,21 @@ type Options struct {
 	CacheDir string
 }
 
+// maxSince is the longest relative --since accepted: 100 years.
+const maxSince = 100 * 365 * 24 * time.Hour
+
+// skippableCodes are the Slack errors that only say that one candidate
+// cannot be read with these credentials, or is gone: the caller has
+// nothing to answer there, and the rest of the inbox stands. Any other
+// error (internal_error, missing_scope …) would make an empty inbox a lie.
+var skippableCodes = []string{
+	"channel_not_found", // left, or a private conversation no longer visible
+	"thread_not_found",  // the root was deleted
+	"not_in_channel",    // found by the search in a public channel the caller is not in
+	"is_archived",       // nothing can be answered there
+	"access_denied",     // a conversation the organisation hides from this session
+}
+
 var relativeSinceRe = regexp.MustCompile(`^(\d+)([dh])$`)
 
 // ParseSince parses the value of --since: "Nd" or "Nh" before now, or a
@@ -132,8 +149,9 @@ func ParseSince(input string, now time.Time) (time.Time, error) {
 		if m[2] == "d" {
 			unit = 24 * time.Hour
 		}
-		// More hours than a Duration holds is not a date either.
-		if n, err := strconv.ParseInt(m[1], 10, 64); err == nil && n <= int64(100*365*24) {
+		// Bounded well below what a Duration holds (292 years), which a
+		// larger number would silently wrap around.
+		if n, err := strconv.ParseInt(m[1], 10, 64); err == nil && n <= int64(maxSince/unit) {
 			return now.Add(-time.Duration(n) * unit), nil
 		}
 	} else if t, err := time.Parse("2006-01-02", value); err == nil {
@@ -191,9 +209,9 @@ type fetcher struct {
 // person counts as waiting. Bots, Slackbot, system messages and the DM
 // with oneself are ignored.
 //
-// A candidate that cannot be read (Slack answers channel_not_found,
+// A candidate that cannot be read (skippableCodes: channel_not_found,
 // thread_not_found …) is left out. Everything else fails the command,
-// rate limits included: an inbox with holes would read as "nobody else is
+// rate limits, missing scopes and Slack's own failures included: an inbox with holes would read as "nobody else is
 // waiting". Names are an enrichment (see package enrich).
 func Fetch(ctx context.Context, client *slackapi.Client, opts Options) (Result, error) {
 	if opts.MaxBodyChars == 0 {
@@ -258,12 +276,10 @@ func Fetch(ctx context.Context, client *slackapi.Client, opts Options) (Result, 
 		case err == nil:
 			evaluated[i] = d
 			return nil
-		case enrich.MustAbortRequired(ctx, err), slackapi.IsErrorCode(err, enrich.RateLimitedCode), slackapi.ErrorCode(err) == "":
-			return fmt.Errorf("reading %s: %w", inspected[i].channelID, err)
+		case !enrich.MustAbortRequired(ctx, err) && slackapi.IsErrorCode(err, skippableCodes...):
+			return nil
 		}
-		// channel_not_found, thread_not_found …: nothing the caller can
-		// act on.
-		return nil
+		return fmt.Errorf("reading %s: %w", inspected[i].channelID, err)
 	})
 	if err != nil {
 		return Result{}, err
