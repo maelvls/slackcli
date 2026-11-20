@@ -117,6 +117,11 @@ and classic tokens, not with the token of a Slack app.`,
 				ctx, cancel = context.WithTimeout(ctx, duration)
 				defer cancel()
 			}
+			// downSince is since when messages may be missing because a
+			// stream ended on rejected credentials: the stream opened
+			// with the refreshed ones knows nothing of that gap. Zero
+			// while connected, and before the first connection.
+			var downSince time.Time
 			_, err := clictx.WithAutoRefresh(ctx, rt, func() (struct{}, error) {
 				r, err := rt.Client(ctx, ws)
 				if err != nil {
@@ -132,7 +137,13 @@ and classic tokens, not with the token of a Slack app.`,
 					return struct{}{}, err
 				}
 				opts := streamOptions
+				connected := false
 				opts.OnConnect = func(gap time.Duration) {
+					connected = true
+					if gap == 0 && !downSince.IsZero() {
+						gap = max(time.Since(downSince), time.Nanosecond)
+					}
+					downSince = time.Time{}
 					if gap > 0 {
 						rt.Hintf("Reconnected after %s: the messages sent meanwhile were not received.", gap.Round(time.Second))
 						return
@@ -141,14 +152,20 @@ and classic tokens, not with the token of a Slack app.`,
 				}
 				opts.OnDisconnect = func(err error) { rt.Hintf("Connection lost (%v): reconnecting.", err) }
 				err = rtm.Stream(ctx, r.Client, opts, func(raw map[string]any) error { return w.handle(ctx, raw) })
-				// Being interrupted, or running out of --for, is how the
-				// command ends, not a failure: whatever call that cut
-				// short is not an error to report.
-				if ctx.Err() != nil {
-					err = nil
+				if err != nil && connected && downSince.IsZero() {
+					// Without the monotonic reading, which stops while
+					// the machine sleeps.
+					downSince = time.Now().Round(0)
 				}
 				return struct{}{}, err
 			})
+			// Being interrupted, or running out of --for, is how the
+			// command ends, not a failure: whatever call that cut short
+			// (a channel being resolved, a name looked up, the stream)
+			// is not an error to report.
+			if ctx.Err() != nil {
+				return nil
+			}
 			return err
 		},
 	}

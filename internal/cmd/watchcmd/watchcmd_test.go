@@ -10,12 +10,14 @@ import (
 	"reflect"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"golang.org/x/net/websocket"
 
 	"github.com/maelvls/slackcli/internal/auth"
+	"github.com/maelvls/slackcli/internal/authextract"
 	"github.com/maelvls/slackcli/internal/clictx"
 	"github.com/maelvls/slackcli/internal/slack/channels"
 	"github.com/maelvls/slackcli/internal/slack/enrich"
@@ -307,5 +309,114 @@ func TestTextLineDropsControlCharacters(t *testing.T) {
 	got := textLine(Event{ChannelID: "C000000001", ChannelName: "gen\x1beral", Author: &messages.Author{Name: "Al\rice"}, Content: "a\x1b[2J\x07b\n\tc\u009b"})
 	if want := "#general Alice: a[2Jb\n    \tc"; got != want {
 		t.Errorf("textLine = %q, want %q", got, want)
+	}
+}
+
+// Running out of --for, or being interrupted, while the command is still
+// starting (here: resolving a channel name) ends it like later on: without
+// an error.
+func TestWatchCutShortWhileStartingIsNotAnError(t *testing.T) {
+	for _, env := range []string{"SLACK_TOKEN", "SLACK_COOKIE_D", "SLACK_COOKIE", "SLACK_WORKSPACE_URL"} {
+		t.Setenv(env, "")
+	}
+	testenv.Isolate(t)
+	store := &auth.Store{Path: filepath.Join(t.TempDir(), "credentials.json")}
+	if err := store.Upsert(auth.Workspace{
+		URL:  "https://acme.slack.com",
+		Auth: slackapi.Auth{Type: slackapi.AuthBrowser, XoxcToken: "xoxc-test", XoxdCookie: "xoxd-test"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	rt := &clictx.Context{
+		Store: store, Stdout: io.Discard, Stderr: io.Discard,
+		// Slack never answers: every call lasts until the command ends.
+		ClientOptions: []slackapi.Option{slackapi.WithHandler(func(ctx context.Context, _ string, _ map[string]any) (map[string]any, error) {
+			<-ctx.Done()
+			return nil, ctx.Err()
+		})},
+	}
+	run := func(ctx context.Context, args ...string) error {
+		cmd := New(rt)
+		cmd.SetArgs(args)
+		cmd.SetOut(io.Discard)
+		cmd.SetErr(io.Discard)
+		return cmd.ExecuteContext(ctx)
+	}
+	if err := run(context.Background(), "--channel", "#general", "--for", "50ms"); err != nil {
+		t.Errorf("--for ran out while resolving the channel: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	time.AfterFunc(50*time.Millisecond, cancel)
+	if err := run(ctx, "--channel", "#general"); err != nil {
+		t.Errorf("interrupted while resolving the channel: %v", err)
+	}
+}
+
+// Credentials rejected in the middle of a watch are refreshed from Slack
+// Desktop and the watch goes on; the messages of the meantime are lost,
+// and that is said, as for any other reconnection.
+func TestWatchReportsTheGapOfACredentialRefresh(t *testing.T) {
+	for _, env := range []string{"SLACK_TOKEN", "SLACK_COOKIE_D", "SLACK_COOKIE", "SLACK_WORKSPACE_URL"} {
+		t.Setenv(env, "")
+	}
+	testenv.Isolate(t)
+	streamOptions = rtm.Options{PingInterval: 10 * time.Millisecond, ReadTimeout: time.Second, Backoff: func(int) time.Duration { return time.Millisecond }}
+	t.Cleanup(func() { streamOptions = rtm.Options{} })
+
+	// The first connection is dropped after hello; the second one, opened
+	// with the new credentials, delivers a message.
+	var conns atomic.Int32
+	server := httptest.NewServer(websocket.Handler(func(ws *websocket.Conn) {
+		_ = websocket.Message.Send(ws, `{"type":"hello"}`)
+		if conns.Add(1) == 1 {
+			return
+		}
+		_ = websocket.Message.Send(ws, `{"type":"message","channel":"C000000001","user":"U000000001","text":"back","ts":"1700000001.000100"}`)
+		_, _ = io.Copy(io.Discard, ws)
+	}))
+	t.Cleanup(server.Close)
+
+	store := &auth.Store{Path: filepath.Join(t.TempDir(), "credentials.json")}
+	if err := store.Upsert(auth.Workspace{
+		URL:  "https://acme.slack.com",
+		Auth: slackapi.Auth{Type: slackapi.AuthBrowser, XoxcToken: "xoxc-old", XoxdCookie: "xoxd-old"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	var stderr bytes.Buffer
+	var connects atomic.Int32
+	rt := &clictx.Context{
+		Store:  store,
+		Stdout: &lineWriter{want: 1, done: cancel},
+		Stderr: &stderr,
+		Desktop: func(context.Context) (*authextract.Extracted, error) {
+			return &authextract.Extracted{CookieD: "xoxd-new", Teams: []authextract.Team{{URL: "https://acme.slack.com/", Name: "acme", Token: "xoxc-new"}}}, nil
+		},
+		ClientOptions: []slackapi.Option{
+			slackapi.WithLoopbackWorkspaceForTesting(),
+			slackapi.WithHandler(func(_ context.Context, method string, _ map[string]any) (map[string]any, error) {
+				if method != "rtm.connect" {
+					return map[string]any{"ok": false, "error": "unknown_method"}, nil
+				}
+				// The session expires after the first connection, until
+				// it is refreshed (the third call).
+				if connects.Add(1) == 2 {
+					return map[string]any{"ok": false, "error": "invalid_auth"}, nil
+				}
+				return map[string]any{"url": "ws" + strings.TrimPrefix(server.URL, "http")}, nil
+			}),
+		},
+	}
+	cmd := New(rt)
+	cmd.SetArgs(nil)
+	cmd.SetOut(io.Discard)
+	cmd.SetErr(io.Discard)
+	if err := cmd.ExecuteContext(ctx); err != nil {
+		t.Fatalf("watch: %v", err)
+	}
+	if got := stderr.String(); strings.Count(got, "Connected to") != 1 || !strings.Contains(got, "Reconnected after") {
+		t.Errorf("stderr does not report the gap of the refresh:\n%s", got)
 	}
 }
