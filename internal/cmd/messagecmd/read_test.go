@@ -300,9 +300,12 @@ func TestGetDownloadsFiles(t *testing.T) {
 }
 
 // --no-download, as on "search": the files are listed without a path and
-// nothing is fetched, on "get" (also the implicit one) and on "list".
+// nothing is fetched, on "get" (also the implicit one) and on "list". A
+// file that Slack does not host is listed like the others, not marked
+// "external": nothing looked at where the files are.
 func TestNoDownload(t *testing.T) {
 	file := map[string]any{"id": "F1", "name": "notes.txt", "mimetype": "text/plain", "url_private_download": "https://files.slack.com/files-pri/T1-F1/download/notes.txt"}
+	doc := map[string]any{"id": "F3", "name": "Roadmap", "mimetype": "application/vnd.google-apps.document", "is_external": true, "url_private": "https://docs.google.com/document/d/abc/edit"}
 	for _, args := range [][]string{
 		{"get", testURL, "--no-download"},
 		{testURL, "--no-download"},
@@ -310,8 +313,8 @@ func TestNoDownload(t *testing.T) {
 		{"list", testURL, "--no-download"},
 	} {
 		h := newHarness(t)
-		h.history(map[string]any{"ts": testTS, "text": "see attached", "files": []any{file}})
-		h.replies(map[string]any{"ts": testTS, "text": "see attached", "files": []any{file}})
+		h.history(map[string]any{"ts": testTS, "text": "see attached", "files": []any{file, doc}})
+		h.replies(map[string]any{"ts": testTS, "text": "see attached", "files": []any{file, doc}})
 		h.serve = func(req *http.Request) *http.Response {
 			t.Errorf("%v: downloaded %s", args, req.URL)
 			return httpResponse(http.StatusNotFound, "", "")
@@ -321,7 +324,13 @@ func TestNoDownload(t *testing.T) {
 		if list, ok := got["messages"].([]any); ok && len(list) == 1 {
 			msg, _ = list[0].(map[string]any)
 		}
-		wantJSON(t, map[string]any{"files": msg["files"]}, `{"files": [{"name": "notes.txt", "mimetype": "text/plain"}]}`)
+		wantJSON(t, map[string]any{"files": msg["files"]}, `{"files": [
+			{"name": "notes.txt", "mimetype": "text/plain"},
+			{"name": "Roadmap", "mimetype": "application/vnd.google-apps.document"}
+		]}`)
+		if got["warnings"] != nil || got["hints"] != nil {
+			t.Errorf("%v: warnings = %v, hints = %v", args, got["warnings"], got["hints"])
+		}
 		if entries, _ := os.ReadDir(h.c.downloadsDir); len(entries) != 0 {
 			t.Errorf("%v: %d files written to the downloads directory", args, len(entries))
 		}
