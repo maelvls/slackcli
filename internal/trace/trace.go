@@ -117,8 +117,8 @@ func (s *Span) end(note string, failed bool) {
 	}
 	d := time.Since(s.start)
 	rec.mu.Lock()
-	defer rec.mu.Unlock()
 	if s.done {
+		rec.mu.Unlock()
 		return
 	}
 	s.done = true
@@ -134,10 +134,15 @@ func (s *Span) end(note string, failed bool) {
 	if failed {
 		t.failed++
 	}
-	if !rec.live {
+	live, out, since := rec.live, rec.out, time.Since(rec.start)
+	// Written once the record is let go of: a stderr that blocks (a full
+	// pipe nobody reads) must not keep Summary, which the message of a
+	// timeout needs, from reading it.
+	rec.mu.Unlock()
+	if !live {
 		return
 	}
-	line := fmt.Sprintf("[%s +%s] %s", appinfo.Name, round(time.Since(rec.start)), s.name)
+	line := fmt.Sprintf("[%s +%s] %s", appinfo.Name, round(since), s.name)
 	if s.detail != "" {
 		line += " " + s.detail
 	}
@@ -150,18 +155,19 @@ func (s *Span) end(note string, failed bool) {
 	case note != "":
 		line += ", " + note
 	}
-	fmt.Fprintln(rec.out, line)
+	fmt.Fprintln(out, line)
 }
 
 // Logf writes one line to the live trace, for an event that has no
 // duration. It does nothing unless the live trace is on.
 func Logf(format string, args ...any) {
 	rec.mu.Lock()
-	defer rec.mu.Unlock()
-	if !rec.live {
+	live, out, since := rec.live, rec.out, time.Since(rec.start)
+	rec.mu.Unlock()
+	if !live {
 		return
 	}
-	fmt.Fprintf(rec.out, "[%s +%s] %s\n", appinfo.Name, round(time.Since(rec.start)), fmt.Sprintf(format, args...))
+	fmt.Fprintf(out, "[%s +%s] %s\n", appinfo.Name, round(since), fmt.Sprintf(format, args...))
 }
 
 // Summary says, on one line, what the time went to since the process

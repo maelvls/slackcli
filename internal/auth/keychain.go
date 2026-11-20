@@ -79,17 +79,30 @@ func runSecurity(ctx context.Context, stdin string, args ...string) securityResu
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
 	err := cmd.Run()
-	if ctx.Err() != nil {
-		span.Fail("no answer in time (locked, or waiting on a prompt?)")
-	} else {
-		span.End("")
-	}
 	res := securityResult{stdout: stdout.Bytes(), stderr: stderr.Bytes()}
 	var exit *exec.ExitError
 	if errors.As(err, &exit) && exit.Exited() {
 		res.exit = exit.ExitCode()
 	} else {
 		res.err = err
+	}
+	// The trace says how the call ended, by its status alone: what
+	// security(1) writes can quote the command it was given.
+	switch {
+	case ctx.Err() != nil:
+		span.Fail("no answer in time (locked, or waiting on a prompt?)")
+	case res.err != nil:
+		span.Fail("security could not be run")
+	case res.exit == securityItemNotFound:
+		span.End("no such item")
+	case res.exit != 0:
+		span.Fail(fmt.Sprintf("security exited with status %d", res.exit))
+	case what == "set" && len(bytes.TrimSpace(res.stderr)) > 0:
+		// `security -i` reports a sub-command that failed on stderr
+		// (see keychainSetResult).
+		span.Fail("security reported an error")
+	default:
+		span.End("")
 	}
 	return res
 }

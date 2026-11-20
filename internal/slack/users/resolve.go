@@ -302,6 +302,10 @@ var emailLookupRefusals = []string{"missing_scope", "not_allowed_token_type", "n
 // instead of an error that says what happened. With the default timeouts
 // (20 s per call, 30 s per command) a timeout is therefore not retried.
 func lookupByEmail(ctx context.Context, client *slackapi.Client, email string) (user map[string]any, tries int, err error) {
+	// The retries are these, and only these: with
+	// SLACKCLI_RATE_LIMIT_MAX_WAIT_MS set, the client would make up to
+	// four calls of its own for each one made here.
+	ctx = slackapi.WithoutRateLimitRetry(ctx)
 	for tries = 1; ; tries++ {
 		resp, err := client.API(ctx, "users.lookupByEmail", map[string]any{"email": email})
 		if err == nil {

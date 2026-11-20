@@ -9,6 +9,8 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+
+	"github.com/maelvls/slackcli/internal/clictx"
 )
 
 // Ctrl-C cancels the command's context; the run ends with exit code 130
@@ -43,5 +45,29 @@ func TestRunInterrupt(t *testing.T) {
 	message.AddCommand(&cobra.Command{Use: "list", RunE: waiting.RunE})
 	if got = runWith(t, time.Second, one(message), "message", "list"); got.code != 130 || got.stderr != "interrupted\n" {
 		t.Errorf("message list: got %+v", got)
+	}
+}
+
+// Ctrl-C ends the process with 130 even when what is running does not
+// look at its context, whether it has a timeout behind it or not.
+func TestRunInterruptDoesNotWaitForACommandThatIgnoresIt(t *testing.T) {
+	release := make(chan struct{})
+	defer close(release)
+	stuck := func(*cobra.Command, []string) error {
+		if err := syscall.Kill(os.Getpid(), syscall.SIGINT); err != nil {
+			return err
+		}
+		<-release
+		return nil
+	}
+	for name, cmd := range map[string]*cobra.Command{
+		"with a timeout":    {Use: "stuck", RunE: stuck},
+		"without a timeout": clictx.NoTimeout(&cobra.Command{Use: "stuck", RunE: stuck}),
+	} {
+		start := time.Now()
+		got := runRunner(t, runner{commands: one(cmd), grace: time.Second, interruptGrace: 50 * time.Millisecond}, "stuck")
+		if elapsed := time.Since(start); got.code != 130 || got.stderr != "interrupted\n" || elapsed > 5*time.Second {
+			t.Errorf("%s: %+v after %s", name, got, elapsed)
+		}
 	}
 }

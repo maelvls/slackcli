@@ -279,6 +279,24 @@ func (c *Client) APIMultipart(ctx context.Context, method string, params map[str
 	return c.call(ctx, method, params, true)
 }
 
+type noRateLimitRetryKey struct{}
+
+// WithoutRateLimitRetry makes the calls made under the returned context
+// fail at once with a *RateLimitError when Slack rate limits them,
+// whatever SLACKCLI_RATE_LIMIT_MAX_WAIT_MS allows. It is for a caller that
+// has a retry policy of its own (see Client.Sleep): the two would
+// otherwise multiply, each try of the caller being up to four of the
+// client.
+func WithoutRateLimitRetry(ctx context.Context) context.Context {
+	return context.WithValue(ctx, noRateLimitRetryKey{}, true)
+}
+
+// RateLimitRetryDisabled reports whether ctx was made by
+// WithoutRateLimitRetry.
+func RateLimitRetryDisabled(ctx context.Context) bool {
+	return ctx.Value(noRateLimitRetryKey{}) != nil
+}
+
 // Sleep waits for d, or until ctx is done, in which case it returns the
 // context's error. It is the wait the client itself makes when Slack rate
 // limits a call (tests replace it with WithSleep), for the callers that
@@ -371,7 +389,7 @@ func (c *Client) callOnce(ctx context.Context, method string, params map[string]
 			retryAfter := parseRetryAfter(header.Get("Retry-After"))
 			maxWait := RateLimitMaxWait()
 			span.Fail(fmt.Sprintf("HTTP 429, Retry-After %s", retryAfter))
-			if attempt >= maxRateLimitRetry || retryAfter > maxWait {
+			if attempt >= maxRateLimitRetry || retryAfter > maxWait || RateLimitRetryDisabled(ctx) {
 				return nil, &RateLimitError{Method: method, RetryAfter: retryAfter, MaxWait: maxWait}
 			}
 			wait := trace.Begin("rate-limit wait", method)
@@ -382,30 +400,39 @@ func (c *Client) callOnce(ctx context.Context, method string, params map[string]
 			}
 			continue
 		}
-		var data map[string]any
-		_ = json.Unmarshal(body, &data)
-		if code, _ := data["error"].(string); code != "" && data["ok"] != true {
-			span.Fail(fmt.Sprintf("HTTP %d, %s", status, code))
-		} else {
-			span.End(fmt.Sprintf("HTTP %d", status))
-		}
-
+		// The span ends as the call does: a failure for everything that
+		// is returned as an error.
 		if status >= 300 && status <= 399 {
+			span.Fail(fmt.Sprintf("HTTP %d, a redirect", status))
 			return nil, c.redirectError(method, status, header.Get("Location"))
 		}
 
-		if status < 200 || status > 299 {
-			if code, _ := data["error"].(string); code != "" {
-				return nil, newAPIError(method, data)
+		var data map[string]any
+		_ = json.Unmarshal(body, &data)
+		code, _ := data["error"].(string)
+		switch {
+		case status < 200 || status > 299:
+			if code != "" {
+				span.Fail(fmt.Sprintf("HTTP %d, %s", status, code))
+				apiErr := newAPIError(method, data)
+				apiErr.Status = status
+				return nil, apiErr
 			}
+			span.Fail(fmt.Sprintf("HTTP %d", status))
 			return nil, &HTTPStatusError{Method: method, Status: status}
-		}
-		if data == nil {
+		case data == nil:
+			span.Fail(fmt.Sprintf("HTTP %d, not JSON", status))
 			return nil, fmt.Errorf("Slack API %s returned a non-JSON response", method)
+		case data["ok"] != true:
+			if code == "" {
+				code = "not ok"
+			}
+			span.Fail(fmt.Sprintf("HTTP %d, %s", status, code))
+			apiErr := newAPIError(method, data)
+			apiErr.Status = status
+			return nil, apiErr
 		}
-		if data["ok"] != true {
-			return nil, newAPIError(method, data)
-		}
+		span.End(fmt.Sprintf("HTTP %d", status))
 		return data, nil
 	}
 }

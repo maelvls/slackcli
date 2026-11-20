@@ -18,6 +18,7 @@ import (
 	"github.com/maelvls/slackcli/internal/output"
 	"github.com/maelvls/slackcli/internal/slackapi"
 	"github.com/maelvls/slackcli/internal/slackid"
+	"github.com/maelvls/slackcli/internal/trace"
 )
 
 // WorkspaceFlagUsage is the help text shared by every --workspace flag.
@@ -59,13 +60,27 @@ func New() *Context {
 		Store:   auth.DefaultStore(),
 		Stdout:  os.Stdout,
 		Stderr:  os.Stderr,
-		Desktop: authextract.Desktop,
-		Chrome:  authextract.Chrome,
-		Brave:   authextract.Brave,
-		Firefox: authextract.Firefox,
+		Desktop: traced("Slack Desktop", authextract.Desktop),
+		Chrome:  traced("Chrome", authextract.Chrome),
+		Brave:   traced("Brave", authextract.Brave),
+		Firefox: traced("Firefox", authextract.Firefox),
 	}
 	c.Store.Warnf = c.Hintf
 	return c
+}
+
+// traced makes every run of an extractor a span of the trace, whoever
+// runs it: the automatic lookup of credentials, the refresh of a session
+// that expired, an "auth import-…" command. An extraction reads the files
+// of another application and may ask the keychain: it is one of the
+// things a command can wait on.
+func traced(source string, extract Extractor) Extractor {
+	return func(ctx context.Context) (*authextract.Extracted, error) {
+		span := trace.Begin("credentials import", source)
+		extracted, err := extract(ctx)
+		span.EndErr(err)
+		return extracted, err
+	}
 }
 
 // Print writes a command result to Stdout as pruned JSON.

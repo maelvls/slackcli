@@ -29,10 +29,18 @@ func flakyLookup(failures int, fail func() error) (*recorder, *slackapi.Client, 
 		return serve(method, params)
 	}
 	var slept []time.Duration
-	client := slackapi.NewFake(func(_ context.Context, method string, params map[string]any) (map[string]any, error) {
+	client := slackapi.NewFake(func(ctx context.Context, method string, params map[string]any) (map[string]any, error) {
 		rec.mu.Lock()
 		rec.calls = append(rec.calls, call{method, params})
 		rec.mu.Unlock()
+		// The lookup has its own retries: the client's are turned off for
+		// it, and for it alone (see lookupByEmail).
+		if method == "users.lookupByEmail" && !slackapi.RateLimitRetryDisabled(ctx) {
+			return nil, errors.New("users.lookupByEmail was called with the client's rate-limit retries on")
+		}
+		if method != "users.lookupByEmail" && slackapi.RateLimitRetryDisabled(ctx) {
+			return nil, errors.New(method + " was called with the client's rate-limit retries off")
+		}
 		return rec.serve(method, params)
 	}, slackapi.WithSleep(func(_ context.Context, d time.Duration) error {
 		slept = append(slept, d)

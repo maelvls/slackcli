@@ -20,6 +20,9 @@ type APIError struct {
 	Code string
 	// Response is the full decoded response body.
 	Response map[string]any
+	// Status is the HTTP status of the response; 0 when it is not known
+	// (an error made up by a test).
+	Status int
 }
 
 func newAPIError(method string, resp map[string]any) *APIError {
@@ -195,6 +198,11 @@ func IsTransient(err error) bool {
 		return true
 	case errors.As(err, &status):
 		return status.Status >= 500
+	}
+	// An HTTP 5xx is Slack failing, whatever code comes with it.
+	var api *APIError
+	if errors.As(err, &api) && api.Status >= 500 {
+		return true
 	}
 	return IsErrorCode(err, transientCodes...)
 }

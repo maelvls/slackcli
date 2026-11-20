@@ -3,6 +3,7 @@ package slackapi
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"regexp"
@@ -107,4 +108,100 @@ func TestTraceOfFailedCalls(t *testing.T) {
 		`api conversations\.history: \S+, failed: no answer after 30ms`,
 		`api users\.info: \S+, failed: cancelled: context canceled`,
 	)
+}
+
+// A call that is returned as an error is a failed span, whatever the HTTP
+// status: an HTTP error without a code, a redirect, a 200 that is not
+// JSON or does not say ok.
+func TestTraceOfAnswersThatAreErrors(t *testing.T) {
+	out := liveTrace(t)
+	for _, answer := range []struct {
+		status int
+		body   string
+	}{
+		{503, "<html>Service Unavailable</html>"},
+		{302, ""},
+		{200, "<html>Sign in to the Wi-Fi</html>"},
+		{200, `{"ok":false}`},
+		{503, `{"ok":false,"error":"backend_failure"}`},
+		{200, `{"ok":true}`},
+	} {
+		c := browserClient(t, func(w http.ResponseWriter, _ *http.Request) {
+			if answer.status == 302 {
+				w.Header().Set("Location", "https://elsewhere.example.com/secret-path")
+			}
+			w.WriteHeader(answer.status)
+			_, _ = io.WriteString(w, answer.body)
+		})
+		_, err := c.API(context.Background(), "auth.test", nil)
+		if failed := answer.body != `{"ok":true}`; (err != nil) != failed {
+			t.Errorf("%d %q: err = %v", answer.status, answer.body, err)
+		}
+	}
+	checkTrace(t, out.String(),
+		`api auth\.test: \S+, failed: HTTP 503`,
+		`api auth\.test: \S+, failed: HTTP 302, a redirect`,
+		`api auth\.test: \S+, failed: HTTP 200, not JSON`,
+		`api auth\.test: \S+, failed: HTTP 200, not ok`,
+		`api auth\.test: \S+, failed: HTTP 503, backend_failure`,
+		`api auth\.test: \S+, HTTP 200`,
+	)
+	if got := trace.Summary(); !strings.Contains(got, "(6 calls, 5 failed)") {
+		t.Errorf("summary = %q", got)
+	}
+}
+
+// An HTTP 5xx is Slack failing, with or without an error code of its own,
+// known or not: the error keeps the status, and is transient.
+func TestACodedServerErrorIsTransient(t *testing.T) {
+	answer := func(status int, body string) error {
+		c := browserClient(t, func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(status)
+			_, _ = io.WriteString(w, body)
+		})
+		_, err := c.API(context.Background(), "users.lookupByEmail", nil)
+		return err
+	}
+	err := answer(503, `{"ok":false,"error":"backend_failure"}`)
+	var api *APIError
+	if !errors.As(err, &api) || api.Code != "backend_failure" || api.Status != 503 || !IsTransient(err) {
+		t.Errorf("503 backend_failure: %#v, transient = %v", err, IsTransient(err))
+	}
+	for body, transient := range map[string]bool{
+		`{"ok":false,"error":"users_not_found"}`: false,
+		`{"ok":false,"error":"internal_error"}`:  true,
+	} {
+		err := answer(200, body)
+		if !errors.As(err, &api) || api.Status != 200 || IsTransient(err) != transient {
+			t.Errorf("200 %s: %#v, transient = %v", body, err, IsTransient(err))
+		}
+	}
+	if err := answer(404, `{"ok":false,"error":"unknown_method"}`); IsTransient(err) {
+		t.Errorf("a coded 404 is transient: %v", err)
+	}
+}
+
+// A caller with a retry policy of its own turns the client's off: the
+// two would multiply.
+func TestWithoutRateLimitRetry(t *testing.T) {
+	t.Setenv("SLACKCLI_RATE_LIMIT_MAX_WAIT_MS", "30000")
+	calls := 0
+	var slept []time.Duration
+	c := browserClient(t, func(w http.ResponseWriter, _ *http.Request) {
+		calls++
+		w.Header().Set("Retry-After", "2")
+		w.WriteHeader(http.StatusTooManyRequests)
+	}, WithSleep(func(_ context.Context, d time.Duration) error { slept = append(slept, d); return nil }))
+
+	_, err := c.API(WithoutRateLimitRetry(context.Background()), "users.lookupByEmail", nil)
+	var rl *RateLimitError
+	if !errors.As(err, &rl) || rl.RetryAfter != 2*time.Second || calls != 1 || len(slept) != 0 {
+		t.Errorf("err = %v after %d calls and %v of waiting", err, calls, slept)
+	}
+
+	// Without it, the client retries by itself.
+	calls = 0
+	if _, err := c.API(context.Background(), "users.lookupByEmail", nil); err == nil || calls != maxRateLimitRetry+1 || len(slept) != maxRateLimitRetry {
+		t.Errorf("err = %v after %d calls and %v of waiting", err, calls, slept)
+	}
 }

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestSummaryGroupsSpansAndNamesWhatIsRunning(t *testing.T) {
@@ -89,4 +90,42 @@ func TestSafeNote(t *testing.T) {
 	if got := out.String(); strings.Contains(got, "secret-plan") || strings.Contains(got, "xoxe-1") || !strings.Contains(got, `download: 0s, failed: Get "…": EOF`) {
 		t.Errorf("trace = %q", got)
 	}
+}
+
+// blockedWriter is a stderr that is a full pipe nobody reads.
+type blockedWriter struct{ writing, release chan struct{} }
+
+func (w blockedWriter) Write(p []byte) (int, error) {
+	w.writing <- struct{}{}
+	<-w.release
+	return len(p), nil
+}
+
+// A trace line that cannot be written does not hold the record: the
+// message of a timeout is made from it.
+func TestSummaryDoesNotWaitForALineBeingWritten(t *testing.T) {
+	t.Setenv("SLACKCLI_DEBUG", "1")
+	out := blockedWriter{writing: make(chan struct{}), release: make(chan struct{})}
+	Reset(out)
+	t.Cleanup(func() { Reset(nil) })
+
+	go Begin("api users.info", "").End("HTTP 200")
+	<-out.writing
+	go Logf("an event")
+	<-out.writing
+
+	got := make(chan string)
+	go func() {
+		Begin("keychain", "set") // nor does it keep spans from starting
+		got <- Summary()
+	}()
+	select {
+	case summary := <-got:
+		if !strings.Contains(summary, "api users.info ") || !strings.Contains(summary, "still running: keychain set for ") {
+			t.Errorf("summary = %q", summary)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Summary waits for the write")
+	}
+	close(out.release)
 }
