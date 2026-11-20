@@ -739,7 +739,7 @@ func TestHelp(t *testing.T) {
 		names = append(names, sub.Name())
 	}
 	slices.Sort(names)
-	if want := []string{"invite", "list", "mark", "new"}; !reflect.DeepEqual(names, want) {
+	if want := []string{"info", "invite", "list", "mark", "new"}; !reflect.DeepEqual(names, want) {
 		t.Errorf("sub-commands = %v, want %v", names, want)
 	}
 }
