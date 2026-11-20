@@ -26,6 +26,7 @@ import (
 	"github.com/maelvls/slackcli/internal/cmd/searchcmd"
 	"github.com/maelvls/slackcli/internal/cmd/unreadscmd"
 	"github.com/maelvls/slackcli/internal/cmd/usercmd"
+	"github.com/maelvls/slackcli/internal/cmd/watchcmd"
 	"github.com/maelvls/slackcli/internal/cmd/workflowcmd"
 	"github.com/maelvls/slackcli/internal/slack/enrich"
 	"github.com/maelvls/slackcli/internal/slackapi"
@@ -65,6 +66,7 @@ func commands(rt *clictx.Context) []*cobra.Command {
 		searchcmd.New(rt),
 		latercmd.New(rt),
 		unreadscmd.New(rt),
+		watchcmd.New(rt),
 		usercmd.New(rt),
 		channelcmd.New(rt),
 		workflowcmd.New(rt),
