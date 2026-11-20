@@ -98,15 +98,22 @@ type Fallback struct {
 	// Applies reports whether a call to method that failed with err is to
 	// be retried with the other client.
 	Applies func(method string, err error) bool
-	// Client returns the other client, or nil when there is none. It is
+	// Client returns the other client. When there is none, it returns nil
+	// and, if it knows, why: a sentence that takes the place of the
+	// general explanation of the code in the error (APIError.Hint). It is
 	// only called once a call was refused, and may be called again for
 	// the next one: it is expected to remember its answer.
-	Client func(ctx context.Context) *Client
+	Client func(ctx context.Context) (other *Client, why string)
 }
 
 // WithFallback makes the client retry the calls f applies to with the
 // client f provides. The retry is one call: the fallback of a client used
 // as a fallback is not looked at.
+//
+// When the other client is refused as well (its credentials are rejected,
+// or the method is restricted for it too), the error is the refusal of the
+// client that was asked, and says what was tried. Any other failure of the
+// retry is returned as it is.
 func WithFallback(f Fallback) Option {
 	return func(c *Client) { c.fallback = &f }
 }
@@ -297,9 +304,9 @@ func (c *Client) call(ctx context.Context, method string, params map[string]any,
 	if err == nil || c.fallback == nil || c.fallback.Applies == nil || c.fallback.Client == nil || !c.fallback.Applies(method, err) {
 		return resp, err
 	}
-	other := c.fallback.Client(ctx)
+	other, why := c.fallback.Client(ctx)
 	if other == nil || other == c {
-		return nil, err
+		return nil, withHint(err, why)
 	}
 	trace.Logf("%s was refused for %s (%s): retrying with %s", method, c.workspaceURL, ErrorCode(err), other.workspaceURL)
 	resp, otherErr := other.callOnce(ctx, method, params, multi)
@@ -308,10 +315,15 @@ func (c *Client) call(ctx context.Context, method string, params map[string]any,
 		return resp, nil
 	case ctx.Err() != nil:
 		return nil, otherErr
-	case IsAuthError(otherErr) || IsRestricted(otherErr):
-		// The other credentials are of no more use than these: the
-		// refusal of the workspace that was asked for is the answer.
-		return nil, err
+	case IsAuthError(otherErr):
+		// The other credentials are of no use: the refusal of the
+		// workspace that was asked for is the answer, with what would
+		// make the retry work.
+		return nil, withHint(err, fmt.Sprintf("these credentials are refused this method, and the ones stored for %s, tried next, were rejected by Slack (%s): import them again with `%s auth import-desktop` (or import-chrome, import-brave, import-firefox)",
+			other.workspaceURL, ErrorCode(otherErr), appinfo.Name))
+	case IsRestricted(otherErr):
+		return nil, withHint(err, fmt.Sprintf("these credentials are refused this method, and so are the ones stored for %s, tried next (%s)",
+			other.workspaceURL, ErrorCode(otherErr)))
 	}
 	return nil, otherErr
 }

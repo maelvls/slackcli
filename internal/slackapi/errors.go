@@ -20,6 +20,23 @@ type APIError struct {
 	Code string
 	// Response is the full decoded response body.
 	Response map[string]any
+	// Hint, when set, is what Error says after the code in place of the
+	// general explanation of [explain]: what is known about this very
+	// failure (see WithFallback).
+	Hint string
+}
+
+// withHint returns err with hint as its explanation when err is an
+// *APIError and there is a hint, and err itself otherwise. The error is
+// copied: the same code, method and response, another explanation.
+func withHint(err error, hint string) error {
+	var ae *APIError
+	if hint == "" || !errors.As(err, &ae) {
+		return err
+	}
+	hinted := *ae
+	hinted.Hint = hint
+	return &hinted
 }
 
 func newAPIError(method string, resp map[string]any) *APIError {
@@ -62,7 +79,9 @@ func (e *APIError) Error() string {
 			}
 		}
 	}
-	if hint := explain(e.Code); hint != "" {
+	if e.Hint != "" {
+		b.WriteString(": " + e.Hint)
+	} else if hint := explain(e.Code); hint != "" {
 		b.WriteString(": " + hint)
 	}
 	return b.String()
@@ -91,8 +110,8 @@ func explain(code string) string {
 		return "these credentials are not a member of that conversation: join it in Slack (a bot must be invited with /invite), or use credentials that are a member"
 	case "channel_not_found":
 		return fmt.Sprintf("no conversation has that ID in this workspace, or it is a private one these credentials are not a member of: check the ID (`%s channel list`), and the workspace (--workspace, or pass a Slack URL, which names its own)", appinfo.Name)
-	case "team_is_restricted", "enterprise_is_restricted":
-		return fmt.Sprintf("this workspace belongs to an Enterprise Grid organisation that refuses this method to a workspace-level session. The organisation's own session usually works: run the command again with --workspace <org>.enterprise.slack.com (`%[1]s auth whoami` lists the configured workspaces; `%[1]s auth import-desktop` imports the organisation along with its workspaces)", appinfo.Name)
+	case "team_is_restricted":
+		return fmt.Sprintf("this workspace belongs to an Enterprise Grid organisation, and Slack refuses this method to the session of a workspace. The session of the organisation is allowed it: run the command again with --workspace <org>.enterprise.slack.com (`%[1]s auth whoami` lists the configured workspaces; `%[1]s auth import-desktop` imports the organisation along with its workspaces)", appinfo.Name)
 	case "ratelimited":
 		return fmt.Sprintf("Slack is rate limiting this method: run the command again in a minute, or set %s to wait and retry automatically", appinfo.EnvName("RATE_LIMIT_MAX_WAIT_MS"))
 	}
