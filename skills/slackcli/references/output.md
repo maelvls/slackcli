@@ -4,9 +4,9 @@ Results are JSON on stdout, on one line (indented when stdout is a terminal). `n
 
 ## Warnings, hints and stderr
 
-Any JSON result can end with `warnings` and `hints`, two arrays of sentences: `warnings` say what went wrong without failing the command (a file that could not be downloaded, users or threads left out because Slack rate limited, an environment variable that was ignored); `hints` say what to do about the result (why a list is empty, how to get the rest of a cut canvas). A command that succeeds prints nothing on stderr.
+Any JSON result can end with `warnings` and `hints`, two arrays of sentences: `warnings` say what went wrong without failing the command (a file that could not be downloaded, users or threads left out because Slack rate limited, an environment variable that was ignored); `hints` say what to do about the result (why a list is empty, how to get the rest of a cut canvas). A command that succeeds and prints JSON writes nothing on stderr, `message send` redirected by safe mode included (its `hints` says it was redirected).
 
-Stderr is for failures: the error message, as plain text, after any warning that came before it (`Warning: …`). The commands that print a line of text, and `message compose` while it waits for a human, also write their notes there. So never `2>&1 | jq`: on a failure jq only reports `parse error` and the reason is lost. Use `2>err.txt`, check the exit code, and `cat err.txt` when it is not 0.
+Stderr is for failures: the error message, as plain text, after any warning that came before it (`Warning: …`). Two exceptions on success: the commands that print a line of text (listed above) write their notes there, and `message compose` writes where its editor is while it waits for a human, only when stderr is a terminal. So never `2>&1 | jq`: on a failure jq only reports `parse error` and the reason is lost. Use `2>err.txt`, check the exit code, and `cat err.txt` when it is not 0.
 
 ## Messages
 
@@ -43,5 +43,5 @@ Paged lists return `next_cursor` when there is more: pass it to `--cursor` with 
 - A downloaded file entry has an absolute `path` plus `name` (or `title` for `search files`), `mimetype` and `mode`.
 - A failed download keeps its entry, with `error` and a `path` to a `<file-id>.download-error.txt` file holding the reason; `warnings` names the file too. This holds for `message get/list` and for every `search` command. Check for `error` before reading `path`.
 - A file that Slack does not host (Google Docs, Slides, Drive, Dropbox …) is only a link: its entry has `external: true` and `url` (open that link), no `path`, and no warning.
-- `search --no-download` lists files without `path`.
+- `search --no-download` lists files without `path`, and does not mark the external ones.
 - For a download-then-reply task, use `search messages --content-type file`: its results carry the source message's `permalink`, which is a valid reply target.

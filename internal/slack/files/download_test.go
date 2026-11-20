@@ -518,9 +518,16 @@ func TestSanitizeFilename(t *testing.T) {
 
 func TestIsExternal(t *testing.T) {
 	for rawURL, want := range map[string]bool{
-		"https://docs.google.com/document/d/abc":       true,
-		"https://www.dropbox.com/s/abc/file.pdf":       true,
-		"http://example.com/file":                      true,
+		"https://docs.google.com/document/d/abc": true,
+		"https://www.dropbox.com/s/abc/file.pdf": true,
+		"http://example.com/file":                true,
+		// Lookalikes of Slack hosts are external: nothing is sent to them.
+		"https://evil-slack.com/files/a":           true,
+		"https://slack.com.evil.org/files/a":       true,
+		"https://files.slack.com@evil.org/files/a": true,
+		// A Slack host, whatever else is wrong with the URL: the download
+		// is attempted and refused with an explanation.
+		"https://evil@files.slack.com/files/a":         false,
 		"https://files.slack.com/files-pri/T1-F1/a.md": false,
 		"https://acme.slack.com/files/U1/F1/a.md":      false,
 		"http://files.slack.com/files/plain.txt":       false,

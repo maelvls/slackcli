@@ -133,7 +133,8 @@ func Hint() string {
 }
 
 // Warnings collects what a command's optional lookups could not do, for
-// the command to show on stderr. It is safe for concurrent use.
+// the command to print in the "warnings" of its result (on stderr when it
+// has none). It is safe for concurrent use.
 type Warnings struct {
 	mu   sync.Mutex
 	list []string

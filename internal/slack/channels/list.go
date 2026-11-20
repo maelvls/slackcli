@@ -34,8 +34,8 @@ type ConversationsPage struct {
 	// NextCursor is the cursor of the next page ("" on the last page).
 	NextCursor string `json:"next_cursor,omitempty"`
 	// Warnings say what is missing from Channels because Slack rate
-	// limited the lookups (ListViaCounts), for the caller to show on
-	// stderr.
+	// limited the lookups (ListViaCounts), for the caller to print in
+	// the "warnings" of the result.
 	Warnings []string `json:"-"`
 }
 

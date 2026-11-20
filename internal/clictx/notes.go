@@ -28,9 +28,13 @@ const (
 // "Warning: …", if no result follows. The message does not start with
 // "Warning:".
 func (c *Context) Warnf(format string, args ...any) {
+	msg := fmt.Sprintf(format, args...)
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.warnings = append(c.warnings, fmt.Sprintf(format, args...))
+	// A command retried after a credentials refresh says things twice.
+	if !slices.Contains(c.warnings, msg) {
+		c.warnings = append(c.warnings, msg)
+	}
 }
 
 // ResultHintf records advice about the result (why it is empty, how to
@@ -38,9 +42,12 @@ func (c *Context) Warnf(format string, args ...any) {
 // result, or by FlushNotes on stderr if no result follows. Use Hintf for
 // what a human has to read right now.
 func (c *Context) ResultHintf(format string, args ...any) {
+	msg := fmt.Sprintf(format, args...)
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.hints = append(c.hints, fmt.Sprintf(format, args...))
+	if !slices.Contains(c.hints, msg) {
+		c.hints = append(c.hints, msg)
+	}
 }
 
 // takeNotes returns the warnings and hints not printed yet, those of

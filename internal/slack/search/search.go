@@ -148,7 +148,7 @@ type Result struct {
 	MoreMessages *More `json:"more_messages,omitempty"`
 	MoreFiles    *More `json:"more_files,omitempty"`
 	// Warnings are non-fatal problems (failed downloads, a scan cut short
-	// by a rate limit) for the caller to show on stderr.
+	// by a rate limit) for the caller to print in the "warnings" of the result.
 	Warnings []string `json:"-"`
 }
 

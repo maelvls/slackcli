@@ -123,8 +123,8 @@ type Result struct {
 	// Threads is nil when no thread has unread replies.
 	Threads *Threads `json:"threads,omitempty"`
 	// Warnings say what is missing from Channels because Slack rate
-	// limited the lookups (names, messages), for the caller to show on
-	// stderr.
+	// limited the lookups (names, messages), for the caller to print in
+	// the "warnings" of the result.
 	Warnings []string `json:"-"`
 }
 

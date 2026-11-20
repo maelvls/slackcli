@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -271,8 +272,22 @@ func wantParams(t *testing.T, got, want map[string]any) {
 	}
 }
 
+// Agents capture stderr with stdout ("2>&1 | jq"): when stderr is not a
+// terminal, a compose that ends well writes nothing there, sent or not.
+func TestComposeIsSilentOnStderrOutsideATerminal(t *testing.T) {
+	for name, human := range map[string]func(*browser){"sent": sends("ok"), "cancelled": cancels} {
+		h := newHarness(t)
+		h.human = human
+		h.mustRun("#general", "hello")
+		if h.stderr.Len() != 0 {
+			t.Errorf("%s: stderr = %q", name, h.stderr.String())
+		}
+	}
+}
+
 func TestComposeSendsWhatTheHumanSent(t *testing.T) {
 	h := newHarness(t)
+	h.c.humanAtStderr = func() bool { return true }
 	h.human = sends("edited by a human")
 
 	out := h.mustRun("#general", "written by an agent")
@@ -288,7 +303,8 @@ func TestComposeSendsWhatTheHumanSent(t *testing.T) {
 	if !reflect.DeepEqual(out, want) {
 		t.Errorf("output = %v\nwant     %v", out, want)
 	}
-	// stderr says where the editor is, without the key that opens it.
+	// On a terminal, stderr says where the editor is, without the key
+	// that opens it.
 	if !regexp.MustCompile(`#general is open in the browser \(http://127\.0\.0\.1:\d+\)`).MatchString(h.stderr.String()) {
 		t.Errorf("stderr = %q", h.stderr.String())
 	}
@@ -433,8 +449,9 @@ func TestComposeTabClosed(t *testing.T) {
 	if out["cancelled"] != true || out["reason"] != string(endTabClosed) {
 		t.Errorf("output = %v", out)
 	}
-	if !strings.Contains(h.stderr.String(), "Nothing was sent") {
-		t.Errorf("stderr = %q", h.stderr.String())
+	// Why nothing was sent is a hint of the result, not a line on stderr.
+	if hints := fmt.Sprint(out["hints"]); !strings.Contains(hints, "Nothing was sent: "+string(endTabClosed)) || h.stderr.Len() != 0 {
+		t.Errorf("hints = %q, stderr = %q", hints, h.stderr.String())
 	}
 	h.wantNothingPosted()
 }

@@ -53,6 +53,22 @@ func TestResultWithoutNotesIsUnchanged(t *testing.T) {
 	}
 }
 
+// A command that runs twice (a retry after a credentials refresh) says
+// each thing once.
+func TestNotesAreNotRepeated(t *testing.T) {
+	c, stdout, _ := notesContext()
+	for range 2 {
+		c.Warnf("could not resolve user %q", "@ghost")
+		c.ResultHintf("Try a user ID.")
+	}
+	if err := c.Print(map[string]any{"ok": true}); err != nil {
+		t.Fatal(err)
+	}
+	if want := `{"ok":true,"warnings":["could not resolve user \"@ghost\""],"hints":["Try a user ID."]}` + "\n"; stdout.String() != want {
+		t.Errorf("printed %s, want %s", stdout, want)
+	}
+}
+
 // A result that prunes to nothing still carries the notes.
 func TestNotesInAnEmptyResult(t *testing.T) {
 	c, stdout, _ := notesContext()
