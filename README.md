@@ -46,6 +46,7 @@ slackcli
 ├── user      list | get | dm-open
 ├── later     list | save | complete | archive | reopen | remove | remind
 ├── unreads
+├── watch
 ├── canvas    create | get | edit
 └── workflow  list | preview | get | run
 ```
@@ -98,9 +99,9 @@ To use a token from a Slack app instead of your own session:
 SLACK_TOKEN=xoxb-... slackcli auth add --workspace-url https://acme.slack.com --from-env
 ```
 
-Your own session can do everything your Slack client can. An app token is limited to its scopes: it cannot use `later`, `unreads` or `message draft`, but it is the only way to run `canvas edit` and `canvas create --channel`.
+Your own session can do everything your Slack client can. An app token is limited to its scopes: it cannot use `later`, `unreads`, `watch` or `message draft`, but it is the only way to run `canvas edit` and `canvas create --channel`.
 
-Saved credentials live in `~/.config/slackcli/credentials.json`. On macOS the secrets are in the login keychain and the file only holds placeholders. Credentials are only ever sent to Slack, over https.
+Saved credentials live in `~/.config/slackcli/credentials.json`. On macOS the secrets are in the login keychain and the file only holds placeholders. Credentials are only ever sent to Slack, over https (and wss for `watch`).
 
 ## Output
 
