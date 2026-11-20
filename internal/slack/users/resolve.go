@@ -176,7 +176,7 @@ func lookup(ctx context.Context, client *slackapi.Client, inputs []string) ([]fo
 		w := &want{index: i, input: input, handle: strings.ToLower(strings.TrimPrefix(trimmed, "@"))}
 		if emailRe.MatchString(trimmed) {
 			w.email = strings.ToLower(trimmed)
-			user, err := lookupByEmail(ctx, client, trimmed)
+			user, tries, err := lookupByEmail(ctx, client, trimmed)
 			switch {
 			case user != nil:
 				out[i] = found{id: jsonx.Str(user["id"]), raw: user}
@@ -192,12 +192,18 @@ func lookup(ctx context.Context, client *slackapi.Client, inputs []string) ([]fo
 				// nothing about the user, and the directory scan is not
 				// the answer to it: in a large workspace it runs for
 				// half a minute and then fails for another reason.
-				return nil, &emailLookupError{email: trimmed, err: err}
-			default:
-				// users.lookupByEmail refused (missing users:read.email
-				// scope, a token type it does not take …): look for the
-				// email in the directory instead.
+				return nil, &emailLookupError{email: trimmed, tries: tries, err: err}
+			case slackapi.IsErrorCode(err, emailLookupRefusals...):
+				// users.lookupByEmail is not for these credentials: look
+				// for the email in the directory instead.
 				w.emailErr = err
+			default:
+				// Anything else (a proxy or a captive portal answering
+				// in Slack's place, a redirect, an HTTP 4xx, an error
+				// code that is about the request) says nothing about the
+				// user either, and the directory would be asked through
+				// the same broken path: the failure is the answer.
+				return nil, fmt.Errorf("looking up user %s by email: %w", trimmed, err)
 			}
 		}
 		if w.handle == "" {
@@ -264,29 +270,50 @@ const (
 	emailLookupBackoff = 500 * time.Millisecond
 )
 
+// emailLookupRefusals are the error codes with which users.lookupByEmail
+// says that it is not for the credentials at hand, whoever is looked up:
+// the address is then looked for in the directory (users.list), which
+// asks for less.
+//
+//   - missing_scope: the token lacks users:read.email;
+//   - not_allowed_token_type: the method does not take this kind of token.
+//     It is what browser credentials (xoxc) get, so this is the usual path
+//     of an imported session;
+//   - no_permission, access_denied: the workspace or its administrators
+//     keep the method, or email addresses, from this user or app.
+//
+// Other codes are about the request or about Slack, and are errors.
+var emailLookupRefusals = []string{"missing_scope", "not_allowed_token_type", "no_permission", "access_denied"}
+
 // lookupByEmail returns the active member with that email address, or the
-// error of users.lookupByEmail ("users_not_found" when there is none).
+// error of users.lookupByEmail ("users_not_found" when there is none), and
+// how many times the method was called.
 //
 // The lookup is one cheap call that either names the user or says there
 // is none, so a failure that does neither is not taken for an answer: the
 // call is made again, after the pause Slack asks for when it is rate
 // limiting, a short one otherwise. The client's own policy of failing fast
 // on a rate limit suits the lookups a command can do without; this one it
-// cannot. A call that timed out is made once more only, each try having
-// already waited the API timeout.
-func lookupByEmail(ctx context.Context, client *slackapi.Client, email string) (map[string]any, error) {
-	for attempt := 1; ; attempt++ {
+// cannot.
+//
+// A call that timed out is made once more only, and only when the command
+// has the time for it: a try may last the whole API timeout, and one that
+// the command timeout would cut short ends the command with exit code 124
+// instead of an error that says what happened. With the default timeouts
+// (20 s per call, 30 s per command) a timeout is therefore not retried.
+func lookupByEmail(ctx context.Context, client *slackapi.Client, email string) (user map[string]any, tries int, err error) {
+	for tries = 1; ; tries++ {
 		resp, err := client.API(ctx, "users.lookupByEmail", map[string]any{"email": email})
 		if err == nil {
 			if user := jsonx.Map(resp["user"]); jsonx.Str(user["id"]) != "" {
-				return user, nil
+				return user, tries, nil
 			}
-			return nil, nil
+			return nil, tries, nil
 		}
-		if ctx.Err() != nil || !slackapi.IsTransient(err) || attempt >= emailLookupAttempts {
-			return nil, err
+		if ctx.Err() != nil || !slackapi.IsTransient(err) || tries >= emailLookupAttempts {
+			return nil, tries, err
 		}
-		wait := time.Duration(attempt) * emailLookupBackoff
+		wait := time.Duration(tries) * emailLookupBackoff
 		var (
 			limited *slackapi.RateLimitError
 			timeout *slackapi.TimeoutError
@@ -294,13 +321,18 @@ func lookupByEmail(ctx context.Context, client *slackapi.Client, email string) (
 		switch {
 		case errors.As(err, &limited):
 			if wait = limited.RetryAfter; wait > maxEmailLookupWait {
-				return nil, err
+				return nil, tries, err
 			}
-		case errors.As(err, &timeout) && attempt >= 2:
-			return nil, err
+		case errors.As(err, &timeout):
+			if tries >= 2 {
+				return nil, tries, err
+			}
+			if left, limited := slackapi.TimeLeft(ctx); limited && left < wait+slackapi.APITimeout() {
+				return nil, tries, err
+			}
 		}
 		if sleepErr := client.Sleep(ctx, wait); sleepErr != nil {
-			return nil, sleepErr
+			return nil, tries, sleepErr
 		}
 	}
 }
@@ -312,6 +344,8 @@ func lookupByEmail(ctx context.Context, client *slackapi.Client, email string) (
 // email address instead" would be of no use.
 type emailLookupError struct {
 	email string
+	// tries is how many times the method was called.
+	tries int
 	err   error
 }
 
@@ -321,9 +355,13 @@ func (e *emailLookupError) Error() string {
 	if errors.As(e.err, &limited) {
 		cause = limited.Summary()
 	}
-	return fmt.Sprintf("could not look up user %q by email: users.lookupByEmail gave no answer after %d tries (%s). "+
+	after := "after 1 try"
+	if e.tries > 1 {
+		after = fmt.Sprintf("after %d tries", e.tries)
+	}
+	return fmt.Sprintf("could not look up user %q by email: users.lookupByEmail gave no answer %s (%s). "+
 		"This is temporary and says nothing about whether the user exists: run the command again in a moment, or pass the user ID (U…) if you know it.",
-		e.email, emailLookupAttempts, strings.TrimSuffix(cause, "."))
+		e.email, after, strings.TrimSuffix(cause, "."))
 }
 
 func (e *emailLookupError) Unwrap() error { return e.err }

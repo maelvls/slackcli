@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -76,6 +77,40 @@ func TestLookupByEmailRetriesTransientFailures(t *testing.T) {
 		}
 	})
 
+	// The command timeout is what the retry of a timeout is weighed
+	// against: with the defaults, a first try that lasted the 20 s of
+	// the API timeout leaves less than 10 s of the command's 30 s.
+	t.Run("a timeout is not retried when the command has no time left for it", func(t *testing.T) {
+		t.Setenv("SLACKCLI_API_TIMEOUT_MS", "20000")
+		for _, tc := range []struct {
+			left    time.Duration
+			lookups int
+			after   string
+		}{
+			{left: 9500 * time.Millisecond, lookups: 1, after: "gave no answer after 1 try ("},
+			{left: 20 * time.Second, lookups: 1, after: "gave no answer after 1 try ("},
+			{left: 21 * time.Second, lookups: 2, after: "gave no answer after 2 tries ("},
+		} {
+			deadline := time.Now().Add(tc.left)
+			ctx := slackapi.WithCommandDeadline(ctx, func() (time.Time, bool) { return deadline, true })
+			rec, client, _ := flakyLookup(99, timedOut)
+			_, err := ResolveUserID(ctx, client, "alice@example.com")
+			if n := len(rec.only("users.lookupByEmail")); n != tc.lookups || len(rec.only("users.list")) != 0 {
+				t.Errorf("%s left: %d lookups, want %d (methods %v)", tc.left, n, tc.lookups, rec.methods())
+			}
+			if err == nil || !strings.Contains(err.Error(), tc.after) || !strings.Contains(err.Error(), "timed out after 20s") {
+				t.Errorf("%s left: err = %v, want %q", tc.left, err, tc.after)
+			}
+		}
+
+		// A command without a limit (it waits on a human) retries.
+		ctx := slackapi.WithCommandDeadline(ctx, func() (time.Time, bool) { return time.Time{}, false })
+		rec, client, _ := flakyLookup(1, timedOut)
+		if got, err := ResolveUserID(ctx, client, "alice@example.com"); err != nil || got != "U00000001A" || len(rec.only("users.lookupByEmail")) != 2 {
+			t.Errorf("no limit: got %q, %v after %v", got, err, rec.methods())
+		}
+	})
+
 	t.Run("a network error and an error of Slack's own are retried", func(t *testing.T) {
 		for _, fail := range []func() error{
 			func() error {
@@ -99,6 +134,12 @@ func TestLookupByEmailRetriesTransientFailures(t *testing.T) {
 			_, err := ResolveUserID(ctx, client, "alice@example.com")
 			if err == nil {
 				t.Fatalf("%s: no error", name)
+			}
+			// The count is that of the calls made: three for a rate
+			// limit, two for a timeout.
+			tries := map[string]string{"rate limit": "after 3 tries (", "timeout": "after 2 tries ("}[name]
+			if n := len(rec.only("users.lookupByEmail")); !strings.Contains(err.Error(), tries) || !strings.Contains(tries, strconv.Itoa(n)) {
+				t.Errorf("%s: %d lookups, and the error does not say %q: %v", name, n, tries, err)
 			}
 			if n := len(rec.only("users.list")); n != 0 {
 				t.Errorf("%s: the directory was scanned (%d users.list calls)", name, n)
@@ -131,7 +172,7 @@ func TestLookupByEmailRetriesTransientFailures(t *testing.T) {
 		rec, client, slept := flakyLookup(99, func() error {
 			return &slackapi.RateLimitError{Method: "users.lookupByEmail", RetryAfter: time.Minute}
 		})
-		if _, err := ResolveUserID(ctx, client, "alice@example.com"); err == nil || !strings.Contains(err.Error(), "retry after 1m0s") {
+		if _, err := ResolveUserID(ctx, client, "alice@example.com"); err == nil || !strings.Contains(err.Error(), "retry after 1m0s") || !strings.Contains(err.Error(), "gave no answer after 1 try (") {
 			t.Errorf("err = %v", err)
 		}
 		if len(*slept) != 0 || len(rec.only("users.lookupByEmail")) != 1 {
@@ -190,5 +231,51 @@ func TestRefusedEmailLookupInAHugeWorkspace(t *testing.T) {
 	_, err = ResolveUserID(ctx, rec.client(), "Bob Builder")
 	if err == nil || !strings.Contains(err.Error(), "or the email address instead") {
 		t.Errorf("err = %v", err)
+	}
+}
+
+// The directory is the fallback for a users.lookupByEmail that is not for
+// these credentials, and for nothing else: a failure that is about the
+// request, or about what answered in Slack's place, is reported as it is
+// (issue #7).
+func TestOnlyARefusalOfTheEmailLookupFallsBackOnTheDirectory(t *testing.T) {
+	ctx := context.Background()
+
+	// Browser credentials (xoxc) get not_allowed_token_type.
+	for _, code := range []string{"missing_scope", "not_allowed_token_type", "no_permission", "access_denied"} {
+		alice := member("U00000001A", "alice", "profile", profile("email", "alice@example.com"))
+		rec := directory{lookupErr: code, pages: [][]map[string]any{{alice}}}.recorder()
+		got, err := ResolveUserID(ctx, rec.client(), "alice@example.com")
+		if err != nil || got != "U00000001A" {
+			t.Errorf("%s: got %q, %v", code, got, err)
+		}
+		if want := []string{"users.lookupByEmail", "users.list"}; !reflect.DeepEqual(rec.methods(), want) {
+			t.Errorf("%s: methods = %v, want %v", code, rec.methods(), want)
+		}
+	}
+
+	for name, fail := range map[string]func() error{
+		"a proxy answering in Slack's place": func() error {
+			return errors.New("Slack API users.lookupByEmail returned a non-JSON response")
+		},
+		"HTTP 403 without a code": func() error {
+			return &slackapi.HTTPStatusError{Method: "users.lookupByEmail", Status: 403}
+		},
+		"an error about the request": func() error {
+			return &slackapi.APIError{Method: "users.lookupByEmail", Code: "invalid_arguments"}
+		},
+	} {
+		rec, client, slept := flakyLookup(99, fail)
+		_, err := ResolveUserID(ctx, client, "alice@example.com")
+		if err == nil || !strings.Contains(err.Error(), "looking up user alice@example.com by email: ") || !strings.Contains(err.Error(), fail().Error()) {
+			t.Errorf("%s: err = %v", name, err)
+		}
+		if want := []string{"users.lookupByEmail"}; !reflect.DeepEqual(rec.methods(), want) || len(*slept) != 0 {
+			t.Errorf("%s: methods = %v after waiting %v, want one lookup and no scan", name, rec.methods(), *slept)
+		}
+		var nf *NotFoundError
+		if errors.As(err, &nf) {
+			t.Errorf("%s: a failed lookup is not a NotFoundError", name)
+		}
 	}
 }
