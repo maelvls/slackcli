@@ -926,7 +926,10 @@ func TestFailedDraftDeletesItsUploads(t *testing.T) {
 		if !slackapi.IsErrorCode(err, "denied") {
 			t.Fatalf("err = %v, want Slack's denied", err)
 		}
-		if !strings.Contains(h.stderr.String(), "F-a.png") {
+		// Nothing was printed for the warning to go in: the root command
+		// then writes it on stderr.
+		h.rt.FlushNotes()
+		if !strings.Contains(h.stderr.String(), "Warning: could not delete the uploaded files") || !strings.Contains(h.stderr.String(), "F-a.png") {
 			t.Errorf("stderr = %q, want a warning naming the orphaned file", h.stderr.String())
 		}
 	})

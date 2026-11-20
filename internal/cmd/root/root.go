@@ -80,8 +80,9 @@ func newRoot(rt *clictx.Context, subcommands []*cobra.Command) *cobra.Command {
 		Short: appinfo.Description,
 		Long: fmt.Sprintf(`%s.
 
-Commands print JSON on stdout and hints and warnings on stderr; see the help
-of each command for what it prints.
+Commands print JSON on stdout, with their warnings and hints in it
+("warnings", "hints"), and errors on stderr; see the help of each command
+for what it prints.
 
 %s
 It fails closed: --safe-mode=false does not turn off a safe mode that the
@@ -211,7 +212,7 @@ func (r runner) run(args []string, stdout, stderr io.Writer) int {
 	cmd.SetOut(stdout)
 	cmd.SetErr(stderr)
 
-	warnAboutEnvironment(stderr)
+	warnAboutEnvironment(rt)
 
 	// The watchdog bounds every command that does not wait on a human, so
 	// that an agent is never left hanging on a stuck network call.
@@ -249,7 +250,7 @@ func (r runner) run(args []string, stdout, stderr io.Writer) int {
 
 	// Optional lookups that Slack rate limited do not fail a command: they
 	// report here, and the user is told the result is incomplete.
-	ctx, incomplete := enrich.Collect(ctx)
+	ctx, rt.Incomplete = enrich.Collect(ctx)
 
 	done := make(chan error, 1)
 	go func() { done <- cmd.ExecuteContext(ctx) }()
@@ -264,6 +265,7 @@ func (r runner) run(args []string, stdout, stderr io.Writer) int {
 		// retry that posts twice.
 		fmt.Fprintf(stderr, "%s command timed out after %s. If it was sending or changing something, that may still have gone through: check before retrying. Set %s (milliseconds) to adjust.\n",
 			appinfo.Name, timeout, appinfo.EnvName("COMMAND_TIMEOUT_MS"))
+		rt.FlushNotes()
 		// Let the command see the cancellation and return, so that its
 		// deferred cleanups run; do not wait for one that ignores it.
 		cancel()
@@ -276,6 +278,9 @@ func (r runner) run(args []string, stdout, stderr io.Writer) int {
 		return ExitTimeout
 	}
 
+	// The warnings and hints are in the JSON the command printed. Those
+	// it did not print (it failed, or prints text) go to stderr.
+	rt.FlushNotes()
 	if err != nil {
 		if errors.Is(err, context.Canceled) && signalCtx.Err() != nil {
 			// As for a timeout: what a writing command was doing may
@@ -297,9 +302,6 @@ func (r runner) run(args []string, stdout, stderr io.Writer) int {
 		}
 		fmt.Fprintln(stderr, ErrorMessage(err))
 		return ExitError
-	}
-	for _, w := range incomplete.List() {
-		fmt.Fprintln(stderr, "Warning: "+w)
 	}
 	return ExitOK
 }
@@ -328,16 +330,16 @@ var durationVariables = []struct {
 // that applies instead is a sound one, and a stray variable must not keep
 // "--help" or "auth whoami" from running; but whoever set it, to a value
 // that does nothing, has to be told.
-func warnAboutEnvironment(stderr io.Writer) {
-	const ignored = "Warning: %v. The variable is ignored and the default applies.\n"
+func warnAboutEnvironment(rt *clictx.Context) {
+	const ignored = "%v. The variable is ignored and the default applies."
 	for _, v := range durationVariables {
 		if err := appinfo.CheckEnvDurationMS(v.suffix, v.allowZero); err != nil {
-			fmt.Fprintf(stderr, ignored, err)
+			rt.Warnf(ignored, err)
 		}
 	}
 	// The one duration variable that is not tool-specific.
 	if err := slackapi.CheckLegacyAPITimeout(); err != nil {
-		fmt.Fprintf(stderr, ignored, err)
+		rt.Warnf(ignored, err)
 	}
 }
 

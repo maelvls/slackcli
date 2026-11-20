@@ -116,17 +116,17 @@ needs no lookup: commands take #name.`,
 				return err
 			}
 			for _, w := range payload.Warnings {
-				rt.Hintf("Warning: %s", w)
+				rt.Warnf("%s", w)
 			}
 			if name != "" {
 				switch n := len(payload.Channels); {
 				case n > limit:
 					payload.Channels = payload.Channels[:limit]
-					rt.Hintf("%d conversations match --name %q, the first %d are listed: make --name more specific, or raise --limit.", n, name, limit)
+					rt.ResultHintf("%d conversations match --name %q, the first %d are listed: make --name more specific, or raise --limit.", n, name, limit)
 				case n == 0 && !all:
-					rt.Hintf("No conversation in this listing has %q in its name. It only has the conversations you are a member of: add --all to look at every public channel.", name)
+					rt.ResultHintf("No conversation in this listing has %q in its name. It only has the conversations you are a member of: add --all to look at every public channel.", name)
 				case n == 0:
-					rt.Hintf("No conversation visible to you has %q in its name.", name)
+					rt.ResultHintf("No conversation visible to you has %q in its name.", name)
 				}
 			}
 			result := listResult{Channels: channels.Compact(payload.Channels), NextCursor: payload.NextCursor}

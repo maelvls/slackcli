@@ -289,12 +289,38 @@ func TestGetDownloadsFiles(t *testing.T) {
 			{"name": "notes.txt", "mimetype": "text/plain", "path": %q},
 			{"name": "gone.png", "mimetype": "image/png", "path": %q, "error": "Failed to download file (404)"}
 		]
-	}}`, filepath.Join(h.c.downloadsDir, "F1.txt"), filepath.Join(h.c.downloadsDir, "F2.download-error.txt")))
+	}, "warnings": ["could not download file F2: Failed to download file (404)"]}`, filepath.Join(h.c.downloadsDir, "F1.txt"), filepath.Join(h.c.downloadsDir, "F2.download-error.txt")))
 	if b, _ := os.ReadFile(filepath.Join(h.c.downloadsDir, "F1.txt")); string(b) != "my notes" {
 		t.Errorf("downloaded content = %q", b)
 	}
-	if !strings.Contains(h.stderr.String(), "Warning: could not download file F2: Failed to download file (404)") {
+	// The warning is in the result: "2>&1 | jq" must still parse.
+	if h.stderr.Len() != 0 {
 		t.Errorf("stderr = %q", h.stderr.String())
+	}
+}
+
+// A file that Slack does not host (a Google Docs link) is listed with its
+// URL and nothing is said about not downloading it.
+func TestGetMarksExternalFiles(t *testing.T) {
+	h := newHarness(t)
+	h.history(map[string]any{"ts": testTS, "text": "the doc", "files": []any{
+		map[string]any{"id": "F3", "name": "Roadmap", "mimetype": "application/vnd.google-apps.document", "is_external": true, "url_private": "https://docs.google.com/document/d/abc/edit"},
+	}})
+	got := h.mustRun("get", testURL)
+	wantJSON(t, got, `{"message": {
+		"channel_id": "C12345678",
+		"ts": "1770165109.628379",
+		"time": "2026-02-04T00:31:49Z",
+		"content": "the doc",
+		"files": [
+			{"name": "Roadmap", "mimetype": "application/vnd.google-apps.document", "external": true, "url": "https://docs.google.com/document/d/abc/edit"}
+		]
+	}}`)
+	if h.stderr.Len() != 0 {
+		t.Errorf("stderr = %q", h.stderr.String())
+	}
+	if len(h.requests) != 0 {
+		t.Errorf("requests = %+v: nothing is fetched from another host", h.requests)
 	}
 }
 
@@ -426,9 +452,9 @@ func TestListHistoryDateBounds(t *testing.T) {
 
 	// The hint about an empty window says when its bounds are.
 	h.history()
-	h.mustRun("list", testChannel, "--oldest", "2026-02-03")
-	if want := "No messages matched in the channel after 1770076800 (2026-02-03T00:00:00Z)."; !strings.Contains(h.stderr.String(), want) {
-		t.Errorf("stderr = %q, want %q", h.stderr, want)
+	got := h.mustRun("list", testChannel, "--oldest", "2026-02-03")
+	if want := []any{"No messages matched in the channel after 1770076800 (2026-02-03T00:00:00Z)."}; !reflect.DeepEqual(got["hints"], want) {
+		t.Errorf("hints = %q, want %q", got["hints"], want)
 	}
 }
 
@@ -457,12 +483,13 @@ func TestListHistoryHidesSystemMessages(t *testing.T) {
 		t.Errorf("--include-system printed %s", h.stdout)
 	}
 
-	// Nothing but system messages: stderr says why "messages" is empty.
+	// Nothing but system messages: a hint says why "messages" is empty.
 	h.history(map[string]any{"ts": "1770160600.000200", "user": "U05BRPTKL6A", "text": "<@U05BRPTKL6A> has joined the channel", "subtype": "channel_join"})
 	got = h.mustRun("list", testChannel)
-	wantJSON(t, got, `{"channel_id": "C12345678", "messages": [], "system_messages_hidden": 1}`)
-	if want := "other than 1 system messages (joins, leaves, topic changes …): pass --include-system to see them."; !strings.Contains(h.stderr.String(), want) {
-		t.Errorf("stderr = %q, want %q", h.stderr, want)
+	wantJSON(t, got, `{"channel_id": "C12345678", "messages": [], "system_messages_hidden": 1,
+		"hints": ["No messages matched in the channel, other than 1 system messages (joins, leaves, topic changes …): pass --include-system to see them."]}`)
+	if h.stderr.Len() != 0 {
+		t.Errorf("stderr = %q", h.stderr)
 	}
 }
 
@@ -578,17 +605,17 @@ func TestResolveUsersNamesTheAuthor(t *testing.T) {
 
 func TestListHistoryDefaultLimitAndEmptyResult(t *testing.T) {
 	h := newHarness(t)
-	got := h.mustRun("list", testChannel)
-	wantJSON(t, got, `{"channel_id": "C12345678", "messages": []}`)
+	h.mustRun("list", testChannel)
 	// "messages" is there although empty: jq '.messages[]' must not fail.
-	if want := "{\"channel_id\":\"C12345678\",\"messages\":[]}\n"; h.stdout.String() != want {
+	// The hint that nothing matched is in the result, not on stderr.
+	if want := "{\"channel_id\":\"C12345678\",\"messages\":[],\"hints\":[\"No messages matched in the channel.\"]}\n"; h.stdout.String() != want {
 		t.Errorf("printed %s, want %s", h.stdout, want)
 	}
 	if limit := h.callsTo("conversations.history")[0].params["limit"]; limit != 25 {
 		t.Errorf("limit = %v, want 25", limit)
 	}
-	if !strings.Contains(h.stderr.String(), "No messages matched") {
-		t.Errorf("stderr = %q, want a hint that nothing matched", h.stderr.String())
+	if h.stderr.Len() != 0 {
+		t.Errorf("stderr = %q", h.stderr.String())
 	}
 }
 

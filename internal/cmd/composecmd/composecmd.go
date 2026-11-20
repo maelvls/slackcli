@@ -124,8 +124,8 @@ unless they press Send.
 Prints {ok, sent, channel_id, ts, thread_ts, permalink, text}, where text is
 what the human sent. If they cancel, close the tab, or never open the editor
 (30 minutes), prints {ok, cancelled, reason}. "permalink" is only left out,
-with a warning on stderr, when Slack would not give it for a token that names
-no workspace: the message is sent all the same.
+with a warning in "warnings", when Slack would not give it for a token that
+names no workspace: the message is sent all the same.
 
 The command does not time out: it waits for the human. Stop it with Ctrl-C.
 

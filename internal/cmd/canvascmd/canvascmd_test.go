@@ -503,11 +503,14 @@ func TestGetReportsTruncation(t *testing.T) {
 	h.html = "<p>0123456789</p>"
 
 	out := h.output("", "get", "F12345678", "--max-chars", "4")
-	wantJSON(t, out, map[string]any{"canvas": map[string]any{
-		"id": "F12345678", "title": "Launch plan", "markdown": "0123\n…", "truncated": true, "total_chars": float64(10),
-	}})
-	if !strings.Contains(h.stderr.String(), "--max-chars -1") {
-		t.Errorf("stderr = %q, want a hint about --max-chars", h.stderr)
+	wantJSON(t, out, map[string]any{
+		"canvas": map[string]any{
+			"id": "F12345678", "title": "Launch plan", "markdown": "0123\n…", "truncated": true, "total_chars": float64(10),
+		},
+		"hints": []any{"Canvas F12345678 is 10 characters long; only the first 4 are shown. Pass --max-chars -1 for all of it."},
+	})
+	if h.stderr.Len() != 0 {
+		t.Errorf("stderr = %q: the hint goes in the result", h.stderr)
 	}
 
 	out = h.output("", "get", "F12345678", "--max-chars", "-1")

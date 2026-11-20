@@ -212,16 +212,19 @@ func TestWhoami(t *testing.T) {
 
 func TestWhoamiEmptyAndEnvironment(t *testing.T) {
 	h := newHarness(t, nil)
-	// Nothing configured: "workspaces" is there, empty, and stderr says
-	// how to add credentials.
+	// Nothing configured: "workspaces" is there, empty, and a hint in the
+	// result says how to add credentials.
 	out := h.mustRun("", "whoami")
-	if want := "{\"version\":1,\"workspaces\":[]}\n"; out != want {
-		t.Errorf("empty store: output %q, want %q", out, want)
+	if want := "{\"version\":1,\"workspaces\":[],\"hints\":["; !strings.HasPrefix(out, want) {
+		t.Errorf("empty store: output %q, want it to start with %q", out, want)
 	}
 	for _, want := range []string{"No Slack credentials are configured", "slackcli auth import-desktop", "slackcli auth add", "SLACK_TOKEN"} {
-		if !strings.Contains(h.stderr.String(), want) {
-			t.Errorf("empty store: stderr %q does not contain %q", h.stderr, want)
+		if !strings.Contains(out, want) {
+			t.Errorf("empty store: output %q does not contain %q", out, want)
 		}
+	}
+	if h.stderr.Len() != 0 {
+		t.Errorf("empty store: stderr = %q", h.stderr)
 	}
 
 	// A SLACK_TOKEN that is not a token is reported as such, and nothing

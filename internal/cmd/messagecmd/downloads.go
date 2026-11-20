@@ -56,8 +56,9 @@ func isCanvas(f messages.FileSummary) bool {
 // downloadMessageFiles saves the files attached to msgs locally and
 // returns the outcome per file ID. A file that cannot be downloaded never
 // fails the command: its outcome carries the error (also written next to
-// the downloads, so that the output has a path to point at) and a warning
-// goes to stderr. Only cancellation is returned as an error.
+// the downloads, so that the output has a path to point at) and the result
+// has a warning. A file hosted elsewhere is not a failure: see
+// files.DownloadResult.External. Only cancellation is returned as an error.
 func (c *command) downloadMessageFiles(ctx context.Context, client *slackapi.Client, msgs []messages.Message) (map[string]files.DownloadResult, error) {
 	var todo []messages.FileSummary
 	seen := map[string]bool{}
@@ -92,7 +93,7 @@ func (c *command) downloadMessageFiles(ctx context.Context, client *slackapi.Cli
 	for i, f := range todo {
 		out[f.ID] = results[i]
 		if !results[i].OK {
-			c.rt.Hintf("Warning: could not download file %s: %s", f.ID, results[i].Error)
+			c.rt.Warnf("could not download file %s: %s", f.ID, results[i].Error)
 		}
 	}
 	return out, nil

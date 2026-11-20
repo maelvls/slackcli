@@ -392,7 +392,7 @@ func (u *uploads) discard(ctx context.Context, rt *clictx.Context, workspace str
 		err = upload.DeleteFiles(ctx, r.Client, u.ids)
 	}
 	if err != nil {
-		rt.Hintf("Warning: could not delete the uploaded files that the failed draft left unused (%s): %v", strings.Join(u.ids, ", "), err)
+		rt.Warnf("could not delete the uploaded files that the failed draft left unused (%s): %v", strings.Join(u.ids, ", "), err)
 	}
 }
 

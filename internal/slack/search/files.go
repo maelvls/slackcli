@@ -230,6 +230,8 @@ func (s *searcher) downloadFiles(ctx context.Context, hits []fileHit) ([]File, e
 			Mode:      f.mode,
 			Path:      res.Path,
 			Error:     res.Error,
+			External:  res.External,
+			URL:       res.URL,
 			Permalink: f.permalink,
 		}
 	}

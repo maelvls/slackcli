@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -277,23 +278,24 @@ func TestNoMatchHint(t *testing.T) {
 	h.on("search.messages", func(map[string]any) (map[string]any, error) {
 		return map[string]any{"messages": map[string]any{"matches": []any{}}}, nil
 	})
-	if _, err := h.run("messages", "in:@alice"); err != nil {
+	out, err := h.run("messages", "in:@alice")
+	if err != nil {
 		t.Fatal(err)
 	}
-	if want := "Nothing matched. Slack's search requires every word of the query"; !strings.Contains(h.stderr.String(), want) {
-		t.Errorf("stderr = %q, want %q", h.stderr.String(), want)
+	if want := `"hints":["Nothing matched. Slack's search requires every word of the query`; !strings.Contains(out, want) || h.stderr.Len() != 0 {
+		t.Errorf("printed %s, stderr = %q, want %q", out, h.stderr.String(), want)
 	}
 
 	h.general()
-	if _, err := h.run("messages", "no such words anywhere", "--channel", "general"); err != nil {
+	if out, err = h.run("messages", "no such words anywhere", "--channel", "general"); err != nil {
 		t.Fatal(err)
 	}
-	if want := "only top-level messages are looked at, not thread replies"; !strings.Contains(h.stderr.String(), want) {
-		t.Errorf("--channel: stderr = %q, want %q", h.stderr.String(), want)
+	if want := "only top-level messages are looked at, not thread replies"; !strings.Contains(out, want) || h.stderr.Len() != 0 {
+		t.Errorf("--channel: printed %s, stderr = %q, want %q", out, h.stderr.String(), want)
 	}
 
 	// Something matched: nothing to say.
-	if _, err := h.run("messages", "hello", "--channel", "general"); err != nil || h.stderr.Len() != 0 {
+	if out, err = h.run("messages", "hello", "--channel", "general"); err != nil || h.stderr.Len() != 0 || strings.Contains(out, `"hints"`) {
 		t.Errorf("a match: err = %v, stderr = %q", err, h.stderr.String())
 	}
 }
@@ -365,7 +367,7 @@ func TestChannelFlagRepeatsAndSplitsOnCommas(t *testing.T) {
 	}
 }
 
-func TestFailedDownloadIsReportedOnStdoutAndStderr(t *testing.T) {
+func TestFailedDownloadIsReportedInTheResult(t *testing.T) {
 	h := newHarness(t)
 	h.on("search.files", func(map[string]any) (map[string]any, error) {
 		return map[string]any{"files": map[string]any{"matches": []any{
@@ -382,8 +384,40 @@ func TestFailedDownloadIsReportedOnStdoutAndStderr(t *testing.T) {
 	if !reflect.DeepEqual(out["files"], want) {
 		t.Errorf("files = %v, want %v", out["files"], want)
 	}
-	if got := h.stderr.String(); got != "Warning: file F1 could not be downloaded: Failed to download file (404)\n" {
-		t.Errorf("stderr = %q", got)
+	if want := []any{"file F1 could not be downloaded: Failed to download file (404)"}; !reflect.DeepEqual(out["warnings"], want) {
+		t.Errorf("warnings = %q, want %q", out["warnings"], want)
+	}
+	// Nothing on stderr: "2>&1 | jq" must still parse.
+	if h.stderr.Len() != 0 {
+		t.Errorf("stderr = %q", h.stderr.String())
+	}
+}
+
+// A file that Slack does not host (a Google Docs link) has nothing to
+// download: it is listed with its URL, without a warning.
+func TestExternalFilesAreMarkedNotWarnedAbout(t *testing.T) {
+	h := newHarness(t)
+	const doc = "https://docs.google.com/presentation/d/abc/edit"
+	h.on("search.files", func(map[string]any) (map[string]any, error) {
+		return map[string]any{"files": map[string]any{"matches": []any{
+			map[string]any{"id": "F1", "title": "Deck", "mimetype": "application/vnd.google-apps.presentation", "is_external": true, "url_private": doc},
+		}}}, nil
+	})
+	out := h.mustRun("files", "deck")
+	want := map[string]any{"files": []any{map[string]any{
+		"title":    "Deck",
+		"mimetype": "application/vnd.google-apps.presentation",
+		"external": true,
+		"url":      doc,
+	}}}
+	if !reflect.DeepEqual(out, want) {
+		t.Errorf("printed %v, want %v", out, want)
+	}
+	if h.stderr.Len() != 0 {
+		t.Errorf("stderr = %q", h.stderr.String())
+	}
+	if _, err := os.Stat(filepath.Join(h.downloadsDir(), "F1.download-error.txt")); err == nil {
+		t.Error("an error file was written for an external file")
 	}
 }
 

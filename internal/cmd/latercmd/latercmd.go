@@ -114,7 +114,7 @@ Prints JSON:
 				return err
 			}
 			for _, w := range payload.Warnings {
-				rt.Hintf("Warning: %s", w)
+				rt.Warnf("%s", w)
 			}
 			if countsOnly {
 				return rt.Print(payload)

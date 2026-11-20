@@ -104,10 +104,11 @@ Saved credentials live in `~/.config/slackcli/credentials.json`. On macOS the se
 
 ## Output
 
-- Results are JSON on stdout, with empty fields removed: on one line, or indented when stdout is a terminal. Hints and warnings go to stderr.
+- Results are JSON on stdout, with empty fields removed: on one line, or indented when stdout is a terminal.
+- Warnings and hints are part of the result, in its `warnings` and `hints` arrays, so a successful command prints nothing on stderr and `slackcli … 2>&1 | jq` still parses. Stderr gets the error of a command that failed (and the warnings that came before it), and the notes of the few `auth` commands that print text. An error is not JSON: keep stderr apart (`2>err.txt`) and check the exit code before parsing.
 - Messages have `ts`, which identifies them, and `time`, the same instant as a local date and time.
 - A list command always prints its list, `[]` when empty, and `next_cursor` when there is more (pass it to `--cursor`).
-- Files attached to messages are downloaded to the cache directory and listed with their local `path`.
+- Files attached to messages are downloaded to the cache directory and listed with their local `path`. A file that Slack does not host, such as a Google Docs link, is listed with `"external": true` and its `url` instead.
 
 | Exit code | Meaning |
 | --- | --- |
