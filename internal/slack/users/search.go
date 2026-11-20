@@ -81,7 +81,10 @@ func SearchUsers(ctx context.Context, client *slackapi.Client, query string, lim
 			// among active members.
 			found.IsBot, found.Deleted = nil, nil
 			return SearchResult{Users: []CompactUser{found}, Total: 1}, nil
-		case err != nil && (enrich.MustAbortRequired(ctx, err) || rateLimited(err)):
+		case err != nil && (enrich.MustAbortRequired(ctx, err) || rateLimited(err) || slackapi.IsTransient(err)):
+			// Slack did not answer, even asked again: searching the text
+			// or scanning the directory would hide that, and spend what
+			// is left of the command's time.
 			return SearchResult{}, fmt.Errorf("looking up user %s: %w", query, err)
 		}
 		// Not the address of an active member, or users.lookupByEmail is

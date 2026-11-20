@@ -357,6 +357,31 @@ func TestSearchUsersFailures(t *testing.T) {
 		!reflect.DeepEqual(rec.methods(), slices.Repeat([]string{"users.lookupByEmail"}, emailLookupAttempts)) {
 		t.Errorf("ratelimited email lookup: error = %v, calls = %v", err, rec.methods())
 	}
+	// An email lookup that Slack keeps failing to answer (a network error,
+	// its own internal_error) fails the search: no people search, no scan.
+	for _, failure := range []error{
+		&slackapi.NetworkError{Method: "users.lookupByEmail", Err: errors.New("connection reset")},
+		&slackapi.APIError{Method: "users.lookupByEmail", Code: "internal_error"},
+	} {
+		rec = limited()
+		serve := rec.serve
+		rec.serve = func(method string, params map[string]any) (map[string]any, error) {
+			if method == "users.lookupByEmail" {
+				return nil, failure
+			}
+			return serve(method, params)
+		}
+		_, err := SearchUsers(ctx, tokenClient(rec, "xoxp-test"), "jane@example.com", 0)
+		if err == nil || !strings.Contains(err.Error(), "looking up user jane@example.com") {
+			t.Errorf("email lookup failing with %v: error = %v", failure, err)
+		}
+		for _, m := range rec.methods() {
+			if m != "users.lookupByEmail" {
+				t.Errorf("email lookup failing with %v: called %s", failure, m)
+			}
+		}
+	}
+
 	rec = coded("search.modules.people")
 	if _, err := SearchUsers(ctx, rec.client(), "doe", 0); err == nil || !reflect.DeepEqual(rec.methods(), []string{"search.modules.people"}) {
 		t.Errorf("ratelimited people search: error = %v, calls = %v", err, rec.methods())
