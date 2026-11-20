@@ -182,8 +182,8 @@ func ListAll(ctx context.Context, client *slackapi.Client, opts ListOptions) (Co
 // + conversations.info, the way the Slack web client fills its sidebar. It
 // works on Enterprise Grid, where users.conversations and
 // conversations.list answer enterprise_is_restricted to browser tokens.
-// Where client.counts is restricted as well (IsRestricted), users.counts
-// gives the IDs instead (see UsersCounts).
+// Where client.counts is restricted as well (slackapi.IsRestricted),
+// users.counts gives the IDs instead (see UsersCounts).
 //
 // client.counts returns every conversation ID at once (channels, then
 // group DMs, then DMs) and no names, so the page is cut locally and each
@@ -215,7 +215,7 @@ func ListViaCounts(ctx context.Context, client *slackapi.Client, opts ListOption
 				}
 			}
 		}
-	case IsRestricted(err):
+	case slackapi.IsRestricted(err):
 		// Some Grid organisations restrict client.counts too; users.counts
 		// still lists the sidebar (joined channels, open DMs and group
 		// DMs). It also lists archived channels and closed group DMs,

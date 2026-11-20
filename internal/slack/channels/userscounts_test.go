@@ -9,6 +9,7 @@ import (
 	"github.com/maelvls/slackcli/internal/slackapi"
 )
 
+// slackapi.IsRestricted, on the errors of client.counts.
 func TestIsRestricted(t *testing.T) {
 	for code, want := range map[string]bool{
 		"team_is_restricted":       true,
@@ -18,14 +19,14 @@ func TestIsRestricted(t *testing.T) {
 		"":                         false,
 	} {
 		err := error(&slackapi.APIError{Method: "client.counts", Code: code})
-		if got := IsRestricted(err); got != want {
+		if got := slackapi.IsRestricted(err); got != want {
 			t.Errorf("IsRestricted(%q) = %v", code, got)
 		}
-		if got := IsRestricted(fmt.Errorf("fetching unread counts: %w", err)); got != want {
+		if got := slackapi.IsRestricted(fmt.Errorf("fetching unread counts: %w", err)); got != want {
 			t.Errorf("IsRestricted(wrapped %q) = %v", code, got)
 		}
 	}
-	if IsRestricted(nil) || IsRestricted(fmt.Errorf("team_is_restricted")) {
+	if slackapi.IsRestricted(nil) || slackapi.IsRestricted(fmt.Errorf("team_is_restricted")) {
 		t.Error("IsRestricted is true for an error that is not Slack's")
 	}
 }

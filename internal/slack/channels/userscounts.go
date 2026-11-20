@@ -2,7 +2,6 @@ package channels
 
 import (
 	"context"
-	"strings"
 
 	"github.com/maelvls/slackcli/internal/jsonx"
 	"github.com/maelvls/slackcli/internal/slackapi"
@@ -14,13 +13,6 @@ const (
 	CountsMPIM    = "mpim"
 	CountsDM      = "dm"
 )
-
-// IsRestricted reports whether err is one of Slack's "*_is_restricted"
-// errors (team_is_restricted, enterprise_is_restricted …). On Enterprise
-// Grid, browser credentials get these from client.counts and friends.
-func IsRestricted(err error) bool {
-	return strings.HasSuffix(slackapi.ErrorCode(err), "_is_restricted")
-}
 
 // CountsEntry is one conversation of the sidebar, as listed by
 // users.counts.
@@ -56,7 +48,7 @@ func (e CountsEntry) HasUnreads() bool {
 
 // UsersCounts reads users.counts, the sidebar method that still works on
 // an Enterprise Grid where client.counts answers team_is_restricted (see
-// IsRestricted). Unlike client.counts it has no read cursor
+// slackapi.IsRestricted). Unlike client.counts it has no read cursor
 // (conversations.info has it, as last_read) and says nothing about
 // threads.
 //

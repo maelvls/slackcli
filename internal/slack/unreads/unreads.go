@@ -162,7 +162,7 @@ var errNotLookedUp = errors.New("not looked up")
 // read is still listed, with Channel.MessagesError set.
 //
 // On an Enterprise Grid where client.counts answers team_is_restricted
-// (channels.IsRestricted), the conversations come from users.counts
+// (slackapi.IsRestricted), the conversations come from users.counts
 // instead: those unread or mentioned, without the archived ones and the
 // muted ones nobody mentioned the caller in (client.counts lists the
 // muted ones with unreads, so this list can be shorter). users.counts has
@@ -212,7 +212,7 @@ func Fetch(ctx context.Context, client *slackapi.Client, opts Options) (Result, 
 				entries = append(entries, e)
 			}
 		}
-	case channels.IsRestricted(err):
+	case slackapi.IsRestricted(err):
 		viaUsersCounts = true
 		counts, err := channels.UsersCounts(ctx, client)
 		if err != nil {
