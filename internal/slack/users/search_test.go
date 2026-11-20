@@ -135,7 +135,7 @@ func TestSearchUsersByEmail(t *testing.T) {
 	// A user token may look an address up.
 	userToken := tokenClient(rec, "xoxp-test")
 	got, err := SearchUsers(ctx, userToken, "jane@example.com", 0)
-	if err != nil || !reflect.DeepEqual(searchIDs(got), []string{"U00000001A"}) || got.Total != 1 {
+	if err != nil || !reflect.DeepEqual(searchIDs(got), []string{"U00000001A"}) || got.Total != 1 || got.Users[0].IsBot != nil || got.Users[0].Deleted != nil {
 		t.Errorf("SearchUsers(email) = %+v, %v", got, err)
 	}
 	if !reflect.DeepEqual(rec.methods(), []string{"users.lookupByEmail"}) {
@@ -183,6 +183,7 @@ var searchDirectoryPages = [][]map[string]any{{
 	member("U00000005E", "mael", "real_name", "Maël Doe", "profile", map[string]any{"display_name": "Maël"}),
 	member("U00000006F", "x", "real_name", "Xavier", "profile", map[string]any{"title": "Works with Doe"}),
 	member("U00000007G", "macdoe", "real_name", "Mac Adoe"),
+	member("U00000008H", "nt", "real_name", "Nguyễn Thị Łukasz", "profile", map[string]any{"display_name": "Søren", "title": "Straße"}),
 }}
 
 func TestSearchUsersScansTheDirectory(t *testing.T) {
@@ -199,6 +200,12 @@ func TestSearchUsersScansTheDirectory(t *testing.T) {
 		"doe engineer":  {"U00000001A"},
 		"mael":          {"U00000005E"},
 		"maël":          {"U00000005E"},
+		"MAE\u0308L":    {"U00000005E"},
+		"nguyen":        {"U00000008H"},
+		"Nguyễn":        {"U00000008H"},
+		"thi lukasz":    {"U00000008H"},
+		"strasse":       {"U00000008H"},
+		"soren":         {"U00000008H"},
 		"example.com":   {"U00000001A"},
 		"nobody at all": {},
 	} {
@@ -323,9 +330,43 @@ func TestSearchUsersFailures(t *testing.T) {
 		t.Errorf("rate-limited scan with a bot token: error = %v", err)
 	}
 
+	// Slack also says "ratelimited" in the body of an HTTP 200: it is the
+	// same rate limit, for the email lookup and for the scan.
+	coded := func(methods ...string) *recorder {
+		rec := limited()
+		serve := rec.serve
+		seen := map[string]int{}
+		rec.serve = func(method string, params map[string]any) (map[string]any, error) {
+			seen[method]++
+			for _, m := range methods {
+				name, nth, _ := strings.Cut(m, "#")
+				if n, _ := strconv.Atoi(nth); name == method && seen[method] > n {
+					return nil, &slackapi.APIError{Method: method, Code: "ratelimited"}
+				}
+			}
+			return serve(method, params)
+		}
+		return rec
+	}
+	rec = coded("users.lookupByEmail")
+	if _, err := SearchUsers(ctx, tokenClient(rec, "xoxp-test"), "jane@example.com", 0); err == nil || !strings.Contains(err.Error(), "ratelimited") ||
+		!reflect.DeepEqual(rec.methods(), []string{"users.lookupByEmail"}) {
+		t.Errorf("ratelimited email lookup: error = %v, calls = %v", err, rec.methods())
+	}
+	rec = coded("search.modules.people")
+	if _, err := SearchUsers(ctx, rec.client(), "doe", 0); err == nil || !reflect.DeepEqual(rec.methods(), []string{"search.modules.people"}) {
+		t.Errorf("ratelimited people search: error = %v, calls = %v", err, rec.methods())
+	}
+	rec = coded("users.list#1")
+	got, err := SearchUsers(ctx, rec.client(), "doe", 0)
+	if err != nil || !reflect.DeepEqual(searchIDs(got), []string{"U00000002B", "U00000001A"}) || got.Total != 0 ||
+		len(got.Warnings) != 1 || !strings.Contains(got.Warnings[0], "the scan stopped early") {
+		t.Errorf("scan cut short by ratelimited = %+v, %v", got, err)
+	}
+
 	// A scan cut short gives what it found, without a total, and says so.
 	rec = limited("users.list#1")
-	got, err := SearchUsers(ctx, rec.client(), "doe", 0)
+	got, err = SearchUsers(ctx, rec.client(), "doe", 0)
 	if err != nil || !reflect.DeepEqual(searchIDs(got), []string{"U00000002B", "U00000001A"}) || got.Total != 0 ||
 		len(got.Warnings) != 1 || !strings.Contains(got.Warnings[0], "(Slack refused its people search: not_allowed_token_type) and the scan stopped early") {
 		t.Errorf("scan cut short = %+v, %v", got, err)

@@ -9,6 +9,8 @@ import (
 	"strings"
 	"unicode"
 
+	"golang.org/x/text/unicode/norm"
+
 	"github.com/maelvls/slackcli/internal/jsonx"
 	"github.com/maelvls/slackcli/internal/slack/enrich"
 	"github.com/maelvls/slackcli/internal/slackapi"
@@ -73,8 +75,12 @@ func SearchUsers(ctx context.Context, client *slackapi.Client, query string, lim
 		user, err := lookupByEmail(ctx, client, query)
 		switch {
 		case user != nil:
-			return SearchResult{Users: []CompactUser{ToCompactUser(user)}, Total: 1}, nil
-		case err != nil && !slackapi.IsErrorCode(err, "users_not_found") && enrich.MustAbortRequired(ctx, err):
+			found := ToCompactUser(user)
+			// As in the other results: an address is only looked up
+			// among active members.
+			found.IsBot, found.Deleted = nil, nil
+			return SearchResult{Users: []CompactUser{found}, Total: 1}, nil
+		case err != nil && (enrich.MustAbortRequired(ctx, err) || rateLimited(err)):
 			return SearchResult{}, fmt.Errorf("looking up user %s: %w", query, err)
 		}
 		// Not the address of an active member, or users.lookupByEmail is
@@ -187,7 +193,7 @@ func searchDirectory(ctx context.Context, client *slackapi.Client, terms []strin
 		}
 		resp, err := client.API(ctx, "users.list", params)
 		if err != nil {
-			if pages > 0 && enrich.IsRateLimit(err) {
+			if pages > 0 && rateLimited(err) {
 				result.Warnings = append(result.Warnings, fmt.Sprintf(
 					"the user directory was scanned (%s) and the scan stopped early, the rest of the members were not looked at: %v", why, err))
 				break
@@ -273,35 +279,33 @@ func searchTerms(query string) []string {
 	return terms
 }
 
-// accentFolds maps the accented Latin letters of names to the letter they
-// are typed as without the accent.
-var accentFolds = func() map[rune]string {
-	folds := map[rune]string{'ß': "ss", 'æ': "ae", 'œ': "oe", 'ø': "o", 'ł': "l", 'đ': "d"}
-	for base, accented := range map[string]string{
-		"a": "àáâãäåāăą", "c": "çćčĉċ", "d": "ď", "e": "èéêëēĕėęě", "g": "ĝğġģ", "h": "ĥ",
-		"i": "ìíîïĩīĭįı", "j": "ĵ", "k": "ķ", "l": "ĺļľ", "n": "ñńņň", "o": "òóôõöōŏő",
-		"r": "ŕŗř", "s": "śŝşšș", "t": "ţťț", "u": "ùúûüũūŭůűų", "w": "ŵ", "y": "ýÿŷ", "z": "źżž",
-	} {
-		for _, r := range accented {
-			folds[r] = base
-		}
-	}
-	return folds
-}()
+// specialFolds are the Latin letters that carry no accent Unicode can
+// take off (they do not decompose), with what they are typed as.
+var specialFolds = map[rune]string{
+	'ß': "ss", 'æ': "ae", 'œ': "oe", 'ø': "o", 'ł': "l", 'đ': "d", 'ð': "d", 'þ': "th", 'ı': "i", 'ħ': "h", 'ŧ': "t",
+}
 
-// foldForSearch lower-cases s and removes the accents of its Latin
-// letters, so that "mael" finds "Maël".
+// foldForSearch lower-cases s and removes the accents of its letters, so
+// that "mael" finds "Maël" and "nguyen" finds "Nguyễn": the text is
+// decomposed (NFD), and the combining marks dropped.
 func foldForSearch(s string) string {
 	var b strings.Builder
-	for _, r := range strings.ToLower(strings.TrimSpace(s)) {
-		switch folded, ok := accentFolds[r]; {
+	for _, r := range norm.NFD.String(strings.ToLower(strings.TrimSpace(s))) {
+		switch folded, ok := specialFolds[r]; {
 		case ok:
 			b.WriteString(folded)
 		case unicode.Is(unicode.Mn, r):
-			// A combining accent, when the name is not precomposed.
+			// An accent.
 		default:
 			b.WriteRune(r)
 		}
 	}
 	return b.String()
+}
+
+// rateLimited reports whether err is Slack rate limiting a call: an HTTP
+// 429 (enrich.IsRateLimit), or the "ratelimited" error code that some
+// methods answer in the body of an HTTP 200.
+func rateLimited(err error) bool {
+	return enrich.IsRateLimit(err) || slackapi.IsErrorCode(err, enrich.RateLimitedCode)
 }

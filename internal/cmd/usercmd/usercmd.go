@@ -101,11 +101,12 @@ and accents: slow in large workspaces. "user get" finds a bot or a
 deactivated member by handle, email or ID.
 
 Prints {"users": […], "total": …}, best match first. Each user has id,
-name (the handle), real_name, display_name and title; a directory scan
-adds email and tz, which the people search does not give ("user get <id>"
-does). "users" is [] when nobody matches. total is how many members
-match, when Slack says: when it is more than the users listed, make the
-query more specific or raise --limit (100 at most).`,
+name (the handle), real_name, display_name and title; a directory scan,
+and an email address looked up as such, add email and tz, which the
+people search does not give ("user get <id>" does). "users" is [] when
+nobody matches. total is how many members match, when Slack says: when it
+is more than the users listed, make the query more specific or raise
+--limit (100 at most).`,
 		Args: cobra.MinimumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if err := cmdutil.CheckLimit(limit, users.MaxSearchLimit, "make the query more specific instead"); err != nil {

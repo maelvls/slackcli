@@ -14,7 +14,7 @@ A message is `{channel_id, ts, time, thread_ts?, reply_count?, author: {user_id 
 
 - `channel list`: `{channels, next_cursor?}`; a channel is `{id, name?, user?, is_private?, is_im?, is_mpim?, is_archived?, num_members?}`: a flag is present only when true, and a DM has `user` (the other member) instead of `name`. `--raw` prints Slack's conversation objects instead (topic, purpose, creator …). With `--name`, the whole listing was read: there is no `next_cursor`.
 - `channel info`: the same channel object with `is_member?`, `topic?`, `purpose?`, `creator?` and `created?` (Unix seconds); `--raw` prints Slack's conversation object.
-- `user search`: `{users, total?}`, best match first; a user is `{id, name, real_name?, display_name?, title?}`, with `email?` and `tz?` only when the directory was scanned (bot tokens); `user get <id>` has them. `total` is how many members match: more than `users` has when `--limit` (20 by default, 100 at most) cut the list.
+- `user search`: `{users, total?}`, best match first; a user is `{id, name, real_name?, display_name?, title?}`, with `email?` and `tz?` only when the directory was scanned (bot tokens) or an email address was looked up (app tokens); `user get <id>` has them. `total` is how many members match: more than `users` has when `--limit` (20 by default, 100 at most) cut the list.
 
 User IDs in `content` and `reactions` are left as is. `--resolve-users` puts the display name of each author in `author.name` and adds `referenced_users`, a map from user ID to `{id, name, real_name, display_name, email, title, tz, ...}` covering the users mentioned too, served from a 24-hour per-workspace cache; `--refresh-users` fetches again.
 
