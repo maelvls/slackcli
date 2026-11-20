@@ -31,8 +31,8 @@ type SearchResult struct {
 	// Total is how many members match, when that is known: it is larger
 	// than len(Users) when the limit cut the list.
 	Total int `json:"total,omitempty"`
-	// Warnings say what is missing from Users, for the caller to show on
-	// stderr.
+	// Warnings say what is missing from Users, for the caller to print in
+	// the "warnings" of the result.
 	Warnings []string `json:"-"`
 }
 

@@ -106,7 +106,8 @@ and an email address looked up as such, add email and tz, which the
 people search does not give ("user get <id>" does). "users" is [] when
 nobody matches. total is how many members match, when Slack says: when it
 is more than the users listed, make the query more specific or raise
---limit (100 at most).`,
+--limit (100 at most): "hints" says so. A directory scan that a rate limit
+cut short is reported in "warnings".`,
 		Args: cobra.MinimumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if err := cmdutil.CheckLimit(limit, users.MaxSearchLimit, "make the query more specific instead"); err != nil {
@@ -126,14 +127,14 @@ is more than the users listed, make the query more specific or raise
 				return err
 			}
 			for _, w := range payload.Warnings {
-				rt.Hintf("Warning: %s", w)
+				rt.Warnf("%s", w)
 			}
 			if n := len(payload.Users); payload.Total > n {
 				advice := "make the query more specific, or raise --limit"
 				if limit == users.MaxSearchLimit {
 					advice = "make the query more specific"
 				}
-				rt.Hintf("%d users match %q, the first %d are listed: %s.", payload.Total, query, n, advice)
+				rt.ResultHintf("%d users match %q, the first %d are listed: %s.", payload.Total, query, n, advice)
 			}
 			return cmdutil.PrintList(rt, payload, "users")
 		},

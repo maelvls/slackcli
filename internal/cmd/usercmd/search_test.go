@@ -55,14 +55,14 @@ func TestSearch(t *testing.T) {
 		t.Errorf("calls = %+v", h.calls)
 	}
 
-	// Unquoted words make one query; --limit bounds the list, and stderr
-	// says that more match.
+	// Unquoted words make one query; --limit bounds the list, and the
+	// result says that more match, in its hints: nothing goes to stderr.
 	out, err = h.run("search", "jane", "doe", "--limit", "1", "--workspace", "acme")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !reflect.DeepEqual(userIDs(out), []string{"U000000007"}) || out["total"] != float64(2) ||
-		!strings.Contains(stderr.String(), `2 users match "jane doe", the first 1 are listed: make the query more specific, or raise --limit.`) {
+	if !reflect.DeepEqual(userIDs(out), []string{"U000000007"}) || out["total"] != float64(2) || stderr.Len() != 0 ||
+		!reflect.DeepEqual(out["hints"], []any{`2 users match "jane doe", the first 1 are listed: make the query more specific, or raise --limit.`}) {
 		t.Errorf("--limit 1 printed %s, stderr %s", h.stdout, stderr)
 	}
 	if got := h.only("search.modules.people"); len(got) != 1 || got[0].params["query"] != "jane doe" || got[0].params["count"] != 1 {
@@ -81,8 +81,9 @@ func TestSearchHintAtTheLargestLimit(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := stderr.String(); len(userIDs(out)) != 100 || got != "101 users match \"doe\", the first 100 are listed: make the query more specific.\n" {
-		t.Errorf("printed %d users, stderr %s", len(userIDs(out)), got)
+	want := []any{`101 users match "doe", the first 100 are listed: make the query more specific.`}
+	if len(userIDs(out)) != 100 || !reflect.DeepEqual(out["hints"], want) || stderr.Len() != 0 {
+		t.Errorf("printed %d users, hints %v, stderr %s", len(userIDs(out)), out["hints"], stderr)
 	}
 }
 
