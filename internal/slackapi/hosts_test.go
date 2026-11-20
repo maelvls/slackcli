@@ -152,7 +152,7 @@ func TestTimeoutSaysWhenTheRequestMayHaveBeenProcessed(t *testing.T) {
 		"chat.postMessage": true, "chat.update": true, "saved.update": true, "files.completeUploadExternal": true,
 		"auth.test": false, "conversations.history": false, "users.info": false, "search.messages": false, "conversations.list": false,
 	} {
-		msg := timeoutError(method, APITimeout()).Error()
+		msg := (&TimeoutError{Method: method, Timeout: APITimeout()}).Error()
 		if got := strings.Contains(msg, "the request may still have been processed"); got != write {
 			t.Errorf("%s: %q", method, msg)
 		}

@@ -5,12 +5,14 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"slices"
 	"strings"
 
 	"github.com/maelvls/slackcli/internal/appinfo"
 	"github.com/maelvls/slackcli/internal/auth"
 	"github.com/maelvls/slackcli/internal/authextract"
 	"github.com/maelvls/slackcli/internal/slackapi"
+	"github.com/maelvls/slackcli/internal/trace"
 )
 
 // Resolved is a ready-to-use client and the workspace it talks to.
@@ -26,8 +28,16 @@ type Resolved struct {
 }
 
 func (c *Context) resolved(a slackapi.Auth, workspaceURL string, fromStore bool) *Resolved {
+	opts := c.ClientOptions
+	// The session of a workspace of an Enterprise Grid is refused a few
+	// methods that the session of its organisation is allowed: see
+	// orgFallback. Only among stored sessions: SLACK_TOKEN is one identity,
+	// and nothing else is used in its place.
+	if fromStore && a.IsBrowser() && !IsOrgURL(workspaceURL) {
+		opts = append(slices.Clone(opts), slackapi.WithFallback(c.orgFallback(a, workspaceURL)))
+	}
 	return &Resolved{
-		Client:       slackapi.New(a, workspaceURL, c.ClientOptions...),
+		Client:       slackapi.New(a, workspaceURL, opts...),
 		Auth:         a,
 		WorkspaceURL: workspaceURL,
 		fromStore:    fromStore,
@@ -112,7 +122,9 @@ func (c *Context) client(ctx context.Context, workspace string) (*Resolved, erro
 	// 2. Slack Desktop: import every team (only the pinned one, if any),
 	// then look again.
 	if c.Desktop != nil {
+		span := trace.Begin("credentials import", "Slack Desktop")
 		extracted, err := c.Desktop(ctx)
+		span.EndErr(err)
 		failed("Slack Desktop", err)
 		if err == nil && extracted != nil && len(extracted.Teams) > 0 {
 			found := workspacesFrom(extracted, extracted.Teams)
@@ -143,7 +155,9 @@ func (c *Context) client(ctx context.Context, workspace string) (*Resolved, erro
 		if browser.extract == nil {
 			continue
 		}
+		span := trace.Begin("credentials import", browser.name)
 		extracted, err := browser.extract(ctx)
+		span.EndErr(err)
 		failed(browser.name, err)
 		if err != nil || extracted == nil || len(extracted.Teams) == 0 {
 			continue // not installed, not logged in, AppleScript disabled…

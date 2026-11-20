@@ -29,6 +29,7 @@ import (
 	"github.com/maelvls/slackcli/internal/cmd/workflowcmd"
 	"github.com/maelvls/slackcli/internal/slack/enrich"
 	"github.com/maelvls/slackcli/internal/slackapi"
+	"github.com/maelvls/slackcli/internal/trace"
 )
 
 // Exit codes.
@@ -196,6 +197,7 @@ type runner struct {
 func (r runner) run(args []string, stdout, stderr io.Writer) int {
 	rt := r.newContext()
 	rt.Stdout, rt.Stderr = stdout, stderr
+	trace.Reset(stderr)
 
 	signalCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -214,21 +216,19 @@ func (r runner) run(args []string, stdout, stderr io.Writer) int {
 	warnAboutEnvironment(stderr)
 
 	// The watchdog bounds every command that does not wait on a human, so
-	// that an agent is never left hanging on a stuck network call.
+	// that an agent is never left hanging on a stuck network call. It
+	// starts here, before the command line is even parsed, so that nothing
+	// a command does can escape it; a command that waits on a human stops
+	// it (clictx.NoTimeout, Context.DisableTimeout).
 	timeout := CommandTimeout()
 	var (
 		once     sync.Once
+		stopped  = make(chan struct{})
 		timedOut = make(chan struct{})
-		watchdog *time.Timer
 	)
-	stopWatchdog := func() {
-		once.Do(func() {
-			if watchdog != nil {
-				watchdog.Stop()
-			}
-		})
-	}
+	stopWatchdog := func() { once.Do(func() { close(stopped) }) }
 	rt.SetWatchdogCanceller(stopWatchdog)
+	go watch(timeout, stopped, timedOut)
 
 	// ran is the command cobra selected, once its command line was
 	// accepted.
@@ -241,9 +241,8 @@ func (r runner) run(args []string, stdout, stderr io.Writer) int {
 		}
 		ran = c
 		if clictx.HasNoTimeout(c) {
-			return nil
+			stopWatchdog()
 		}
-		watchdog = time.AfterFunc(timeout, func() { close(timedOut) })
 		return nil
 	}
 
@@ -264,6 +263,11 @@ func (r runner) run(args []string, stdout, stderr io.Writer) int {
 		// retry that posts twice.
 		fmt.Fprintf(stderr, "%s command timed out after %s. If it was sending or changing something, that may still have gone through: check before retrying. Set %s (milliseconds) to adjust.\n",
 			appinfo.Name, timeout, appinfo.EnvName("COMMAND_TIMEOUT_MS"))
+		// Where the time went, so that a transcript is enough to tell a
+		// slow Slack from a rate limit or a locked keychain.
+		if summary := trace.Summary(); summary != "" {
+			fmt.Fprintf(stderr, "Before the timeout, %s. Set %s=1 to trace every call as it is made.\n", summary, appinfo.EnvName(trace.EnvSuffix))
+		}
 		// Let the command see the cancellation and return, so that its
 		// deferred cleanups run; do not wait for one that ignores it.
 		cancel()
@@ -302,6 +306,34 @@ func (r runner) run(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "Warning: "+w)
 	}
 	return ExitOK
+}
+
+// watch closes timedOut once timeout has passed, unless stopped is closed
+// first.
+//
+// It looks at two clocks. A timer alone reads the monotonic clock, which
+// on macOS stands still while the machine sleeps: a command started just
+// before the lid was closed would then run for "30 seconds" that last the
+// whole night, as would every HTTP timeout inside it. The wall clock does
+// not stop, so whichever clock says the time is up first wins. (A wall
+// clock set forward by more than the timeout in the middle of a command
+// ends it early; that is the lesser evil.)
+func watch(timeout time.Duration, stopped <-chan struct{}, timedOut chan<- struct{}) {
+	start := time.Now()
+	wallStart := start.Round(0) // without the monotonic reading
+	tick := time.NewTicker(min(max(timeout/20, time.Millisecond), 250*time.Millisecond))
+	defer tick.Stop()
+	for {
+		select {
+		case <-stopped:
+			return
+		case <-tick.C:
+			if time.Since(start) >= timeout || time.Now().Round(0).Sub(wallStart) >= timeout {
+				close(timedOut)
+				return
+			}
+		}
+	}
 }
 
 // commandName returns the path of c below the root ("message send").
