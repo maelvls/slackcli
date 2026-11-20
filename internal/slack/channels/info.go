@@ -22,9 +22,9 @@ type Details struct {
 	Created int64 `json:"created,omitempty"`
 }
 
-// Info returns Slack's object for one conversation (conversations.info),
+// FetchInfo returns Slack's object for one conversation (conversations.info),
 // with its number of members when Slack counts them (not for a DM).
-func Info(ctx context.Context, client *slackapi.Client, channelID string) (map[string]any, error) {
+func FetchInfo(ctx context.Context, client *slackapi.Client, channelID string) (map[string]any, error) {
 	resp, err := client.API(ctx, "conversations.info", map[string]any{"channel": channelID, "include_num_members": true})
 	if err != nil {
 		return nil, fmt.Errorf("looking up conversation %s: %w", channelID, err)

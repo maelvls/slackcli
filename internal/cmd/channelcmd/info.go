@@ -39,7 +39,7 @@ conversation object instead.`,
 			target.ReadOnly = true
 			ctx := cmd.Context()
 			ch, err := cmdutil.WithTarget(ctx, rt, target, func(loc cmdutil.Located) (map[string]any, error) {
-				return channels.Info(ctx, loc.Client, loc.ChannelID)
+				return channels.FetchInfo(ctx, loc.Client, loc.ChannelID)
 			})
 			var noDM *channels.NoDMError
 			if errors.As(err, &noDM) {
