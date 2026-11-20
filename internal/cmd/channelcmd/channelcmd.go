@@ -139,7 +139,7 @@ needs no lookup: commands take #name.`,
 	clictx.AddWorkspaceFlag(cmd, &workspace)
 	cmd.Flags().StringVar(&user, "user", "", "List the conversations of this user instead of yours: user ID (U.../W...), email, or @handle/handle")
 	cmd.Flags().BoolVar(&all, "all", false, "List all conversations (conversations.list); incompatible with --user")
-	cmd.Flags().BoolVar(&viaCounts, "via-counts", false, "List joined conversations via client.counts (works on Enterprise Grid where users.conversations/conversations.list are restricted for browser tokens; needs browser credentials; one conversations.info call per conversation listed; incompatible with --all/--user)")
+	cmd.Flags().BoolVar(&viaCounts, "via-counts", false, "List joined conversations via client.counts, or users.counts where it is restricted too (works on Enterprise Grid where users.conversations/conversations.list are restricted for browser tokens; needs browser credentials; one conversations.info call per conversation listed; incompatible with --all/--user)")
 	cmd.Flags().StringVar(&name, "name", "", "Only the conversations whose name contains this text, ignoring case, looked for in the whole listing rather than in one page (incompatible with --cursor)")
 	cmd.Flags().BoolVar(&raw, "raw", false, "Print Slack's conversation objects (topic, purpose, creator, properties, …) instead of the compact ones")
 	cmd.Flags().IntVar(&limit, "limit", 100, fmt.Sprintf("Max conversations in one page, or with --name max conversations printed (1-%d)", maxListLimit))

@@ -52,13 +52,25 @@ Prints JSON:
                                  The oldest unread ones were fetched; raise
                                  --max-messages to get the rest.
     messages_error               Slack's error code when the messages of
-                                 the conversation could not be read
+                                 the conversation could not be read, or
+                                 no_read_cursor (see the fallback below)
   threads   {has_unreads, mention_count}, present when threads have unread
             replies (the replies themselves are not listed).
 
 Nothing is marked as read. This command uses Slack's internal client.counts
 API: it needs browser session credentials (xoxc- token and "d" cookie), not
-a bot or user token.`,
+a bot or user token.
+
+On an Enterprise Grid where client.counts answers team_is_restricted,
+users.counts is read instead. The list is not quite the same: a muted
+conversation is only listed when you are mentioned in it (client.counts
+lists every muted conversation with unreads), unread_count is Slack's own
+count, and threads is absent, as users.counts knows nothing of threads. A
+conversation whose read position Slack does not give is listed without
+messages, with messages_error no_read_cursor.
+
+To see who is waiting for an answer rather than what is unread, use
+"inbox".`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if err := cmdutil.CheckRange("--max-messages", maxMessages, unreads.MaxMessagesLimit, "use --counts-only to fetch no messages"); err != nil {

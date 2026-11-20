@@ -460,7 +460,7 @@ func TestCommandTree(t *testing.T) {
 		names = append(names, c.Name())
 	}
 	// "completion" and "help" are cobra's, added up front (see newRoot).
-	want := "auth canvas channel completion help later message search unreads user workflow"
+	want := "auth canvas channel completion help inbox later message search unreads user workflow"
 	if got := strings.Join(names, " "); got != want {
 		t.Errorf("commands = %s, want %s", got, want)
 	}

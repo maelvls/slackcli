@@ -46,6 +46,7 @@ slackcli
 ├── user      list | search | get | dm-open
 ├── later     list | save | complete | archive | reopen | remove | remind
 ├── unreads
+├── inbox
 ├── canvas    create | get | edit
 └── workflow  list | preview | get | run
 ```
@@ -57,6 +58,42 @@ Most commands take a target:
 - **A user ID** (`U…`), for a direct message. Reading never opens one: `message list U…` fails when you have no DM with that user.
 
 With several workspaces saved, a channel name needs `--workspace <url-or-name>`, or a default set with `slackcli auth set-default`.
+
+## What is waiting on you
+
+`unreads` lists what you have not read. `inbox` lists who is waiting for an answer, read or not: DMs and group DMs whose newest message is not yours (`dm`, `mpim`), @mentions you have not answered (`mention`), and new replies in threads you posted in (`thread`). Your last message or your reaction answers what came before it. It marks nothing as read.
+
+```bash
+slackcli inbox                      # the last 3 days
+slackcli inbox --since 12h          # or 2d, or 2026-01-31 (UTC)
+slackcli inbox --no-threads --max-body-chars 120
+```
+
+```json
+{
+  "user_id": "U123",
+  "since": "2026-11-07T00:00:00.000Z",
+  "truncated": false,
+  "items": [
+    {
+      "kind": "mention",
+      "channel_id": "C123",
+      "channel_name": "general",
+      "thread_ts": "1794219159.861309",
+      "ts": "1794222538.567359",
+      "first_ts": "1794222538.567359",
+      "count": 1,
+      "author": { "user_id": "U456", "name": "jane" },
+      "text": "...",
+      "permalink": "https://acme.slack.com/archives/C123/p1794222538567359?thread_ts=1794219159.861309&cid=C123"
+    }
+  ]
+}
+```
+
+Items are newest first. `count` and `first_ts` cover the messages from others since your last one there; `ts`, `author`, `text` and `permalink` describe the newest. `thread_ts` is absent for the top level of a DM. `truncated` means there was more to look at than was: more candidates than `--max-conversations` (60), in which case raise it, or more matches than the 200 read from each of the three searches behind the inbox, or a conversation with more than 1000 messages in the window (its item may undercount, or be answered already): for these two only a shorter `--since` helps.
+
+A thread is found through your own posts in it, searched back to two days before `--since`: a thread whose last post of yours is older than that is not listed, however recent its replies, unless one of them mentions you.
 
 ## Letting a human review
 
@@ -98,7 +135,7 @@ To use a token from a Slack app instead of your own session:
 SLACK_TOKEN=xoxb-... slackcli auth add --workspace-url https://acme.slack.com --from-env
 ```
 
-Your own session can do everything your Slack client can. An app token is limited to its scopes: it cannot use `later`, `unreads` or `message draft`, but it is the only way to run `canvas edit` and `canvas create --channel`.
+Your own session can do everything your Slack client can. An app token is limited to its scopes: it cannot use `later`, `unreads` or `message draft` (nor, for a bot token, `inbox` and `search`), but it is the only way to run `canvas edit` and `canvas create --channel`.
 
 On Enterprise Grid, Slack refuses a few methods to the session of a workspace (`team_is_restricted`) and usually allows them to the session of the organisation, `https://<org>.enterprise.slack.com`, which `auth import-desktop` saves along with the workspaces. The `message draft` commands use it on their own when one of their calls is refused this way (`drafts.list` and `drafts.delete` are; `drafts.create` is not): the same call is made again with the organisation's session, once `auth.test` has confirmed that it is the organisation of that workspace and the same person. Nothing else is retried this way, and `SLACK_TOKEN` is never swapped for a saved session. For any other command that fails with `team_is_restricted`, pass `--workspace <org>.enterprise.slack.com` to run it as the organisation.
 
