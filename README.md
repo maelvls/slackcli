@@ -15,7 +15,13 @@ go install ./cmd/slackcli                 # into ~/go/bin
 cp -R skills/slackcli ~/.claude/skills/   # optional: the agent skill
 ```
 
-To update, pull and run the same commands again.
+To update, pull and run the same commands again. To skip the copy, link the
+skill to the checkout instead; it then follows whatever branch is checked out,
+so keep that checkout on `main` and rerun `go install` after each pull:
+
+```sh
+ln -s "$PWD/skills/slackcli" ~/.claude/skills/slackcli
+```
 
 ## Getting started
 
