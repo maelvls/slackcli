@@ -30,9 +30,10 @@ while [ $# -gt 0 ]; do
 done
 [ -n "$url" ] || { echo "usage: slack-watch '<permalink>' [--interval 60] [--timeout 1h] [--after <ts>]" >&2; exit 1; }
 
+workspace=$(sed -nE 's#^(https://[^/]+)/archives/.*#\1#p' <<<"$url")
 channel=$(sed -nE 's#.*/archives/([A-Z0-9]+)/p[0-9]+.*#\1#p' <<<"$url")
 p=$(sed -nE 's#.*/archives/[A-Z0-9]+/p([0-9]+).*#\1#p' <<<"$url")
-[ -n "$channel" ] && [ -n "$p" ] || { echo "slack-watch: not a message permalink: $url" >&2; exit 1; }
+[ -n "$workspace" ] && [ -n "$channel" ] && [ -n "$p" ] || { echo "slack-watch: not a message permalink: $url" >&2; exit 1; }
 msg_ts="${p:0:${#p}-6}.${p: -6}"
 [ -n "$after" ] || after="$msg_ts"
 
@@ -43,10 +44,27 @@ if [ -n "$timeout" ]; then
   deadline=$(( $(date +%s) + n * m ))
 fi
 
+# history prints the channel's top-level messages after $after. `message list
+# --limit N` returns the newest N of them, so after a long outage in a busy
+# channel it pages back with --latest until a page comes back short. The
+# workspace comes from the permalink: a bare channel ID would otherwise be
+# looked up in the default workspace.
+history() {
+  local out="" page latest=()
+  while :; do
+    page=$(slackcli message list "$channel" --workspace "$workspace" --oldest "$after" "${latest[@]}" \
+      --limit 1000 --max-body-chars "$mbc" "${resolve[@]}" 2>/dev/null) || return 1
+    out+="$page"
+    [ "$(jq '.messages | length' <<<"$page")" -ge 1000 ] || break
+    latest=(--latest "$(jq -r '.messages[0].ts' <<<"$page")")
+  done
+  printf '%s' "$out"
+}
+
 fails=0
 while :; do
   thread=$(slackcli message list "$url" --max-body-chars "$mbc" "${resolve[@]}" 2>/dev/null) || thread=""
-  hist=$(slackcli message list "$channel" --oldest "$after" --limit 100 --max-body-chars "$mbc" "${resolve[@]}" 2>/dev/null) || hist=""
+  hist=$(history) || hist=""
   if [ -z "$thread" ] && [ -z "$hist" ]; then
     err=$(slackcli message get "$url" 2>&1 >/dev/null | head -1)
     # Network errors (lid closed, VPN down) are retried forever; only
@@ -62,7 +80,7 @@ while :; do
     out=$(jq -s --arg after "$after" '
       (map(.messages // []) | add // [] | unique_by(.ts)
         | map(select((.ts | tonumber) > ($after | tonumber))) | sort_by(.ts | tonumber)) as $m
-      | {messages: $m, referenced_users: (map(.referenced_users // []) | add // [] | unique_by(.id? // .))}
+      | {messages: $m, referenced_users: (map(.referenced_users // {}) | add // {})}
       | if (.referenced_users | length) == 0 then del(.referenced_users) else . end
     ' <<<"$thread$hist")
     if [ "$(jq '.messages | length' <<<"$out")" -gt 0 ]; then
@@ -70,9 +88,15 @@ while :; do
       exit 0
     fi
   fi
-  if [ -n "$deadline" ] && [ "$(date +%s)" -ge "$deadline" ]; then
-    echo "slack-watch: timed out; rerun with --after $after to continue" >&2
-    exit 2
+  pause="$interval"
+  if [ -n "$deadline" ]; then
+    left=$(( deadline - $(date +%s) ))
+    if [ "$left" -le 0 ]; then
+      echo "slack-watch: timed out; rerun with --after $after to continue" >&2
+      exit 2
+    fi
+    # Wake up at the deadline at the latest, for one last poll.
+    [ "$left" -lt "$pause" ] && pause="$left"
   fi
-  sleep "$interval"
+  sleep "$pause"
 done
