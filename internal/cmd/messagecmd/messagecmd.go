@@ -68,6 +68,7 @@ func newCommand(c *command) *cobra.Command {
 	cmd.AddCommand(
 		c.newGet(),
 		c.newList(),
+		c.newWait(),
 		c.newSend(),
 		c.newEdit(),
 		c.newDelete(),
