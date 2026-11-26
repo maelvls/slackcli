@@ -23,7 +23,6 @@ type flags struct {
 	limit           int
 	maxContentChars int
 	noDownload      bool
-	resolveUsers    bool
 	refreshUsers    bool
 }
 
@@ -112,10 +111,8 @@ two ways of searching and how to get more results than --limit.`,
 	cmdutil.AddMaxBodyCharsFlag(cmd, &f.maxContentChars)
 	fl.BoolVar(&f.noDownload, cmdutil.NoDownloadFlagName, false,
 		"Do not download files: results list them without a local path (file results keep their permalink)")
-	fl.BoolVar(&f.resolveUsers, "resolve-users", true,
-		`Name the users: put the full name in each "author.name" (instead of the handle the search index has), replace the "@U…" mentions of "content" with "@Full Name", and add "referenced_users", the profiles of the users found, keyed by user ID (cached for 24h). On by default; --resolve-users=false skips the lookups`)
 	fl.BoolVar(&f.refreshUsers, "refresh-users", false,
-		"Like --resolve-users, but fetch the profiles again instead of using the local user cache (implies --resolve-users)")
+		"Fetch the profiles of the users in referenced_users again instead of using the 24-hour user cache")
 	return cmd
 }
 
@@ -153,7 +150,6 @@ func run(cmd *cobra.Command, rt *clictx.Context, kind search.Kind, query string,
 			Limit:           f.limit,
 			MaxContentChars: f.maxContentChars,
 			NoDownload:      f.noDownload,
-			ResolveUsers:    f.resolveUsers || f.refreshUsers,
 			RefreshUsers:    f.refreshUsers,
 		})
 	})

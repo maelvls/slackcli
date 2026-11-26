@@ -41,9 +41,8 @@ type CompactMessage struct {
 type Author struct {
 	UserID string `json:"user_id,omitempty"`
 	BotID  string `json:"bot_id,omitempty"`
-	// Name is a name to call the author by, when one is known without
-	// asking Slack for it: search results come with the author's handle,
-	// and --resolve-users fills in the display name.
+	// Name is the name to call the author by: the full name once the
+	// user is looked up, else the handle a search result comes with.
 	Name string `json:"name,omitempty"`
 }
 

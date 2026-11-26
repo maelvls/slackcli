@@ -29,7 +29,6 @@ type readOptions struct {
 	maxBodyChars     int
 	noDownload       bool
 	includeReactions bool
-	resolveUsers     bool
 	refreshUsers     bool
 }
 
@@ -70,8 +69,7 @@ func addReadFlags(cmd *cobra.Command, o *readOptions) {
 	cmdutil.AddMaxBodyCharsFlag(cmd, &o.maxBodyChars)
 	f.BoolVar(&o.noDownload, cmdutil.NoDownloadFlagName, false, "Do not download attached files: they are listed without a local path, which is faster when only the text matters")
 	f.BoolVar(&o.includeReactions, "include-reactions", false, "Include reactions and the IDs of the users who reacted")
-	f.BoolVar(&o.resolveUsers, "resolve-users", true, `Name the users: put the full name in each "author.name", replace the "@U…" mentions of "content" with "@Full Name", and add "referenced_users", the profiles of the user IDs appearing in the output (cached for 24h). On by default; --resolve-users=false prints bare user IDs`)
-	f.BoolVar(&o.refreshUsers, "refresh-users", false, "Like --resolve-users, but fetch the profiles again instead of using the cache")
+	f.BoolVar(&o.refreshUsers, "refresh-users", false, "Fetch the profiles of the users named in the output again instead of using the 24-hour cache")
 }
 
 func addGetFlags(cmd *cobra.Command, o *readOptions) {
@@ -155,8 +153,7 @@ func (c *command) runGet(cmd *cobra.Command, targetInput string, opts readOption
 }
 
 // present downloads the files of msgs (unless --no-download), converts
-// them to the printed shape and names the users they reference, unless
-// told not to.
+// them to the printed shape and names the users they reference.
 func (c *command) present(ctx context.Context, loc cmdutil.Located, msgs []messages.Message, opts readOptions) ([]messages.CompactMessage, map[string]users.CompactUser, error) {
 	downloads := listedFiles(msgs)
 	if !opts.noDownload {
@@ -172,9 +169,6 @@ func (c *command) present(ctx context.Context, loc cmdutil.Located, msgs []messa
 			IncludeReactions: opts.includeReactions,
 			Downloads:        downloads,
 		})
-	}
-	if !opts.resolveUsers && !opts.refreshUsers {
-		return compact, nil, nil
 	}
 	ids := users.CollectReferencedUserIDs(msgs, opts.includeReactions)
 	byID, err := users.ResolveByID(ctx, loc.Client, ids, users.ResolveOptions{
@@ -226,8 +220,8 @@ the thread a message belongs to: every message of a listed thread has it,
 and in channel history only the messages that started a thread, which also
 have "reply_count". "reactions" needs --include-reactions. "author.name"
 is the author's full name, and mentions in "content" read "@Full Name";
-"referenced_users" maps the user IDs to their profiles (all three are left
-out with --resolve-users=false). Attached files are downloaded
+"referenced_users" maps the user IDs to their profiles (cached for 24h,
+--refresh-users fetches them again). Attached files are downloaded
 and listed with their local path, as by "get", unless --no-download is
 given.`, messages.MaxHistoryLimit),
 		Args: cobra.ExactArgs(1),

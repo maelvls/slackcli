@@ -193,8 +193,13 @@ func TestSearchMessagesEndToEnd(t *testing.T) {
 			}},
 		}}}, nil
 	})
+	// A user whose profile cannot be fetched keeps the handle the search
+	// index has.
+	h.on("users.info", func(map[string]any) (map[string]any, error) {
+		return map[string]any{"ok": false, "error": "user_not_found"}, nil
+	})
 
-	out, err := h.run("messages", "smoke tests failed", "--user", "@ci", "--after", "2025-12-01", "--limit", "1", "--max-content-chars", "18", "--resolve-users=false")
+	out, err := h.run("messages", "smoke tests failed", "--user", "@ci", "--after", "2025-12-01", "--limit", "1", "--max-content-chars", "18")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -245,12 +250,12 @@ func TestSearchMessagesEndToEnd(t *testing.T) {
 	}
 }
 
-// A channel scanned by name is named on its results; --resolve-users puts
-// the author's display name on them.
+// A channel scanned by name is named on its results, and the author's
+// name is on them.
 func TestScanNamesTheChannelAndTheAuthor(t *testing.T) {
 	h := newHarness(t)
 	h.general()
-	out := h.mustRun("messages", "hello", "--channel", "general", "--resolve-users")
+	out := h.mustRun("messages", "hello", "--channel", "general")
 	msgs, _ := out["messages"].([]any)
 	if len(msgs) == 0 {
 		t.Fatalf("no messages: %v", out)
@@ -306,20 +311,12 @@ func TestRefreshUsersBypassesTheUserCache(t *testing.T) {
 	h := newHarness(t)
 	h.general()
 
-	out := h.mustRun("messages", "hello", "--channel", "general", "--resolve-users=false")
-	if n := len(h.callsTo("users.info")); n != 0 {
-		t.Errorf("users.info calls with --resolve-users=false = %d", n)
-	}
-	if _, ok := out["referenced_users"]; ok {
-		t.Errorf("referenced_users with --resolve-users=false: %v", out)
+	out := h.mustRun("messages", "hello", "--channel", "general")
+	if n := len(h.callsTo("users.info")); n != 2 {
+		t.Errorf("users.info calls with a cold cache = %d, want 2", n)
 	}
 	if n := len(h.callsTo("conversations.info")); n != 0 {
 		t.Errorf("conversations.info calls = %d, want none", n)
-	}
-
-	out = h.mustRun("messages", "hello", "--channel", "general", "--resolve-users")
-	if n := len(h.callsTo("users.info")); n != 2 {
-		t.Errorf("users.info calls with --resolve-users = %d, want 2", n)
 	}
 	want := map[string]any{
 		"U11111111": map[string]any{"id": "U11111111", "name": "u11111111", "display_name": "U11111111"},
@@ -329,7 +326,7 @@ func TestRefreshUsersBypassesTheUserCache(t *testing.T) {
 		t.Errorf("referenced_users = %v, want %v", out["referenced_users"], want)
 	}
 
-	h.mustRun("messages", "hello", "--channel", "general", "--resolve-users")
+	h.mustRun("messages", "hello", "--channel", "general")
 	if n := len(h.callsTo("users.info")); n != 0 {
 		t.Errorf("users.info calls with a warm cache = %d, want 0", n)
 	}
@@ -339,7 +336,7 @@ func TestRefreshUsersBypassesTheUserCache(t *testing.T) {
 		t.Errorf("users.info calls with --refresh-users = %d, want 2", n)
 	}
 	if !reflect.DeepEqual(out["referenced_users"], want) {
-		t.Errorf("--refresh-users implies --resolve-users: got %v", out["referenced_users"])
+		t.Errorf("--refresh-users: referenced_users = %v", out["referenced_users"])
 	}
 }
 
@@ -548,8 +545,7 @@ func TestHelpContracts(t *testing.T) {
 			"limit":          {"1 to 200", "more_messages / more_files"},
 			"max-body-chars": {"-1 for unlimited"},
 			"no-download":    {"without a local path"},
-			"resolve-users":  {"referenced_users"},
-			"refresh-users":  {"implies --resolve-users"},
+			"refresh-users":  {"referenced_users", "cache"},
 		} {
 			f := sub.Flags().Lookup(flag)
 			if f == nil {

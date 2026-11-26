@@ -39,7 +39,13 @@ type fake struct {
 }
 
 func newFake(t *testing.T) *fake {
-	return &fake{t: t, handlers: map[string]func(map[string]any) (map[string]any, error){}, files: map[string]string{}}
+	f := &fake{t: t, handlers: map[string]func(map[string]any) (map[string]any, error){}, files: map[string]string{}}
+	// Message results always name their users; a workspace without
+	// profiles leaves them as the search index has them.
+	f.on("users.info", func(map[string]any) (map[string]any, error) {
+		return map[string]any{"ok": false, "error": "user_not_found"}, nil
+	})
+	return f
 }
 
 func (f *fake) on(method string, h func(params map[string]any) (map[string]any, error)) {

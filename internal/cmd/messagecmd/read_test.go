@@ -35,7 +35,7 @@ func (h *harness) replies(msgs ...map[string]any) {
 func TestGetByURL(t *testing.T) {
 	h := newHarness(t)
 	h.history(map[string]any{"ts": testTS, "user": "U05BRPTKL6A", "text": "hello *world*"})
-	got := h.mustRun("get", testURL, "--resolve-users=false")
+	got := h.mustRun("get", testURL)
 	wantJSON(t, got, `{"message": {
 		"channel_id": "C12345678",
 		"ts": "1770165109.628379",
@@ -43,7 +43,10 @@ func TestGetByURL(t *testing.T) {
 		"author": {"user_id": "U05BRPTKL6A"},
 		"content": "hello *world*"
 	}}`)
-	h.wantCalls(call{"conversations.history", map[string]any{"channel": testChannel, "latest": testTS, "inclusive": true, "limit": 1}})
+	h.wantCalls(
+		call{"conversations.history", map[string]any{"channel": testChannel, "latest": testTS, "inclusive": true, "limit": 1}},
+		call{"users.info", map[string]any{"user": "U05BRPTKL6A"}},
+	)
 }
 
 func TestDefaultSubcommandIsGet(t *testing.T) {
@@ -216,16 +219,7 @@ func TestGetIncludeReactionsAndResolveUsers(t *testing.T) {
 		return map[string]any{"ok": true, "user": map[string]any{"id": id, "name": "name-" + id}}, nil
 	}
 
-	got := h.mustRun("get", testURL, "--resolve-users=false")
-	if got["referenced_users"] != nil || got["message"].(map[string]any)["reactions"] != nil {
-		t.Errorf("with --resolve-users=false: %v", got)
-	}
-	if len(h.callsTo("users.info")) != 0 {
-		t.Error("users.info called with --resolve-users=false")
-	}
-
-	// Users are named by default.
-	got = h.mustRun("get", testURL, "--include-reactions")
+	got := h.mustRun("get", testURL, "--include-reactions")
 	users, _ := got["referenced_users"].(map[string]any)
 	for _, id := range []string{"U05BRPTKL6A", "U0AAAAAAAAA", "U0BBBBBBBBB"} {
 		if u, _ := users[id].(map[string]any); u["name"] != "name-"+id {
@@ -240,8 +234,8 @@ func TestGetIncludeReactionsAndResolveUsers(t *testing.T) {
 		t.Error("include_all_metadata not requested")
 	}
 
-	// Cached now; --refresh-users implies --resolve-users and refetches.
-	h.mustRun("get", testURL, "--resolve-users")
+	// Cached now; --refresh-users refetches.
+	h.mustRun("get", testURL, "--include-reactions")
 	if n := len(h.callsTo("users.info")); n != 0 {
 		t.Errorf("%d users.info calls with a warm cache", n)
 	}
@@ -596,7 +590,7 @@ func TestReadTheDMWithAUser(t *testing.T) {
 		}
 		return map[string]any{"ok": true, "channels": []any{map[string]any{"id": "D12345678", "is_im": true, "user": "U05BRPTKL6A"}}}, nil
 	}
-	got := h.mustRun("list", "U05BRPTKL6A", "--limit", "5", "--resolve-users=false")
+	got := h.mustRun("list", "U05BRPTKL6A", "--limit", "5")
 	wantJSON(t, got, `{"channel_id": "D12345678", "messages": [
 		{"channel_id": "D12345678", "ts": "1770165109.628379", "time": "2026-02-04T00:31:49Z", "author": {"user_id": "U05BRPTKL6A"}, "content": "hello"}
 	]}`)
@@ -604,6 +598,7 @@ func TestReadTheDMWithAUser(t *testing.T) {
 		call{"users.conversations", map[string]any{"types": "im", "limit": 1000, "exclude_archived": false}},
 		call{"users.conversations", map[string]any{"types": "im", "limit": 1000, "exclude_archived": false, "cursor": "page-2"}},
 		call{"conversations.history", map[string]any{"channel": "D12345678", "limit": 5}},
+		call{"users.info", map[string]any{"user": "U05BRPTKL6A"}},
 	)
 
 	got = h.mustRun("get", "U05BRPTKL6A", "--ts", testTS)
@@ -655,11 +650,6 @@ func TestResolveUsersNamesTheAuthor(t *testing.T) {
 	}
 	if got["referenced_users"] == nil {
 		t.Error("referenced_users is gone")
-	}
-
-	got = h.mustRun("list", testChannel, "--resolve-users=false")
-	if author := got["messages"].([]any)[1].(map[string]any)["author"]; !reflect.DeepEqual(author, map[string]any{"user_id": "U05BRPTKL6A"}) {
-		t.Errorf("with --resolve-users=false: author = %v", author)
 	}
 }
 

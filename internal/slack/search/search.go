@@ -75,9 +75,8 @@ type Options struct {
 	// NoDownload skips downloading files: results then carry no local
 	// path.
 	NoDownload bool
-	// ResolveUsers adds the profiles of the users the messages refer to;
-	// RefreshUsers does too, bypassing the user cache.
-	ResolveUsers bool
+	// RefreshUsers fetches the profiles of the users the messages refer
+	// to again, bypassing the user cache.
 	RefreshUsers bool
 
 	// DownloadsDir and CacheDir override where files are downloaded and
@@ -238,7 +237,7 @@ func Search(ctx context.Context, client *slackapi.Client, opts Options) (*Result
 		return nil, err
 	}
 
-	if opts.ResolveUsers || opts.RefreshUsers {
+	if len(matched) > 0 {
 		ids := users.CollectReferencedUserIDs(matched, false)
 		// An enrichment: a rate limit leaves some users out and a warning,
 		// the error is for dead credentials and cancellation.
