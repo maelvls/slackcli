@@ -194,7 +194,7 @@ func TestSearchMessagesEndToEnd(t *testing.T) {
 		}}}, nil
 	})
 
-	out, err := h.run("messages", "smoke tests failed", "--user", "@ci", "--after", "2025-12-01", "--limit", "1", "--max-content-chars", "18")
+	out, err := h.run("messages", "smoke tests failed", "--user", "@ci", "--after", "2025-12-01", "--limit", "1", "--max-content-chars", "18", "--resolve-users=false")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -306,12 +306,12 @@ func TestRefreshUsersBypassesTheUserCache(t *testing.T) {
 	h := newHarness(t)
 	h.general()
 
-	out := h.mustRun("messages", "hello", "--channel", "general")
+	out := h.mustRun("messages", "hello", "--channel", "general", "--resolve-users=false")
 	if n := len(h.callsTo("users.info")); n != 0 {
-		t.Errorf("users.info calls without --resolve-users = %d", n)
+		t.Errorf("users.info calls with --resolve-users=false = %d", n)
 	}
 	if _, ok := out["referenced_users"]; ok {
-		t.Errorf("referenced_users without --resolve-users: %v", out)
+		t.Errorf("referenced_users with --resolve-users=false: %v", out)
 	}
 	if n := len(h.callsTo("conversations.info")); n != 0 {
 		t.Errorf("conversations.info calls = %d, want none", n)

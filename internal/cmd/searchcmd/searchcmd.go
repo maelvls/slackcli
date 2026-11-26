@@ -112,8 +112,8 @@ two ways of searching and how to get more results than --limit.`,
 	cmdutil.AddMaxBodyCharsFlag(cmd, &f.maxContentChars)
 	fl.BoolVar(&f.noDownload, cmdutil.NoDownloadFlagName, false,
 		"Do not download files: results list them without a local path (file results keep their permalink)")
-	fl.BoolVar(&f.resolveUsers, "resolve-users", false,
-		"Add referenced_users: the profiles of the authors and of the users mentioned in the messages found, keyed by user ID (the author's handle is on each result anyway, as author.name; this makes it the display name)")
+	fl.BoolVar(&f.resolveUsers, "resolve-users", true,
+		`Name the users: put the full name in each "author.name" (instead of the handle the search index has), replace the "@U…" mentions of "content" with "@Full Name", and add "referenced_users", the profiles of the users found, keyed by user ID (cached for 24h). On by default; --resolve-users=false skips the lookups`)
 	fl.BoolVar(&f.refreshUsers, "refresh-users", false,
 		"Like --resolve-users, but fetch the profiles again instead of using the local user cache (implies --resolve-users)")
 	return cmd

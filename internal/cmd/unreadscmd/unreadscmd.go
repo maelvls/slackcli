@@ -17,6 +17,7 @@ func New(rt *clictx.Context) *cobra.Command {
 		workspace                 string
 		maxMessages, maxBodyChars int
 		countsOnly, includeSystem bool
+		resolveUsers              bool
 	)
 	cmd := &cobra.Command{
 		Use:   "unreads",
@@ -39,8 +40,11 @@ Prints JSON:
     mention_count                unread mentions of you, from Slack
     messages                     the unread messages fetched, oldest first:
                                  ts, time (ts as a local date and time),
-                                 author {user_id, bot_id}, content (as
-                                 Markdown), thread_ts, reply_count
+                                 author {user_id, bot_id, name}, content
+                                 (as Markdown), thread_ts, reply_count.
+                                 "name" is the author's full name, and
+                                 mentions in content read "@Full Name"
+                                 (bare user IDs with --resolve-users=false)
     system_messages_hidden       number of fetched unread messages left out
                                  of messages because they are system
                                  messages (joins, leaves, topic changes …).
@@ -91,6 +95,7 @@ To see who is waiting for an answer rather than what is unread, use
 					MaxMessages:   maxMessages,
 					MaxBodyChars:  maxBodyChars,
 					IncludeSystem: includeSystem,
+					ResolveUsers:  resolveUsers,
 				})
 			})
 			if err != nil {
@@ -106,6 +111,7 @@ To see who is waiting for an answer rather than what is unread, use
 	cmd.Flags().BoolVar(&countsOnly, "counts-only", false, "Only list the conversations with unreads and their mention counts; do not fetch message content")
 	cmd.Flags().IntVar(&maxMessages, "max-messages", unreads.DefaultMaxMessages, fmt.Sprintf("Max unread messages to fetch per conversation, oldest unread first, hidden system messages included (1-%d)", unreads.MaxMessagesLimit))
 	cmdutil.AddMaxBodyCharsFlag(cmd, &maxBodyChars)
+	cmd.Flags().BoolVar(&resolveUsers, "resolve-users", true, `Name the users: put the full name in each "author.name" and replace the "@U…" mentions of "content" with "@Full Name" (profiles cached for 24h). On by default; --resolve-users=false prints bare user IDs`)
 	cmd.Flags().BoolVar(&includeSystem, "include-system", false, "Include system messages (joins, leaves, topic changes, etc.) in messages instead of only counting them in system_messages_hidden")
 	return cmd
 }

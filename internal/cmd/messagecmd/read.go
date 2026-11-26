@@ -70,7 +70,7 @@ func addReadFlags(cmd *cobra.Command, o *readOptions) {
 	cmdutil.AddMaxBodyCharsFlag(cmd, &o.maxBodyChars)
 	f.BoolVar(&o.noDownload, cmdutil.NoDownloadFlagName, false, "Do not download attached files: they are listed without a local path, which is faster when only the text matters")
 	f.BoolVar(&o.includeReactions, "include-reactions", false, "Include reactions and the IDs of the users who reacted")
-	f.BoolVar(&o.resolveUsers, "resolve-users", false, `Name the users: add "name" to each author, and "referenced_users", the profiles of the user IDs appearing in the output (cached for 24h)`)
+	f.BoolVar(&o.resolveUsers, "resolve-users", true, `Name the users: put the full name in each "author.name", replace the "@U…" mentions of "content" with "@Full Name", and add "referenced_users", the profiles of the user IDs appearing in the output (cached for 24h). On by default; --resolve-users=false prints bare user IDs`)
 	f.BoolVar(&o.refreshUsers, "refresh-users", false, "Like --resolve-users, but fetch the profiles again instead of using the cache")
 }
 
@@ -155,8 +155,8 @@ func (c *command) runGet(cmd *cobra.Command, targetInput string, opts readOption
 }
 
 // present downloads the files of msgs (unless --no-download), converts
-// them to the printed shape and resolves the users they reference when
-// asked to.
+// them to the printed shape and names the users they reference, unless
+// told not to.
 func (c *command) present(ctx context.Context, loc cmdutil.Located, msgs []messages.Message, opts readOptions) ([]messages.CompactMessage, map[string]users.CompactUser, error) {
 	downloads := listedFiles(msgs)
 	if !opts.noDownload {
@@ -186,13 +186,7 @@ func (c *command) present(ctx context.Context, loc cmdutil.Located, msgs []messa
 	}
 	// Who wrote what is read off each message, without a detour through
 	// referenced_users.
-	for i := range compact {
-		if a := compact[i].Author; a != nil {
-			if u, ok := byID[a.UserID]; ok {
-				a.Name = cmp.Or(u.DisplayName, u.RealName, u.Name)
-			}
-		}
-	}
+	users.NameMessages(compact, byID)
 	return compact, users.ToReferencedUsers(ids, byID), nil
 }
 
@@ -230,8 +224,10 @@ message first, in the same shape for a channel and for a thread.
 as a local date and time. "content" is Markdown. "thread_ts" is the root of
 the thread a message belongs to: every message of a listed thread has it,
 and in channel history only the messages that started a thread, which also
-have "reply_count". "reactions" needs --include-reactions; "author.name"
-and "referenced_users" need --resolve-users. Attached files are downloaded
+have "reply_count". "reactions" needs --include-reactions. "author.name"
+is the author's full name, and mentions in "content" read "@Full Name";
+"referenced_users" maps the user IDs to their profiles (all three are left
+out with --resolve-users=false). Attached files are downloaded
 and listed with their local path, as by "get", unless --no-download is
 given.`, messages.MaxHistoryLimit),
 		Args: cobra.ExactArgs(1),

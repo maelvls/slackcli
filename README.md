@@ -30,7 +30,7 @@ Open Slack Desktop and sign in, then:
 ```bash
 slackcli auth test
 slackcli message list "#general" --limit 20
-slackcli message list "#general" --oldest 2026-01-30 --expand-threads --resolve-users
+slackcli message list "#general" --oldest 2026-01-30 --expand-threads
 slackcli search messages "deploy failed" --after 2026-01-01
 slackcli message send "#general" "Hello from slackcli"
 ```
@@ -171,7 +171,7 @@ A command that times out says on stderr what it spent its time on and what it wa
 To see where the time of any command goes, set `SLACKCLI_DEBUG=1`. Every Slack call, with its duration, HTTP status, error code and attempt number, every wait and the exit code are written to stderr as they happen, one line each, prefixed with `[slackcli +<time since start>]`. Nothing of it is written otherwise. The trace, like the timeout message, names Slack methods and never their parameters: no token, cookie, command argument, channel, file name or message text. Of an error it keeps the first line, with URLs cut down to their host, and file paths and anything between double quotes removed. Calls made in parallel each count their own time, so the total of a kind can exceed the time that went by.
 
 ```console
-$ SLACKCLI_DEBUG=1 slackcli message list general --limit 3 --resolve-users >/dev/null
+$ SLACKCLI_DEBUG=1 slackcli message list general --limit 3 >/dev/null
 [slackcli +1ms] slackcli 1.0.0, command "message list": command timeout 30s, API timeout 20s
 [slackcli +30ms] keychain find-generic-password: 28ms
 [slackcli +60ms] keychain find-generic-password: 27ms

@@ -314,6 +314,7 @@ func Fetch(ctx context.Context, client *slackapi.Client, opts Options) (Result, 
 		if d != nil {
 			drafts = append(drafts, d)
 			ids = append(ids, d.item.Author.UserID, d.imUser)
+			ids = append(ids, users.MentionedInContent(d.item.Text)...)
 		}
 	}
 	slices.SortStableFunc(drafts, func(a, b *draft) int { return cmp.Compare(tsNum(b.item.TS), tsNum(a.item.TS)) })
@@ -322,10 +323,7 @@ func Fetch(ctx context.Context, client *slackapi.Client, opts Options) (Result, 
 	if err != nil {
 		return Result{}, err
 	}
-	name := func(id string) string {
-		u := byID[id]
-		return cmp.Or(u.DisplayName, u.Name, u.RealName)
-	}
+	name := func(id string) string { return users.Label(byID[id]) }
 	result := Result{
 		UserID:    me,
 		Since:     opts.Since.UTC().Format("2006-01-02T15:04:05.000Z"),
@@ -339,6 +337,7 @@ func Fetch(ctx context.Context, client *slackapi.Client, opts Options) (Result, 
 			item.ChannelName = cmp.Or(name(d.imUser), d.imUser)
 		}
 		item.Author.Name = name(item.Author.UserID)
+		item.Text = users.NameContent(item.Text, byID)
 		result.Items[i] = item
 	}
 	return result, nil

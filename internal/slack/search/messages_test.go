@@ -292,7 +292,7 @@ func TestScanMessagesReferencedUsers(t *testing.T) {
 	if len(res.Messages) != 1 {
 		t.Fatalf("messages = %+v", res.Messages)
 	}
-	if got := res.Messages[0]; got.Author.UserID != "U11111111" || !strings.Contains(got.Content, "@U22222222") {
+	if got := res.Messages[0]; got.Author.UserID != "U11111111" || !strings.Contains(got.Content, "@Bob") {
 		t.Errorf("message = %+v", got)
 	}
 	want := map[string]users.CompactUser{

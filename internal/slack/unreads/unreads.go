@@ -21,6 +21,7 @@ import (
 	"github.com/maelvls/slackcli/internal/slack/enrich"
 	"github.com/maelvls/slackcli/internal/slack/messages"
 	"github.com/maelvls/slackcli/internal/slack/slacktext"
+	"github.com/maelvls/slackcli/internal/slack/users"
 	"github.com/maelvls/slackcli/internal/slackapi"
 )
 
@@ -49,6 +50,11 @@ const (
 
 // Options tunes Fetch.
 type Options struct {
+	// ResolveUsers names the users of the messages fetched: the full name
+	// in Author.Name, and "@Full Name" for the mentions in Content.
+	ResolveUsers bool
+	// CacheDir overrides where the user cache lives (tests).
+	CacheDir string
 	// CountsOnly skips fetching the unread messages.
 	CountsOnly bool
 	// MaxMessages is the number of unread messages fetched per
@@ -67,6 +73,8 @@ type Options struct {
 type Author struct {
 	UserID string `json:"user_id,omitempty"`
 	BotID  string `json:"bot_id,omitempty"`
+	// Name is the author's full name (Options.ResolveUsers).
+	Name string `json:"name,omitempty"`
 }
 
 // Message is one unread message.
@@ -340,6 +348,14 @@ func Fetch(ctx context.Context, client *slackapi.Client, opts Options) (Result, 
 			n, len(entries), enrich.Cause(err), enrich.Hint()))
 	}
 
+	if opts.ResolveUsers && !opts.CountsOnly {
+		warnings, err := nameUsers(ctx, client, result.Channels, opts.CacheDir)
+		if err != nil {
+			return Result{}, err
+		}
+		result.Warnings = append(result.Warnings, warnings...)
+	}
+
 	slices.SortStableFunc(result.Channels, func(a, b Channel) int {
 		if a.MentionCount != b.MentionCount {
 			return b.MentionCount - a.MentionCount
@@ -368,6 +384,37 @@ func errorCode(err error) string {
 }
 
 // fetchMessages fills ch with the messages newer than the read cursor.
+// nameUsers names the authors of the messages of chans and the users their
+// content mentions. It is an enrichment: a rate limit leaves the users
+// not yet known as bare IDs and returns a warning; the error is for dead
+// credentials and cancellation.
+func nameUsers(ctx context.Context, client *slackapi.Client, chans []Channel, cacheDir string) ([]string, error) {
+	var ids []string
+	for _, ch := range chans {
+		for _, m := range ch.Messages {
+			if m.Author != nil {
+				ids = append(ids, m.Author.UserID)
+			}
+			ids = append(ids, users.MentionedInContent(m.Content)...)
+		}
+	}
+	ctx, warnings := enrich.Collect(ctx)
+	byID, err := users.ResolveByID(ctx, client, ids, users.ResolveOptions{CacheDir: cacheDir})
+	if err != nil {
+		return nil, fmt.Errorf("naming the authors of the unread messages: %w", err)
+	}
+	for i := range chans {
+		for j := range chans[i].Messages {
+			m := &chans[i].Messages[j]
+			m.Content = users.NameContent(m.Content, byID)
+			if m.Author != nil {
+				m.Author.Name = users.Label(byID[m.Author.UserID])
+			}
+		}
+	}
+	return warnings.List(), nil
+}
+
 func fetchMessages(ctx context.Context, client *slackapi.Client, e entry, opts Options, ch *Channel) error {
 	params := map[string]any{"channel": e.id, "limit": opts.MaxMessages, "inclusive": false}
 	// With "oldest" and no "latest", conversations.history pages forward

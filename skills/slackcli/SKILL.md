@@ -28,9 +28,9 @@ Use `slackcli` from `$PATH`. If it is missing, tell the user: it is installed fr
 
 ## Common reads
 
-One call each. Messages carry `time` (their `ts` as a local date and time); add `--resolve-users` when names matter: it puts `author.name` on each message (24-hour cache).
+One call each. Messages carry `time` (their `ts` as a local date and time) and `author.name`, the author's full name; mentions in `content` read `@Full Name` (24-hour cache). Address people by `author.name` of the message you answer, never by a name guessed from the topic or an earlier message; if it is missing (a bare `user_id`, after a rate limit), run `user get <user_id>` first.
 
-- What was said in a channel since a day: `message list "#name" --oldest 2026-01-30 --expand-threads --resolve-users` (`--latest` ends the window; `--expand-threads` adds the replies of each thread after its first message).
+- What was said in a channel since a day: `message list "#name" --oldest 2026-01-30 --expand-threads` (`--latest` ends the window; `--expand-threads` adds the replies of each thread after its first message).
 - One thread: `message list "<message-url>"`.
 - The DM with someone: `user get <handle|email|name>` for their ID, then `message list U…`. It fails when no DM exists; nothing is opened.
 - Someone whose exact handle or name you do not know: `user search <words>` (part of a name, a handle, a title) prints the candidates, best match first. `user get` only takes an exact handle, email or name, and prints one user.

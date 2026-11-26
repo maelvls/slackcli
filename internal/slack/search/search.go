@@ -249,10 +249,9 @@ func Search(ctx context.Context, client *slackapi.Client, opts Options) (*Result
 		res.ReferencedUsers = users.ToReferencedUsers(ids, byID)
 		// As "message list" does: the name is on the message itself.
 		for i := range res.Messages {
+			res.Messages[i].Content = users.NameContent(res.Messages[i].Content, byID)
 			if a := res.Messages[i].Author; a != nil {
-				if u, ok := byID[a.UserID]; ok {
-					a.Name = cmp.Or(u.DisplayName, u.RealName, u.Name, a.Name)
-				}
+				a.Name = cmp.Or(users.Label(byID[a.UserID]), a.Name)
 			}
 		}
 	}
