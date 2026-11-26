@@ -30,8 +30,14 @@ func (c *command) newEdit() *cobra.Command {
 
 %s
 
-<text> is Slack mrkdwn, converted as by "send". With --blocks, pass "" as
-<text> to send the blocks alone. Prints {"ok": true}.
+<text> is Slack mrkdwn, as for "send": *bold*, _italic_,
+<https://example.com|label>, <@U123> or @U123 mentions, lists. Markdown
+links ([label](https://example.com)) are not converted: they stay literal
+text. Text with links, mentions or formatting is sent as rich_text blocks,
+because Slack leaves the links of an edited message's plain text unlinked.
+
+With --blocks, pass "" as <text> to send the blocks alone. Prints
+{"ok": true}.
 
 Refused in safe mode (--safe-mode or %s=1).`, messageTargetLong, appinfo.EnvName("SAFE_MODE")),
 		Args: cobra.ExactArgs(2),
@@ -59,7 +65,12 @@ Refused in safe mode (--safe-mode or %s=1).`, messageTargetLong, appinfo.EnvName
 					return err
 				}
 				params["blocks"] = blocks
-			} else if blocks := slacktext.TextToRichTextBlocks(text); blocks != nil {
+			} else if blocks := slacktext.TextToRichTextBlocksInline(text); blocks != nil {
+				// Unlike chat.postMessage, chat.update does not turn the
+				// links of `text` into links: <https://example.com|label>,
+				// <https://example.com> and bare URLs all stay literal
+				// text in Slack. Links (and the rest of the formatting) only
+				// survive an edit as rich_text elements.
 				params["blocks"] = blocks
 			} else {
 				// chat.update keeps the blocks of the message when none
