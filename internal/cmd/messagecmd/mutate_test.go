@@ -6,7 +6,9 @@ import (
 	"testing"
 )
 
-func TestEdit(t *testing.T) {
+// TestEditPlainText covers edits whose text has no link, mention or
+// formatting: they need no blocks.
+func TestEditPlainText(t *testing.T) {
 	tests := []struct {
 		name     string
 		args     []string
@@ -14,10 +16,6 @@ func TestEdit(t *testing.T) {
 	}{
 		{"plain text", []string{testChannel, "hello", "--workspace", testWorkspace, "--ts", testTS}, "hello"},
 		{"literal angle brackets are escaped", []string{testChannel, "please use <fix>", "--ts", testTS}, "please use &lt;fix&gt;"},
-		{"message URL with a link label", []string{testURL, "Visit <https://example.com|Example>"}, "Visit <https://example.com|Example>"},
-		{"mailto link", []string{testChannel, "Email <mailto:bob@example.com|Bob>", "--ts", testTS}, "Email <mailto:bob@example.com|Bob>"},
-		{"usergroup mention", []string{testChannel, "Ping <!subteam^S12345678|@team>", "--ts", testTS}, "Ping <!subteam^S12345678|@team>"},
-		{"inline formatting needs no blocks", []string{testChannel, "Update *now*", "--ts", testTS}, "Update *now*"},
 		{"channel name", []string{"#general", "hello", "--ts", testTS}, "hello"},
 	}
 	for _, tt := range tests {
@@ -34,6 +32,51 @@ func TestEdit(t *testing.T) {
 			if len(calls) != 1 || !reflect.DeepEqual(calls[0].params, want) {
 				t.Errorf("chat.update calls = %v\nwant params %#v", calls, want)
 			}
+		})
+	}
+}
+
+// TestEditLinksAreRichText guards against the edit trap: chat.update leaves
+// the links of `text` as literal text in Slack (<https://x|label> shows as
+// is), so an edit with links, mentions or formatting must carry rich_text
+// blocks, while `text` keeps the mrkdwn as the fallback.
+func TestEditLinksAreRichText(t *testing.T) {
+	tests := []struct {
+		name, text, wantText, wantBlocks string
+	}{
+		{"labelled link", "Visit <https://example.com|Example>", "Visit <https://example.com|Example>", `[{"type":"rich_text","elements":[{"type":"rich_text_section","elements":[
+			{"type":"text","text":"Visit "},
+			{"type":"link","url":"https://example.com","text":"Example"},
+			{"type":"text","text":"\n"}]}]}]`},
+		{"bare URL", "See https://example.com now", "See https://example.com now", `[{"type":"rich_text","elements":[{"type":"rich_text_section","elements":[
+			{"type":"text","text":"See "},
+			{"type":"link","url":"https://example.com"},
+			{"type":"text","text":" now\n"}]}]}]`},
+		{"mailto link", "Email <mailto:bob@example.com|Bob>", "Email <mailto:bob@example.com|Bob>", `[{"type":"rich_text","elements":[{"type":"rich_text_section","elements":[
+			{"type":"text","text":"Email "},
+			{"type":"link","url":"mailto:bob@example.com","text":"Bob"},
+			{"type":"text","text":"\n"}]}]}]`},
+		{"usergroup mention", "Ping <!subteam^S12345678|@team>", "Ping <!subteam^S12345678|@team>", `[{"type":"rich_text","elements":[{"type":"rich_text_section","elements":[
+			{"type":"text","text":"Ping "},
+			{"type":"usergroup","usergroup_id":"S12345678"},
+			{"type":"text","text":"\n"}]}]}]`},
+		{"inline formatting", "Update *now*", "Update *now*", `[{"type":"rich_text","elements":[{"type":"rich_text_section","elements":[
+			{"type":"text","text":"Update "},
+			{"type":"text","text":"now","style":{"bold":true}},
+			{"type":"text","text":"\n"}]}]}]`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h := newHarness(t)
+			h.mustRun("edit", testURL, tt.text)
+			calls := h.callsTo("chat.update")
+			if len(calls) != 1 {
+				t.Fatalf("chat.update calls = %v, want 1", calls)
+			}
+			if got := calls[0].params["text"]; got != tt.wantText {
+				t.Errorf("text = %q, want %q", got, tt.wantText)
+			}
+			wantJSON(t, map[string]any{"blocks": jsonRoundTrip(t, calls[0].params["blocks"])}, `{"blocks": `+tt.wantBlocks+`}`)
 		})
 	}
 }
