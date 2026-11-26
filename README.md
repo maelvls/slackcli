@@ -45,7 +45,7 @@ There is nothing to configure: the first command imports your session from Slack
 slackcli
 ├── auth      whoami | test | add | set-default | remove | import-desktop |
 │             import-chrome | import-brave | import-firefox | parse-curl
-├── message   get | list | send | edit | delete | react add|remove |
+├── message   get | list | wait | send | edit | delete | react add|remove |
 │             scheduled list|cancel | compose | draft list|create|update|delete
 ├── search    all | messages | files
 ├── channel   list | info | new | invite | mark
