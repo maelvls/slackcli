@@ -17,8 +17,8 @@ type call struct {
 	params map[string]any
 }
 
-// With ResolveUsers, authors carry their full name and mentions in the
-// content read "@Full Name", so that nobody has to match IDs to people.
+// Authors carry their full name and mentions in the content read
+// "@Full Name", so that nobody has to match IDs to people.
 func TestFetchNamesUsers(t *testing.T) {
 	ws := workspace{
 		counts: map[string]any{
@@ -39,7 +39,7 @@ func TestFetchNamesUsers(t *testing.T) {
 		}
 		return serve(method, params)
 	}
-	res, err := Fetch(context.Background(), rec.client(), Options{ResolveUsers: true, CacheDir: t.TempDir()})
+	res, err := Fetch(context.Background(), rec.client(), Options{CacheDir: t.TempDir()})
 	if err != nil {
 		t.Fatal(err)
 	}

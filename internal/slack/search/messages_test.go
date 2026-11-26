@@ -286,7 +286,7 @@ func TestScanMessagesReferencedUsers(t *testing.T) {
 	})
 
 	opts := options(t, KindMessages, "hello")
-	opts.Channels, opts.ResolveUsers = []string{general}, true
+	opts.Channels = []string{general}
 	res := mustSearch(t, f, opts)
 
 	if len(res.Messages) != 1 {
@@ -305,17 +305,6 @@ func TestScanMessagesReferencedUsers(t *testing.T) {
 	// No query is built, hence no channel lookup, when scanning.
 	if n := len(f.callsTo("conversations.info")); n != 0 {
 		t.Errorf("conversations.info calls = %d", n)
-	}
-}
-
-func TestScanMessagesDoesNotResolveUsersUnlessAsked(t *testing.T) {
-	f := newFake(t)
-	f.history(message(jan1, "hello"))
-	opts := options(t, KindMessages, "hello")
-	opts.Channels, opts.Limit = []string{general}, 1 // the TS resolved users whenever the limit was reached
-	res := mustSearch(t, f, opts)
-	if res.ReferencedUsers != nil || len(f.callsTo("users.info")) != 0 {
-		t.Errorf("referenced_users = %v, users.info calls = %d", res.ReferencedUsers, len(f.callsTo("users.info")))
 	}
 }
 
@@ -552,7 +541,7 @@ func TestSearchValidatesOptions(t *testing.T) {
 	}
 }
 
-// --resolve-users is an enrichment: a rate limited users.info must not
+// Naming the users is an enrichment: a rate limited users.info must not
 // lose the search results.
 func TestSearchKeepsResultsWhenResolvingUsersIsRateLimited(t *testing.T) {
 	f := newFake(t)
@@ -568,7 +557,7 @@ func TestSearchKeepsResultsWhenResolvingUsersIsRateLimited(t *testing.T) {
 	})
 
 	opts := options(t, KindMessages, "hello")
-	opts.Channels, opts.ResolveUsers = []string{general}, true
+	opts.Channels = []string{general}
 	res, err := Search(t.Context(), f.client(), opts)
 	if err != nil {
 		t.Fatalf("err = %v, want the results without the user profiles", err)

@@ -50,9 +50,6 @@ const (
 
 // Options tunes Fetch.
 type Options struct {
-	// ResolveUsers names the users of the messages fetched: the full name
-	// in Author.Name, and "@Full Name" for the mentions in Content.
-	ResolveUsers bool
 	// CacheDir overrides where the user cache lives (tests).
 	CacheDir string
 	// CountsOnly skips fetching the unread messages.
@@ -73,7 +70,7 @@ type Options struct {
 type Author struct {
 	UserID string `json:"user_id,omitempty"`
 	BotID  string `json:"bot_id,omitempty"`
-	// Name is the author's full name (Options.ResolveUsers).
+	// Name is the author's full name.
 	Name string `json:"name,omitempty"`
 }
 
@@ -348,7 +345,7 @@ func Fetch(ctx context.Context, client *slackapi.Client, opts Options) (Result, 
 			n, len(entries), enrich.Cause(err), enrich.Hint()))
 	}
 
-	if opts.ResolveUsers && !opts.CountsOnly {
+	if !opts.CountsOnly {
 		warnings, err := nameUsers(ctx, client, result.Channels, opts.CacheDir)
 		if err != nil {
 			return Result{}, err

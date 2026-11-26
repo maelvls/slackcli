@@ -106,8 +106,8 @@ func TestCommandSurface(t *testing.T) {
 		"schedule", "schedule-in", "no-unfurl", "channel", "cursor",
 	}
 	for path, flags := range map[string][]string{
-		"get":              {"workspace", "ts", "thread-ts", "max-body-chars", "max-content-chars", "no-download", "include-reactions", "resolve-users", "refresh-users"},
-		"list":             {"workspace", "thread-ts", "ts", "limit", "oldest", "latest", "with-reaction", "without-reaction", "max-body-chars", "max-content-chars", "no-download", "include-reactions", "resolve-users", "refresh-users"},
+		"get":              {"workspace", "ts", "thread-ts", "max-body-chars", "max-content-chars", "no-download", "include-reactions", "refresh-users"},
+		"list":             {"workspace", "thread-ts", "ts", "limit", "oldest", "latest", "with-reaction", "without-reaction", "max-body-chars", "max-content-chars", "no-download", "include-reactions", "refresh-users"},
 		"send":             {"workspace", "thread-ts", "reply-broadcast", "attach", "blocks", "schedule", "schedule-in", "no-unfurl"},
 		"edit":             {"workspace", "ts", "blocks"},
 		"delete":           {"workspace", "ts"},
@@ -125,7 +125,7 @@ func TestCommandSurface(t *testing.T) {
 		}
 	}
 	// The implicit "get" takes the flags of "get".
-	for _, name := range []string{"workspace", "ts", "thread-ts", "max-body-chars", "max-content-chars", "no-download", "include-reactions", "resolve-users", "refresh-users"} {
+	for _, name := range []string{"workspace", "ts", "thread-ts", "max-body-chars", "max-content-chars", "no-download", "include-reactions", "refresh-users"} {
 		if root.Flags().Lookup(name) == nil {
 			t.Errorf("message: missing flag --%s", name)
 		}
