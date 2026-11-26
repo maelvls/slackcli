@@ -17,6 +17,41 @@ type call struct {
 	params map[string]any
 }
 
+// With ResolveUsers, authors carry their full name and mentions in the
+// content read "@Full Name", so that nobody has to match IDs to people.
+func TestFetchNamesUsers(t *testing.T) {
+	ws := workspace{
+		counts: map[string]any{
+			"ims": []any{map[string]any{"id": "D1", "has_unreads": true, "last_read": "10.000001"}},
+		},
+		dmUsers: map[string]string{"D1": "U0AAAAAAAAA"},
+		history: map[string]map[string]any{
+			"D1": {"messages": []any{msg("11.000001", "hi <@U0BBBBBBBBB>", "user", "U0AAAAAAAAA")}},
+		},
+	}
+	realNames := map[string]string{"U0AAAAAAAAA": "Karan Raghani", "U0BBBBBBBBB": "Amrut Kumar"}
+	rec := ws.recorder()
+	serve := rec.serve
+	rec.serve = func(method string, params map[string]any) map[string]any {
+		if method == "users.info" {
+			id := params["user"].(string)
+			return map[string]any{"user": map[string]any{"id": id, "real_name": realNames[id], "profile": map[string]any{"display_name": "nick"}}}
+		}
+		return serve(method, params)
+	}
+	res, err := Fetch(context.Background(), rec.client(), Options{ResolveUsers: true, CacheDir: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := res.Channels[0].Messages[0]
+	if got.Author.Name != "Karan Raghani" || got.Author.UserID != "U0AAAAAAAAA" {
+		t.Errorf("author = %+v, want Karan Raghani", got.Author)
+	}
+	if got.Content != "hi @Amrut Kumar" {
+		t.Errorf("content = %q, want the mention named", got.Content)
+	}
+}
+
 // recorder is a fake Slack API that records the calls it serves.
 type recorder struct {
 	mu    sync.Mutex

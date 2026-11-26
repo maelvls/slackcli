@@ -308,8 +308,7 @@ func (w *watcher) name(ctx context.Context, cache map[string]string, id string, 
 func (w *watcher) lookupUser(ctx context.Context, id string) (string, error) {
 	lookupCtx, incomplete := enrich.Collect(ctx)
 	found, err := users.ResolveByID(lookupCtx, w.client, []string{id}, users.ResolveOptions{})
-	u := found[id]
-	name := cmp.Or(u.DisplayName, u.RealName, u.Name)
+	name := users.Label(found[id])
 	if err == nil && name == "" && len(incomplete.List()) > 0 {
 		return "", &slackapi.RateLimitError{Method: "users.info"}
 	}

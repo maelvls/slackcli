@@ -35,7 +35,7 @@ func (h *harness) replies(msgs ...map[string]any) {
 func TestGetByURL(t *testing.T) {
 	h := newHarness(t)
 	h.history(map[string]any{"ts": testTS, "user": "U05BRPTKL6A", "text": "hello *world*"})
-	got := h.mustRun("get", testURL)
+	got := h.mustRun("get", testURL, "--resolve-users=false")
 	wantJSON(t, got, `{"message": {
 		"channel_id": "C12345678",
 		"ts": "1770165109.628379",
@@ -216,15 +216,16 @@ func TestGetIncludeReactionsAndResolveUsers(t *testing.T) {
 		return map[string]any{"ok": true, "user": map[string]any{"id": id, "name": "name-" + id}}, nil
 	}
 
-	got := h.mustRun("get", testURL)
+	got := h.mustRun("get", testURL, "--resolve-users=false")
 	if got["referenced_users"] != nil || got["message"].(map[string]any)["reactions"] != nil {
-		t.Errorf("without flags: %v", got)
+		t.Errorf("with --resolve-users=false: %v", got)
 	}
 	if len(h.callsTo("users.info")) != 0 {
-		t.Error("users.info called without --resolve-users")
+		t.Error("users.info called with --resolve-users=false")
 	}
 
-	got = h.mustRun("get", testURL, "--include-reactions", "--resolve-users")
+	// Users are named by default.
+	got = h.mustRun("get", testURL, "--include-reactions")
 	users, _ := got["referenced_users"].(map[string]any)
 	for _, id := range []string{"U05BRPTKL6A", "U0AAAAAAAAA", "U0BBBBBBBBB"} {
 		if u, _ := users[id].(map[string]any); u["name"] != "name-"+id {
@@ -595,7 +596,7 @@ func TestReadTheDMWithAUser(t *testing.T) {
 		}
 		return map[string]any{"ok": true, "channels": []any{map[string]any{"id": "D12345678", "is_im": true, "user": "U05BRPTKL6A"}}}, nil
 	}
-	got := h.mustRun("list", "U05BRPTKL6A", "--limit", "5")
+	got := h.mustRun("list", "U05BRPTKL6A", "--limit", "5", "--resolve-users=false")
 	wantJSON(t, got, `{"channel_id": "D12345678", "messages": [
 		{"channel_id": "D12345678", "ts": "1770165109.628379", "time": "2026-02-04T00:31:49Z", "author": {"user_id": "U05BRPTKL6A"}, "content": "hello"}
 	]}`)
@@ -628,11 +629,12 @@ func TestReadTheDMWithAUser(t *testing.T) {
 	}
 }
 
-// --resolve-users names the author on the message itself.
+// Users are named by default, on the message itself: the author by full
+// name, and the users mentioned in the content.
 func TestResolveUsersNamesTheAuthor(t *testing.T) {
 	h := newHarness(t)
 	h.history(
-		map[string]any{"ts": "1770160600.000200", "user": "U05BRPTKL6A", "text": "newer"},
+		map[string]any{"ts": "1770160600.000200", "user": "U05BRPTKL6A", "text": "newer, cc <@U05BRPTKL6A>"},
 		map[string]any{"ts": "1770160000.000001", "bot_id": "B0AAAAAAAAA", "text": "from a bot"},
 	)
 	h.fixtures["users.info"] = func(p map[string]any) (map[string]any, error) {
@@ -640,10 +642,13 @@ func TestResolveUsersNamesTheAuthor(t *testing.T) {
 			"id": p["user"], "name": "alice", "real_name": "Alice Martin", "profile": map[string]any{"display_name": "ali"},
 		}}, nil
 	}
-	got := h.mustRun("list", testChannel, "--resolve-users")
+	got := h.mustRun("list", testChannel)
 	msgs := got["messages"].([]any)
-	if author := msgs[1].(map[string]any)["author"]; !reflect.DeepEqual(author, map[string]any{"user_id": "U05BRPTKL6A", "name": "ali"}) {
+	if author := msgs[1].(map[string]any)["author"]; !reflect.DeepEqual(author, map[string]any{"user_id": "U05BRPTKL6A", "name": "Alice Martin"}) {
 		t.Errorf("author = %v", author)
+	}
+	if content := msgs[1].(map[string]any)["content"]; content != "newer, cc @Alice Martin" {
+		t.Errorf("content = %q, want the mention named", content)
 	}
 	if author := msgs[0].(map[string]any)["author"]; !reflect.DeepEqual(author, map[string]any{"bot_id": "B0AAAAAAAAA"}) {
 		t.Errorf("bot author = %v", author)
@@ -652,9 +657,9 @@ func TestResolveUsersNamesTheAuthor(t *testing.T) {
 		t.Error("referenced_users is gone")
 	}
 
-	got = h.mustRun("list", testChannel)
+	got = h.mustRun("list", testChannel, "--resolve-users=false")
 	if author := got["messages"].([]any)[1].(map[string]any)["author"]; !reflect.DeepEqual(author, map[string]any{"user_id": "U05BRPTKL6A"}) {
-		t.Errorf("without --resolve-users: author = %v", author)
+		t.Errorf("with --resolve-users=false: author = %v", author)
 	}
 }
 
