@@ -11,11 +11,15 @@ You need Go.
 ```bash
 git clone https://github.com/maelvls/slackcli
 cd slackcli
-go install ./cmd/slackcli                 # into ~/go/bin
-cp -R skills/slackcli ~/.claude/skills/   # optional: the agent skill
+make install
 ```
 
-To update, pull and run the same commands again. To skip the copy, link the
+`make install` runs `go install ./cmd/slackcli` (into `~/go/bin`) and copies
+the agent skill into `~/.claude/skills/slackcli` (`make install-bin` or
+`make install-skill` for only one of them, `SKILLS_DIR=...` for another skills
+folder).
+
+To update, pull and run `make install` again. To skip the copy, link the
 skill to the checkout instead; it then follows whatever branch is checked out,
 so keep that checkout on `main` and rerun `go install` after each pull:
 
