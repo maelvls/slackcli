@@ -107,6 +107,63 @@ func TestLockTakesOverAStaleLock(t *testing.T) {
 	}
 }
 
+// A holder frozen for longer than lockStale has its lock taken over. If
+// the takeover, and a new lock, came between its unlock seeing its own
+// token and removing the file, it would remove that new lock, which is
+// not its own, and a third process could take the lock while the new
+// holder still writes: the unlock and the takeover exclude each other.
+func TestUnlockDoesNotRemoveALockTakenOverMeanwhile(t *testing.T) {
+	shortTimings(t)
+	path := filepath.Join(t.TempDir(), "names.json")
+	lock := path + ".lock"
+	unlock := Lock(path)
+	old := time.Now().Add(-2 * lockStale)
+	if err := os.Chtimes(lock, old, old); err != nil { // the holder froze
+		t.Fatal(err)
+	}
+	const newToken = "456 new\n"
+	tookOver := false
+	releaseHook = func() {
+		// Another invocation, waiting for the lock, finds it stale.
+		if removeStaleLock(lock) {
+			tookOver = true
+			if err := createLock(lock, newToken); err != nil {
+				t.Errorf("taking the lock after the takeover: %v", err)
+			}
+		}
+	}
+	t.Cleanup(func() { releaseHook = nil })
+	unlock()
+	raw, err := os.ReadFile(lock)
+	switch {
+	case tookOver && err != nil:
+		t.Errorf("the unlock removed the lock that had taken over its own: %v", err)
+	case tookOver && string(raw) != newToken:
+		t.Errorf("lock = %q, want the new holder's", raw)
+	case !tookOver && err == nil:
+		t.Errorf("the unlock left its own lock behind: %q", raw)
+	}
+}
+
+// An unlock that cannot have the guard does not hang: it leaves its lock
+// to go stale rather than remove it unguarded.
+func TestUnlockWithoutTheGuard(t *testing.T) {
+	shortTimings(t)
+	path := filepath.Join(t.TempDir(), "names.json")
+	unlock := Lock(path)
+	if err := os.WriteFile(path+".lock.takeover", nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	start := time.Now()
+	unlock()
+	if d := time.Since(start); d < lockWait || d > lockWait+time.Second {
+		t.Errorf("waited %s, want about %s", d, lockWait)
+	}
+	if _, err := os.Stat(path + ".lock"); err != nil {
+		t.Errorf("the lock was removed without the guard: %v", err)
+	}
+}
+
 // A directory that cannot be written is no reason to wait.
 func TestLockInAnUnwritableDirectory(t *testing.T) {
 	blocker := filepath.Join(t.TempDir(), "blocker")

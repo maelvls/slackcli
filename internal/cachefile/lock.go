@@ -23,6 +23,10 @@ var (
 	// held for the read and the write of a small file.
 	lockStale = 10 * time.Second
 	lockPoll  = 5 * time.Millisecond
+
+	// releaseHook, when set by a test, runs when the unlock has seen that
+	// the lock is its own and is about to remove it.
+	releaseHook func()
 )
 
 // Lock takes the advisory lock that makes the read, merge and write of a
@@ -50,14 +54,7 @@ func Lock(path string) (unlock func()) {
 	for {
 		err := createLock(lock, token)
 		if err == nil {
-			return func() {
-				// A holder that was frozen for longer than lockStale may
-				// have lost its lock to another process: that lock is not
-				// its to remove.
-				if raw, err := os.ReadFile(lock); err == nil && string(raw) == token {
-					_ = os.Remove(lock)
-				}
-			}
+			return func() { releaseLock(lock, token) }
 		}
 		if !lockHeld(lock, err) && !transientRefusal(err) {
 			return noop
@@ -137,9 +134,9 @@ func removeStaleLock(lock string) bool {
 	guard := lock + ".takeover"
 	f, err := os.OpenFile(guard, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
 	if err != nil {
-		// Another waiter is taking the lock over. A guard is held for the
-		// time of two system calls: an old one belongs to a process that
-		// died right then.
+		// Another waiter is taking the lock over, or its holder releasing
+		// it. A guard is held for the time of a few system calls: an old
+		// one belongs to a process that died right then.
 		if isStale(guard) {
 			_ = os.Remove(guard)
 		}
@@ -148,4 +145,58 @@ func removeStaleLock(lock string) bool {
 	_ = f.Close()
 	defer os.Remove(guard)
 	return isStale(lock) && os.Remove(lock) == nil
+}
+
+// releaseLock removes the lock if it is still the one holding token.
+//
+// A holder that was frozen for longer than lockStale may have lost its
+// lock to a waiter, and that waiter or another one may hold a new lock:
+// that lock is not this holder's to remove. Seeing the token and removing
+// the file are two steps, and a takeover, then a new lock, between them
+// would have the holder remove the new lock and let a third process in
+// while the new holder writes. So both steps are done while holding the
+// guard of removeStaleLock, which makes them and a takeover exclusive.
+//
+// When the guard cannot be had within lockWait, the lock is left in place
+// rather than removed without the guard: a lock left behind only goes
+// stale and is taken over (waiters meanwhile go on without it after
+// lockWait, as for any lock held too long), whereas a lock removed
+// without the guard may be another holder's.
+func releaseLock(lock, token string) {
+	owned := func() bool {
+		raw, err := os.ReadFile(lock)
+		return err == nil && string(raw) == token
+	}
+	// Once the lock holds another token, it never holds this one again: no
+	// need for the guard to see that.
+	if !owned() {
+		return
+	}
+	guard := lock + ".takeover"
+	deadline := time.Now().Add(lockWait)
+	for {
+		f, err := os.OpenFile(guard, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+		if err == nil {
+			_ = f.Close()
+			break
+		}
+		if !lockHeld(guard, err) && !transientRefusal(err) {
+			return
+		}
+		if isStale(guard) {
+			_ = os.Remove(guard)
+			continue
+		}
+		if time.Now().After(deadline) {
+			return
+		}
+		time.Sleep(lockPoll)
+	}
+	defer os.Remove(guard)
+	if owned() {
+		if releaseHook != nil {
+			releaseHook()
+		}
+		_ = os.Remove(lock)
+	}
 }
