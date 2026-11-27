@@ -102,15 +102,22 @@ func TestMain(m *testing.M) {
 }
 
 // expiresOnceStarted is a watchdog clock (runner.elapsed) on which the
-// timeout is up once the command has set started, and not before. A test
-// whose command must be running when the time is up uses it: on a loaded
-// machine, the set-up alone (cobra, the credentials store) may take longer
-// than the few milliseconds of a test's timeout, and the command would
-// never run.
-func expiresOnceStarted(started *atomic.Bool, timeout time.Duration) func() (awake, wall time.Duration) {
+// command timeout (SLACKCLI_COMMAND_TIMEOUT_MS) is up once the command has
+// set started, and not before. A test whose command must be running when
+// the time is up uses it: on a loaded machine, the set-up alone (cobra,
+// the credentials store) may take longer than the few milliseconds of a
+// test's timeout, and the command would never run. A command that never
+// sets started is timed out all the same after 10s, for the test to fail
+// instead of hanging.
+func expiresOnceStarted(started *atomic.Bool) func() (awake, wall time.Duration) {
+	timeout := CommandTimeout()
+	real := stopwatch()
 	return func() (time.Duration, time.Duration) {
 		if started.Load() {
 			return timeout, timeout
+		}
+		if awake, _ := real(); awake > 10*time.Second {
+			return awake, awake
 		}
 		return 0, 0
 	}
@@ -186,7 +193,7 @@ func TestRunTimeoutCancelsTheCommandAndLetsItCleanUp(t *testing.T) {
 		}
 	}}
 	start := time.Now()
-	got := runRunner(t, runner{commands: one(slow), grace: 5 * time.Second, elapsed: expiresOnceStarted(&started, 40*time.Millisecond)}, "slow")
+	got := runRunner(t, runner{commands: one(slow), grace: 5 * time.Second, elapsed: expiresOnceStarted(&started)}, "slow")
 	if got.code != ExitTimeout {
 		t.Fatalf("exit code = %d, want %d (%+v)", got.code, ExitTimeout, got)
 	}
@@ -387,7 +394,7 @@ func TestRunTimeoutSaysWhereTheTimeWent(t *testing.T) {
 		span.EndErr(cmd.Context().Err())
 		return cmd.Context().Err()
 	}}
-	got := runRunner(t, runner{commands: one(slow), grace: time.Second, elapsed: expiresOnceStarted(&waiting, 40*time.Millisecond)}, "slow")
+	got := runRunner(t, runner{commands: one(slow), grace: time.Second, elapsed: expiresOnceStarted(&waiting)}, "slow")
 	if got.code != ExitTimeout {
 		t.Fatalf("%+v", got)
 	}

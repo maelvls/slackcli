@@ -73,7 +73,7 @@ func TestTimeoutFlushesTheWarnings(t *testing.T) {
 			return cmd.Context().Err()
 		}}}
 	}
-	got := runRunner(t, runner{commands: build, grace: 5 * time.Second, elapsed: expiresOnceStarted(&warned, 40*time.Millisecond)}, "slow")
+	got := runRunner(t, runner{commands: build, grace: 5 * time.Second, elapsed: expiresOnceStarted(&warned)}, "slow")
 	if got.code != ExitTimeout || got.stdout != "" {
 		t.Fatalf("%+v", got)
 	}
