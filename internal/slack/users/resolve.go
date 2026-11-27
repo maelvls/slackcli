@@ -40,6 +40,9 @@ type AmbiguousError struct {
 	Input string
 	// Matches are the candidates.
 	Matches []CompactUser
+	// Reason says what the candidates have in common; "" means that
+	// they have the name Input.
+	Reason string
 }
 
 func (e *AmbiguousError) Error() string {
@@ -47,15 +50,22 @@ func (e *AmbiguousError) Error() string {
 	for _, u := range e.Matches {
 		who = append(who, fmt.Sprintf("%s (@%s)", u.ID, u.Name))
 	}
-	return fmt.Sprintf("user %q is ambiguous: %d members have that name: %s. Pass one of these user IDs instead.",
-		e.Input, len(e.Matches), strings.Join(who, ", "))
+	reason := e.Reason
+	if reason == "" {
+		reason = fmt.Sprintf("%d members have that name", len(e.Matches))
+	}
+	return fmt.Sprintf("user %q is ambiguous: %s: %s. Pass one of these user IDs instead.",
+		e.Input, reason, strings.Join(who, ", "))
 }
 
 // ResolveUserID turns a user reference into a user ID. It accepts, in
 // order of cost:
 //
 //   - a user ID (U…/W…): returned as-is, without any API call;
-//   - an email address: one users.lookupByEmail call;
+//   - an email address: one users.lookupByEmail call; with browser
+//     credentials (xoxc), which may not call it, one search.modules.people
+//     call (Slack's people search) and one users.info call (see
+//     lookupByPeopleSearch);
 //   - a handle, with or without "@": one search.messages "from:@handle"
 //     call, which finds anybody who posted a message the caller can see
 //     (user and browser tokens only), confirmed by one users.info call:
@@ -67,6 +77,9 @@ func (e *AmbiguousError) Error() string {
 // The directory scan is also the last resort for an email address that
 // users.lookupByEmail does not know (or may not look up): Slack only looks
 // active members up by email, a deactivated one is found by the scan.
+// After a people search that found nobody, that scan stops after a few
+// pages (see deactivatedScanPages): a larger directory cannot be scanned
+// within the command timeout.
 //
 // Matching is case-insensitive, and active members win over deactivated
 // ones. The error is a *NotFoundError when nobody matches and an
@@ -132,6 +145,14 @@ type want struct {
 	// emailErr is why users.lookupByEmail could not be used for this
 	// email (a refusal: missing scope, token type), nil otherwise.
 	emailErr error
+	// notFoundBy names what found no active member with the email, when
+	// deactivated is set: users.lookupByEmail or the people search.
+	notFoundBy string
+	// bounded is set when the email was looked up with the people search
+	// (browser credentials) and nobody has it: only a deactivated member
+	// is left to look for, and the scan for one stops once the directory
+	// turns out too large for it (see roomForAnotherPage).
+	bounded bool
 
 	active   map[string]any   // handle or email match
 	inactive map[string]any   // same, but a deactivated member
@@ -176,6 +197,39 @@ func lookup(ctx context.Context, client *slackapi.Client, inputs []string) ([]fo
 		w := &want{index: i, input: input, handle: strings.ToLower(strings.TrimPrefix(trimmed, "@"))}
 		if emailRe.MatchString(trimmed) {
 			w.email = strings.ToLower(trimmed)
+			viaPeople := false
+			if client.Auth().IsBrowser() {
+				user, amb, err := lookupByPeopleSearch(ctx, client, trimmed)
+				viaPeople = true
+				switch {
+				case user != nil:
+					out[i] = found{id: jsonx.Str(user["id"]), raw: user}
+					continue
+				case amb != nil:
+					out[i].err = amb
+					continue
+				case err == nil:
+					// No active member has that address. A deactivated
+					// one may, if the directory is small enough to look.
+					w.deactivated, w.bounded, w.notFoundBy = true, true, peopleSearchName
+				case enrich.MustAbort(ctx, err):
+					return nil, fmt.Errorf("looking up user %s: %w", trimmed, err)
+				case slackapi.IsTransient(err):
+					// As for users.lookupByEmail below: Slack did not
+					// answer, which says nothing about the user.
+					return nil, &emailLookupError{email: trimmed, method: "search.modules.people", tries: 1, err: err}
+				case peopleSearchRefused(err):
+					// The people search is not served here: try
+					// users.lookupByEmail, as for the other tokens.
+					viaPeople = false
+				default:
+					return nil, fmt.Errorf("looking up user %s by email: %w", trimmed, err)
+				}
+			}
+			if viaPeople {
+				wants = append(wants, w)
+				continue
+			}
 			user, tries, err := lookupByEmail(ctx, client, trimmed)
 			switch {
 			case user != nil:
@@ -184,7 +238,7 @@ func lookup(ctx context.Context, client *slackapi.Client, inputs []string) ([]fo
 			case slackapi.IsErrorCode(err, "users_not_found"):
 				// No active member has that address. A deactivated one
 				// may: the directory is the only place to find them.
-				w.deactivated = true
+				w.deactivated, w.notFoundBy = true, "users.lookupByEmail"
 			case enrich.MustAbort(ctx, err):
 				return nil, fmt.Errorf("looking up user %s: %w", trimmed, err)
 			case slackapi.IsTransient(err):
@@ -192,7 +246,7 @@ func lookup(ctx context.Context, client *slackapi.Client, inputs []string) ([]fo
 				// nothing about the user, and the directory scan is not
 				// the answer to it: in a large workspace it runs for
 				// half a minute and then fails for another reason.
-				return nil, &emailLookupError{email: trimmed, tries: tries, err: err}
+				return nil, &emailLookupError{email: trimmed, method: "users.lookupByEmail", tries: tries, err: err}
 			case slackapi.IsErrorCode(err, emailLookupRefusals...):
 				// users.lookupByEmail is not for these credentials: look
 				// for the email in the directory instead.
@@ -348,6 +402,8 @@ func lookupByEmail(ctx context.Context, client *slackapi.Client, email string) (
 // email address instead" would be of no use.
 type emailLookupError struct {
 	email string
+	// method is the Slack method that was asked.
+	method string
 	// tries is how many times the method was called.
 	tries int
 	err   error
@@ -363,9 +419,9 @@ func (e *emailLookupError) Error() string {
 	if e.tries > 1 {
 		after = fmt.Sprintf("after %d tries", e.tries)
 	}
-	return fmt.Sprintf("could not look up user %q by email: users.lookupByEmail gave no answer %s (%s). "+
+	return fmt.Sprintf("could not look up user %q by email: %s gave no answer %s (%s). "+
 		"This is temporary and says nothing about whether the user exists: run the command again in a moment, or pass the user ID (U…) if you know it.",
-		e.email, after, strings.TrimSuffix(cause, "."))
+		e.email, e.method, after, strings.TrimSuffix(cause, "."))
 }
 
 func (e *emailLookupError) Unwrap() error { return e.err }
@@ -435,15 +491,17 @@ func searchByHandle(ctx context.Context, client *slackapi.Client, handle string)
 // email that no active member has, a deactivated one.
 func scanDirectory(ctx context.Context, client *slackapi.Client, wants []*want) error {
 	cursor := ""
-	for {
+	for pages := 1; ; pages++ {
 		params := map[string]any{"limit": scanPageSize}
 		if cursor != "" {
 			params["cursor"] = cursor
 		}
+		start := time.Now()
 		resp, err := client.API(ctx, "users.list", params)
 		if err != nil {
 			return scanError(err, wants)
 		}
+		took := time.Since(start)
 		for _, m := range jsonx.Maps(resp["members"]) {
 			if jsonx.Str(m["id"]) == "" {
 				continue
@@ -452,13 +510,18 @@ func scanDirectory(ctx context.Context, client *slackapi.Client, wants []*want) 
 				w.consider(m)
 			}
 		}
-		done := true
+		done, bounded := true, true
 		for _, w := range wants {
-			done = done && (w.active != nil || w.deactivated && w.inactive != nil)
+			settled := w.active != nil || w.deactivated && w.inactive != nil
+			done = done && settled
+			bounded = bounded && (settled || w.bounded)
 		}
 		next := nextCursor(resp)
 		if done || next == "" || next == cursor {
 			return nil
+		}
+		if bounded && !roomForAnotherPage(ctx, pages, took) {
+			return boundedScanError(wants, pages)
 		}
 		cursor = next
 	}
@@ -475,6 +538,7 @@ func scanError(err error, wants []*want) error {
 	var missing []string
 	onlyEmails, onlyRefused := true, true
 	var refusal error
+	var notFoundBy string
 	for _, w := range wants {
 		// Settled, as in scanDirectory: an active match, or the deactivated
 		// member an email no active member has was looked for.
@@ -485,6 +549,7 @@ func scanError(err error, wants []*want) error {
 		onlyEmails = onlyEmails && w.deactivated
 		onlyRefused = onlyRefused && w.emailErr != nil
 		refusal = cmp.Or(refusal, w.emailErr)
+		notFoundBy = cmp.Or(notFoundBy, w.notFoundBy)
 	}
 	wait := fmt.Sprintf("Setting %s to a large value makes the scan wait and carry on, which can take very long (%s)",
 		appinfo.EnvName("RATE_LIMIT_MAX_WAIT_MS"), rl.Summary())
@@ -505,10 +570,10 @@ func scanError(err error, wants []*want) error {
 			strings.Join(missing, ", "), refusalCode(refusal), token, wait)}
 	}
 	if onlyEmails && len(missing) > 0 {
-		return &scanLimitError{err: err, msg: fmt.Sprintf("could not resolve user %s: no active member of this workspace has that email address (users.lookupByEmail), "+
+		return &scanLimitError{err: err, msg: fmt.Sprintf("could not resolve user %s: no active member of this workspace has that email address (%s), "+
 			"and looking for a deactivated one takes a scan of the user directory, which this workspace is too large for (users.list was rate limited). "+
 			"Pass the user ID (U…) instead. %s",
-			strings.Join(missing, ", "), wait)}
+			strings.Join(missing, ", "), notFoundBy, wait)}
 	}
 	instead := "Pass the user ID (U…) or the email address instead"
 	if refusal != nil {
