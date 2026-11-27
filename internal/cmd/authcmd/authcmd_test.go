@@ -517,8 +517,21 @@ func TestImportBrowsers(t *testing.T) {
 		t.Run(tc.command, func(t *testing.T) {
 			h := newHarness(t, nil)
 			tc.set(h.rt, func(context.Context) (*authextract.Extracted, error) { return extraction(tc.source), nil })
-			if out, want := h.mustRun("", tc.command), "Imported 2 workspace token(s) from "+tc.source+".\n"; out != want {
-				t.Errorf("output %q, want %q", out, want)
+			// Same shape as import-desktop, hint included.
+			out := h.mustRun("", tc.command)
+			want := testenv.CompactJSON(t, `{
+  "imported": 2,
+  "source": {"leveldb_path": "/slack/leveldb", "cookies_path": "/slack/Cookies"},
+  "workspaces": [
+    {"workspace_url": "https://acme.slack.com", "workspace_name": "Acme"},
+    {"workspace_url": "https://zeta.slack.com", "workspace_name": "Zeta"}
+  ],
+  "hints": [
+    "no default workspace is set: commands need --workspace \"<url-or-unique-substring>\" (or SLACK_WORKSPACE_URL) until you choose one with \"slackcli auth set-default <url>\""
+  ]
+}`)
+			if out != want || h.stderr.Len() != 0 {
+				t.Errorf("output:\n%s\nwant:\n%s\nstderr = %q", out, want, h.stderr)
 			}
 			h.stored("https://acme.slack.com")
 			h.stored("https://zeta.slack.com")
@@ -572,8 +585,12 @@ func TestImportSkipsUnusableTeams(t *testing.T) {
 		e.Teams[0].URL = "not a url"
 		return e, nil
 	}
-	if out := h.mustRun("", "import-firefox"); out != "Imported 1 workspace token(s) from Firefox.\n" {
-		t.Errorf("output %q", out)
+	got := decodeJSON[struct {
+		Imported   int                 `json:"imported"`
+		Workspaces []importedWorkspace `json:"workspaces"`
+	}](t, h.mustRun("", "import-firefox"))
+	if got.Imported != 1 || len(got.Workspaces) != 1 || got.Workspaces[0].WorkspaceURL != "https://zeta.slack.com" {
+		t.Errorf("import-firefox printed %+v", got)
 	}
 	h.rt.Firefox = func(context.Context) (*authextract.Extracted, error) {
 		e := extraction("Firefox")

@@ -13,9 +13,21 @@ import (
 	"github.com/maelvls/slackcli/internal/slackapi"
 )
 
-// okResult is the output of commands that have nothing else to report.
-type okResult struct {
-	OK bool `json:"ok"`
+// messageResult is the output of the commands that change one message,
+// like "channel mark" and "later": the message, by channel ID and ts.
+type messageResult struct {
+	OK        bool   `json:"ok"`
+	ChannelID string `json:"channel_id"`
+	TS        string `json:"ts"`
+}
+
+// reactResult is the output of "react add" and "react remove". Already is
+// set when the message was already as asked (the reaction was there for
+// "add", absent for "remove"): a retry after a timeout succeeds.
+type reactResult struct {
+	messageResult
+	Name    string `json:"name"`
+	Already bool   `json:"already,omitempty"`
 }
 
 const messageTargetLong = `<target> is a Slack message URL, or a channel (#name, name, channel ID or
@@ -37,7 +49,7 @@ text. Text with links, mentions or formatting is sent as rich_text blocks,
 because Slack leaves the links of an edited message's plain text unlinked.
 
 With --blocks, pass "" as <text> to send the blocks alone. Prints
-{"ok": true}.
+{ok, channel_id, ts}: the message edited.
 
 Refused in safe mode (--safe-mode or %s=1).`, messageTargetLong, appinfo.EnvName("SAFE_MODE")),
 		Args: cobra.ExactArgs(2),
@@ -80,15 +92,15 @@ Refused in safe mode (--safe-mode or %s=1).`, messageTargetLong, appinfo.EnvName
 				params["blocks"] = []any{}
 			}
 
-			_, err = cmdutil.WithTarget(ctx, c.rt, target, func(loc cmdutil.Located) (struct{}, error) {
+			channelID, err := cmdutil.WithTarget(ctx, c.rt, target, func(loc cmdutil.Located) (string, error) {
 				params["channel"] = loc.ChannelID
 				_, err := loc.Client.API(ctx, "chat.update", params)
-				return struct{}{}, explainMutationError(err, "edit", loc.ChannelID, ts)
+				return loc.ChannelID, explainMutationError(err, "edit", loc.ChannelID, ts)
 			})
 			if err != nil {
 				return err
 			}
-			return c.rt.Print(okResult{OK: true})
+			return c.rt.Print(messageResult{OK: true, ChannelID: channelID, TS: ts})
 		},
 	}
 	cmdutil.AddTargetWorkspaceFlag(cmd, &workspace)
@@ -107,7 +119,8 @@ func (c *command) newDelete() *cobra.Command {
 
 %s
 
-Prints {"ok": true}. Refused in safe mode (--safe-mode or %s=1).`, messageTargetLong, appinfo.EnvName("SAFE_MODE")),
+Prints {ok, channel_id, ts}: the message deleted.
+Refused in safe mode (--safe-mode or %s=1).`, messageTargetLong, appinfo.EnvName("SAFE_MODE")),
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if err := c.rt.CheckSafeMode("message delete"); err != nil {
@@ -118,14 +131,14 @@ Prints {"ok": true}. Refused in safe mode (--safe-mode or %s=1).`, messageTarget
 			if err != nil {
 				return err
 			}
-			_, err = cmdutil.WithTarget(ctx, c.rt, target, func(loc cmdutil.Located) (struct{}, error) {
+			channelID, err := cmdutil.WithTarget(ctx, c.rt, target, func(loc cmdutil.Located) (string, error) {
 				_, err := loc.Client.API(ctx, "chat.delete", map[string]any{"channel": loc.ChannelID, "ts": ts})
-				return struct{}{}, explainMutationError(err, "delete", loc.ChannelID, ts)
+				return loc.ChannelID, explainMutationError(err, "delete", loc.ChannelID, ts)
 			})
 			if err != nil {
 				return err
 			}
-			return c.rt.Print(okResult{OK: true})
+			return c.rt.Print(messageResult{OK: true, ChannelID: channelID, TS: ts})
 		},
 	}
 	cmdutil.AddTargetWorkspaceFlag(cmd, &workspace)
@@ -181,7 +194,10 @@ func (c *command) newReactAction(action, method, short, emojiUse string) *cobra.
 emoji goes by its name. Write the "-1" emoji as :-1: (a bare -1 is read as
 a flag).
 
-Prints {"ok": true}. Not covered by safe mode.`, short, messageTargetLong, emojiUse),
+Prints {ok, channel_id, ts, name}: the message and the emoji name. When the
+message was already as asked (the reaction is there for "add", absent for
+"remove"), the command still succeeds, with "already": true and a note in
+"hints": a retry after a timeout is safe. Not covered by safe mode.`, short, messageTargetLong, emojiUse),
 		Args: cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := cmd.Context()
@@ -193,26 +209,36 @@ Prints {"ok": true}. Not covered by safe mode.`, short, messageTargetLong, emoji
 			if err != nil {
 				return err
 			}
-			_, err = cmdutil.WithTarget(ctx, c.rt, target, func(loc cmdutil.Located) (struct{}, error) {
+			result, err := cmdutil.WithTarget(ctx, c.rt, target, func(loc cmdutil.Located) (reactResult, error) {
 				_, err := loc.Client.API(ctx, method, map[string]any{
 					"channel":   loc.ChannelID,
 					"timestamp": ts,
 					"name":      name,
 				})
+				result := reactResult{messageResult: messageResult{OK: true, ChannelID: loc.ChannelID, TS: ts}, Name: name}
+				// The message is already as asked: this is success, so
+				// that a retry after a timeout (the first attempt may
+				// have gone through) does not fail.
 				switch {
-				case slackapi.IsErrorCode(err, "already_reacted"):
-					err = fmt.Errorf("you already reacted with :%s: to message %s: %w", name, ts, err)
-				case slackapi.IsErrorCode(err, "no_reaction"):
-					err = fmt.Errorf("you have no :%s: reaction on message %s to remove: %w", name, ts, err)
+				case action == "add" && slackapi.IsErrorCode(err, "already_reacted"):
+					result.Already, err = true, nil
+				case action == "remove" && slackapi.IsErrorCode(err, "no_reaction"):
+					result.Already, err = true, nil
 				case slackapi.IsErrorCode(err, "invalid_name"):
 					err = fmt.Errorf("Slack does not know the emoji :%s: (custom emoji must exist in this workspace): %w", name, err)
 				}
-				return struct{}{}, err
+				return result, err
 			})
 			if err != nil {
 				return err
 			}
-			return c.rt.Print(okResult{OK: true})
+			switch {
+			case result.Already && action == "add":
+				c.rt.ResultHintf("you had already reacted with :%s: to this message: nothing changed", name)
+			case result.Already:
+				c.rt.ResultHintf("you had no :%s: reaction on this message: nothing changed", name)
+			}
+			return c.rt.Print(result)
 		},
 	}
 	cmdutil.AddTargetWorkspaceFlag(cmd, &workspace)
