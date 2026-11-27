@@ -4,7 +4,6 @@ import (
 	"cmp"
 	"context"
 	"encoding/json"
-	"maps"
 	"os"
 	"sync"
 	"time"
@@ -171,7 +170,19 @@ func (n *Names) Remember(client *slackapi.Client, channelID, name string) {
 			delete(entries, id)
 		}
 	}
-	maps.Copy(entries, n.fetched)
+	// Writing again every name this invocation learnt makes up for an
+	// update lost when the lock could not be had. Not one the file has a
+	// newer copy of (another invocation refreshed it since), nor one the
+	// file no longer keeps.
+	for id, mine := range n.fetched {
+		if mine.age(now) >= nameCacheKeep {
+			delete(n.fetched, id)
+			continue
+		}
+		if theirs, ok := entries[id]; !ok || theirs.FetchedAt <= mine.FetchedAt {
+			entries[id] = mine
+		}
+	}
 	data, err := json.MarshalIndent(nameCacheFile{Version: nameCacheVersion, Entries: entries}, "", "  ")
 	if err != nil {
 		return

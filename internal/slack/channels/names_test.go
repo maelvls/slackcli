@@ -504,3 +504,45 @@ func TestNamesStaleRejectsFutureEntries(t *testing.T) {
 		t.Errorf("Stale = %q, want nothing past nameCacheKeep", got)
 	}
 }
+
+// A long-running invocation writes what it learnt each time it learns a
+// new name. That must not undo a refresh another invocation made since,
+// nor bring back what the file stopped keeping.
+func TestNamesWritesKeepNewerEntries(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	now := t0
+	watch := NewNames(NamesOptions{CacheDir: dir, Now: func() time.Time { return now }})
+	if _, err := watch.Lookup(ctx, namesServer().client(), "C0GENERAL1"); err != nil {
+		t.Fatal(err)
+	}
+
+	// An hour later, another invocation refreshes it after a rename.
+	renamed := &recorder{serve: func(string, map[string]any) (map[string]any, error) {
+		return map[string]any{"channel": map[string]any{"id": "C0GENERAL1", "name": "renamed"}}, nil
+	}}
+	if _, err := NewNames(NamesOptions{CacheDir: dir, Now: at(t0.Add(time.Hour)), ForceRefresh: true}).Lookup(ctx, renamed.client(), "C0GENERAL1"); err != nil {
+		t.Fatal(err)
+	}
+	// Then the long-running one learns another name.
+	now = t0.Add(2 * time.Hour)
+	if _, err := watch.Lookup(ctx, namesServer().client(), "C0RANDOM01"); err != nil {
+		t.Fatal(err)
+	}
+	if e := loadNames(namesFile(t, dir))["C0GENERAL1"]; e.Name != "renamed" {
+		t.Errorf("C0GENERAL1 = %+v, want the refreshed name", e)
+	}
+
+	// Past nameCacheKeep, its old names are dropped, not written again.
+	now = t0.Add(time.Hour + nameCacheKeep + time.Minute)
+	if _, err := watch.Lookup(ctx, namesServer().client(), "C0OTHER001"); err != nil {
+		t.Fatal(err)
+	}
+	entries := loadNames(namesFile(t, dir))
+	if _, ok := entries["C0GENERAL1"]; ok {
+		t.Errorf("C0GENERAL1 written back past nameCacheKeep: %+v", entries)
+	}
+	if entries["C0RANDOM01"].Name == "" || entries["C0OTHER001"].Name == "" {
+		t.Errorf("entries = %+v", entries)
+	}
+}
