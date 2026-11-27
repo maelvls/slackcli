@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/maelvls/slackcli/internal/appinfo"
 	"github.com/maelvls/slackcli/internal/jsonx"
 	"github.com/maelvls/slackcli/internal/slackapi"
 )
@@ -34,6 +35,9 @@ type ListResult struct {
 	// NextCursor is set when there are more pages: pass it as
 	// ListOptions.Cursor.
 	NextCursor string `json:"next_cursor"`
+	// Incomplete says that drafts.list had more drafts than it returned,
+	// so that scheduled messages may be missing, with no way to get them.
+	Incomplete bool `json:"-"`
 }
 
 // Message is a pending scheduled message.
@@ -61,7 +65,9 @@ func UnixSeconds(v any) int64 {
 var unixBoundRe = regexp.MustCompile(`^\d+(\.\d+)?$`)
 
 // List returns one page of the messages the user has scheduled
-// (chat.scheduledMessages.list).
+// (chat.scheduledMessages.list). When Slack refuses that method to a
+// browser session, as it does, the scheduled messages are the scheduled
+// drafts of the session instead, all on one page (see listDrafts).
 func List(ctx context.Context, client *slackapi.Client, opts ListOptions) (ListResult, error) {
 	params := map[string]any{}
 	set := func(key, val string) {
@@ -85,6 +91,9 @@ func List(ctx context.Context, client *slackapi.Client, opts ListOptions) (ListR
 	}
 
 	resp, err := client.API(ctx, "chat.scheduledMessages.list", params)
+	if slackapi.IsErrorCode(err, "not_allowed_token_type") && client.Auth().IsBrowser() {
+		return listDrafts(ctx, client, opts)
+	}
 	if err != nil {
 		return ListResult{}, fmt.Errorf("listing scheduled messages: %w", err)
 	}
@@ -104,11 +113,21 @@ func List(ctx context.Context, client *slackapi.Client, opts ListOptions) (ListR
 // Cancel deletes a pending scheduled message
 // (chat.deleteScheduledMessage). channelID must be the conversation the
 // message was scheduled in.
+//
+// With a browser session, the ID of a scheduled draft ("Dr…", which List
+// prints for that session) cancels the draft instead (see cancelDraft).
 func Cancel(ctx context.Context, client *slackapi.Client, channelID, scheduledMessageID string) error {
+	if client.Auth().IsBrowser() && isDraftID(scheduledMessageID) {
+		return cancelDraft(ctx, client, channelID, scheduledMessageID)
+	}
 	_, err := client.API(ctx, "chat.deleteScheduledMessage", map[string]any{
 		"channel":              channelID,
 		"scheduled_message_id": scheduledMessageID,
 	})
+	if slackapi.IsErrorCode(err, "not_allowed_token_type") && client.Auth().IsBrowser() {
+		return fmt.Errorf(`Slack refuses chat.deleteScheduledMessage, which cancels an ID like %s, to a browser session: cancel it with the token that scheduled it (SLACK_TOKEN=xoxb-/xoxp-…). With this session, "%s message scheduled list" prints the messages scheduled in the Slack client, with "Dr…" IDs that this command cancels: %w`,
+			scheduledMessageID, appinfo.Name, err)
+	}
 	if slackapi.IsErrorCode(err, "invalid_scheduled_message_id") {
 		return fmt.Errorf("no pending scheduled message %s in channel %s: it was already sent or cancelled, is due within 60 seconds (too late to cancel), or was scheduled in another channel (list scheduled messages to check its channel_id): %w",
 			scheduledMessageID, channelID, err)
