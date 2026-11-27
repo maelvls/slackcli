@@ -58,7 +58,9 @@ func (t *transport) RoundTrip(req *http.Request) (*http.Response, error) {
 	case resp.StatusCode >= 300 && resp.StatusCode <= 399 && !t.followsRedirects:
 		e.Error = "redirect"
 	}
-	if resp.Body == nil || resp.Body == http.NoBody {
+	// An empty body (http.NoBody) is wrapped too: a redirect without one
+	// may still be refused (RefuseRedirect) before it is closed.
+	if resp.Body == nil {
 		e.DurationMS = time.Since(start).Milliseconds()
 		Record(e)
 		return resp, nil
@@ -115,6 +117,25 @@ func (b *recordingBody) finish(class string) {
 	}
 	b.entry.DurationMS = time.Since(b.start).Milliseconds()
 	Record(b.entry)
+}
+
+// RefuseRedirect marks resp, a redirect answered through Transport that
+// the caller's CheckRedirect refuses to follow (next.Response), as the
+// failure "redirect": the request it was part of fails. net/http closes
+// its body afterwards, which writes the line.
+func RefuseRedirect(resp *http.Response) {
+	if resp == nil {
+		return
+	}
+	b, ok := resp.Body.(*recordingBody)
+	if !ok {
+		return
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if !b.done && b.entry.Error == "" {
+		b.entry.Error = "redirect"
+	}
 }
 
 // retryAfterSeconds reads a Retry-After header, in seconds or as an HTTP

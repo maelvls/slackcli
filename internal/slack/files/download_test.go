@@ -10,8 +10,10 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/maelvls/slackcli/internal/appinfo"
+	"github.com/maelvls/slackcli/internal/audit"
 	"github.com/maelvls/slackcli/internal/slackapi"
 	"github.com/maelvls/slackcli/internal/testenv"
 )
@@ -445,6 +447,22 @@ func TestDownloadRedirects(t *testing.T) {
 	})
 
 	t.Run("loops are cut", func(t *testing.T) {
+		log := filepath.Join(t.TempDir(), "audit.jsonl")
+		t.Setenv("SLACKCLI_AUDIT_LOG", log)
+		t.Cleanup(func() {
+			// Each hop is a line; the refused one is the failure
+			// "redirect", the followed ones are not failures.
+			entries, _, err := audit.Read(log, time.Time{})
+			if err != nil || len(entries) != maxRedirects {
+				t.Fatalf("%d audit lines, want %d: %v", len(entries), maxRedirects, err)
+			}
+			for i, e := range entries {
+				last := i == len(entries)-1
+				if e.Status != 302 || e.Failed() != last || (last && e.Error != "redirect") {
+					t.Errorf("hop %d = %+v", i, e)
+				}
+			}
+		})
 		tr := &transport{serve: func(*http.Request) (*http.Response, error) {
 			resp := response(302, "", "")
 			resp.Header.Set("Location", "https://files.slack.com/files/a.txt")

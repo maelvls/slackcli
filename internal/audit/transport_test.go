@@ -70,6 +70,45 @@ func TestTransportRecordsTheWholeTransfer(t *testing.T) {
 	}
 }
 
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+// A redirect the caller refuses is the failure "redirect", even when it
+// has no body; the ones it follows are not failures.
+func TestRefusedRedirectIsAFailure(t *testing.T) {
+	path := useLog(t)
+	base := roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		h := http.Header{"Location": {"/again"}}
+		return &http.Response{StatusCode: 302, Header: h, Body: http.NoBody, Request: r}, nil
+	})
+	hc := &http.Client{
+		Transport: Transport(base, "files.download", true),
+		CheckRedirect: func(next *http.Request, via []*http.Request) error {
+			if len(via) >= 2 {
+				RefuseRedirect(next.Response)
+				return http.ErrNotSupported
+			}
+			return nil
+		},
+	}
+	if resp, err := hc.Get("https://files.slack.com/x"); err == nil {
+		resp.Body.Close()
+		t.Fatal("the redirect should be refused")
+	}
+	lines := readLines(t, path)
+	if len(lines) != 2 {
+		t.Fatalf("%d lines, want 2: %+v", len(lines), lines)
+	}
+	if e := lines[0]; e.Failed() {
+		t.Errorf("followed redirect = %+v, want no failure", e)
+	}
+	if e := lines[1]; e.Error != "redirect" || !e.Failed() {
+		t.Errorf("refused redirect = %+v, want the failure \"redirect\"", e)
+	}
+	RefuseRedirect(nil) // no panic
+}
+
 func TestRetryAfterSeconds(t *testing.T) {
 	now := time.Date(2026, 11, 27, 12, 0, 0, 0, time.UTC)
 	for h, want := range map[string]float64{
