@@ -208,11 +208,21 @@ func TestNamesClockMovedBackwards(t *testing.T) {
 		t.Fatal(err)
 	}
 	rec := namesServer()
-	if _, err := NewNames(NamesOptions{CacheDir: dir, Now: at(t0)}).Lookup(ctx, rec.client(), "C0GENERAL1"); err != nil || len(rec.calls) != 1 {
+	names := NewNames(NamesOptions{CacheDir: dir, Now: at(t0)})
+	if _, err := names.Lookup(ctx, rec.client(), "C0GENERAL1"); err != nil || len(rec.calls) != 1 {
 		t.Errorf("%d calls, %v: a name from the future was served", len(rec.calls), err)
 	}
 	if e := loadNames(namesFile(t, dir))["C0GENERAL1"]; e.FetchedAt != t0.UnixMilli() {
 		t.Errorf("entry = %+v, want it dated now", e)
+	}
+	// The same instance forgets the name from the future too: the name it
+	// just looked up is fresh, and is its stale fallback.
+	again := namesServer()
+	if _, err := names.Lookup(ctx, again.client(), "C0GENERAL1"); err != nil || len(again.calls) != 0 {
+		t.Errorf("%d calls, %v: the refreshed name was not kept in memory", len(again.calls), err)
+	}
+	if e := names.entries["C0GENERAL1"]; e.FetchedAt != t0.UnixMilli() {
+		t.Errorf("in memory: %+v, want the refreshed name", e)
 	}
 }
 
@@ -656,5 +666,83 @@ func TestNamesWritesPickUpNewerNames(t *testing.T) {
 	}
 	if got := watch.Stale(nil, "C0GENERAL1"); got != "renamed" {
 		t.Errorf("Stale = %q, want the name refreshed by the other invocation", got)
+	}
+}
+
+// The invariants of namesPolicy, wherever a name is: in the file, in the
+// memory of a Names (read from the file), or among the names it learnt
+// and writes again. A fresh name is shown without a call; a stale one only
+// as a fallback; one dated in the future or past nameCacheKeep never, and
+// it is neither kept nor written; a live lookup always replaces it.
+func TestNamesPolicyEverywhere(t *testing.T) {
+	ctx := context.Background()
+	now := t0.Add(60 * 24 * time.Hour)
+	states := []struct {
+		name          string
+		at            time.Time
+		fresh, usable bool
+	}{
+		{"fresh", now.Add(-time.Hour), true, true},
+		{"stale", now.Add(-48 * time.Hour), false, true},
+		{"future", now.Add(time.Hour), false, false},
+		{"expired", now.Add(-nameCacheKeep - time.Hour), false, false},
+	}
+	write := func(t *testing.T, dir string, entries map[string]nameEntry) {
+		t.Helper()
+		data, _ := json.Marshal(nameCacheFile{Version: nameCacheVersion, Entries: entries})
+		if err := os.WriteFile(namesFile(t, dir), data, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, st := range states {
+		target := nameEntry{FetchedAt: st.at.UnixMilli(), Name: "cached"}
+
+		t.Run("file/"+st.name, func(t *testing.T) {
+			dir := t.TempDir()
+			write(t, dir, map[string]nameEntry{"C0TARGET01": target})
+			NewNames(NamesOptions{CacheDir: dir, WorkspaceURL: "https://test.slack.com", Now: at(now)}).Remember(nil, "C0OTHER001", "other", now)
+			_, kept := loadNames(namesFile(t, dir))["C0TARGET01"]
+			if kept != st.usable {
+				t.Errorf("kept in the file = %v, want %v", kept, st.usable)
+			}
+		})
+
+		t.Run("memory/"+st.name, func(t *testing.T) {
+			dir := t.TempDir()
+			write(t, dir, map[string]nameEntry{"C0TARGET01": target})
+			names := NewNames(NamesOptions{CacheDir: dir, WorkspaceURL: "https://test.slack.com", Now: at(now)})
+			if got, want := names.Stale(nil, "C0TARGET01"), map[bool]string{true: "cached"}[st.usable]; got != want {
+				t.Errorf("Stale = %q, want %q", got, want)
+			}
+			rec := namesServer()
+			if _, err := names.Lookup(ctx, rec.client(), "C0TARGET01"); err != nil {
+				t.Fatal(err)
+			}
+			if called := len(rec.calls) > 0; called == st.fresh {
+				t.Errorf("asked Slack = %v for a %s name", called, st.name)
+			}
+			// After a live lookup, it is what this Names shows.
+			if !st.fresh {
+				if got := names.Stale(nil, "C0TARGET01"); got != "chan-C0TARGET01" {
+					t.Errorf("after a live lookup, Stale = %q", got)
+				}
+				again := namesServer()
+				if _, _ = names.Lookup(ctx, again.client(), "C0TARGET01"); len(again.calls) != 0 {
+					t.Errorf("the live name was not kept in memory")
+				}
+			}
+		})
+
+		t.Run("replay/"+st.name, func(t *testing.T) {
+			dir := t.TempDir()
+			names := NewNames(NamesOptions{CacheDir: dir, WorkspaceURL: "https://test.slack.com", Now: at(now)})
+			names.open(nil)
+			names.fetched["C0TARGET01"] = target
+			names.Remember(nil, "C0OTHER001", "other", now)
+			_, written := loadNames(namesFile(t, dir))["C0TARGET01"]
+			if written != st.usable {
+				t.Errorf("written again = %v, want %v", written, st.usable)
+			}
+		})
 	}
 }

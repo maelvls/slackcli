@@ -51,18 +51,14 @@ type cacheFile struct {
 	Entries map[string]cacheEntry `json:"entries"`
 }
 
-// fresh reports whether e may still be served at now. An entry dated in
-// the future (clock moved backwards) is not trusted: it would otherwise
-// never expire.
-func (e cacheEntry) fresh(now time.Time) bool {
-	age := now.Sub(time.UnixMilli(e.FetchedAt))
-	return age >= 0 && age < CacheTTL
-}
+// usersPolicy decides whether a cached user is fresh, stale or to be
+// discarded, and which of two copies wins (see cachefile.Policy). It has
+// no retention limit of its own: a write keeps only the fresh users, so a
+// stale one only lasts until the next write.
+var usersPolicy = cachefile.Policy{TTL: CacheTTL}
 
-// future reports whether e is dated after now: the clock moved backwards.
-func (e cacheEntry) future(now time.Time) bool {
-	return time.UnixMilli(e.FetchedAt).After(now)
-}
+// Fetched is when the batch that got e started (cachefile.Entry).
+func (e cacheEntry) Fetched() int64 { return e.FetchedAt }
 
 // ResolveByID returns the users with the given IDs, keyed by ID. Values
 // that are not user IDs are ignored, as are users that cannot be fetched
@@ -97,7 +93,7 @@ func ResolveByID(ctx context.Context, client *slackapi.Client, userIDs []string,
 
 	var missing []string
 	for _, id := range ids {
-		if e, ok := cached[id]; ok && !opts.ForceRefresh && e.fresh(now) {
+		if e, ok := cached[id]; ok && !opts.ForceRefresh && usersPolicy.State(e.FetchedAt, now) == cachefile.Fresh {
 			out[id] = e.User
 			continue
 		}
@@ -118,15 +114,14 @@ func ResolveByID(ctx context.Context, client *slackapi.Client, userIDs []string,
 		return nil, err
 	}
 	if skipped, rateLimit := limited.Skipped(); skipped > 0 {
-		// A stale entry beats a bare ID, but not one dated in the future
-		// (the clock moved backwards), which is no more trusted here than
-		// as a fresh entry.
+		// A stale entry beats a bare ID, but not one to be discarded
+		// (dated in the future: the clock moved backwards).
 		bare := 0
 		for _, id := range missing {
 			if _, fetched := out[id]; fetched {
 				continue
 			}
-			if e, ok := cached[id]; ok && !e.future(now) {
+			if e, ok := cached[id]; ok && usersPolicy.State(e.FetchedAt, now) != cachefile.Discard {
 				out[id] = e.User
 			} else {
 				bare++
@@ -227,19 +222,12 @@ func storeCache(path string, fetched map[string]CompactUser, fetchedAt time.Time
 	defer cachefile.Lock(path)()
 	now := clock()
 	entries := loadCache(path)
-	for id, e := range entries {
-		if !e.fresh(now) {
-			delete(entries, id)
-		}
-	}
+	cachefile.Prune(usersPolicy, entries, now, cachefile.Fresh)
+	// A user another invocation fetched after this batch started (a
+	// --refresh-users while this one was fetching) wins: this batch's copy
+	// may be the older profile.
 	for id, user := range fetched {
-		// A user another invocation fetched after this batch started (a
-		// --refresh-users while this one was fetching) is kept: this
-		// batch's copy may be the older profile. On a tie, this one wins.
-		if old, ok := entries[id]; ok && old.FetchedAt > fetchedAt.UnixMilli() {
-			continue
-		}
-		entries[id] = cacheEntry{FetchedAt: fetchedAt.UnixMilli(), User: user}
+		cachefile.Merge(usersPolicy, entries, id, cacheEntry{FetchedAt: fetchedAt.UnixMilli(), User: user}, now)
 	}
 	data, err := json.MarshalIndent(cacheFile{Version: cacheVersion, Entries: entries}, "", "  ")
 	if err != nil {

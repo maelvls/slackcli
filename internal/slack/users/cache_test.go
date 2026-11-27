@@ -637,3 +637,78 @@ func TestResolveByIDRateLimitedIgnoresFutureEntries(t *testing.T) {
 		t.Errorf("warnings = %q, want the user reported missing", list)
 	}
 }
+
+// The invariants of usersPolicy, wherever a user is: in the file (a write
+// keeps only fresh users) and in the users read from it at the start of
+// ResolveByID (a fresh one is served without a call, a stale one only
+// after a rate limit, one dated in the future never). The users cache has
+// no set of users written again: each write has only its own batch.
+func TestUsersPolicyEverywhere(t *testing.T) {
+	now := t0.Add(60 * 24 * time.Hour)
+	states := []struct {
+		name          string
+		at            time.Time
+		fresh, usable bool
+	}{
+		{"fresh", now.Add(-time.Hour), true, true},
+		{"stale", now.Add(-48 * time.Hour), false, true},
+		{"future", now.Add(time.Hour), false, false},
+		// No retention limit of its own: an old user is stale until the
+		// next write drops it.
+		{"old", now.Add(-40 * 24 * time.Hour), false, true},
+	}
+	write := func(t *testing.T, dir string, at time.Time) {
+		t.Helper()
+		data, _ := json.Marshal(cacheFile{Version: cacheVersion, Entries: map[string]cacheEntry{
+			"U0TARGET01": {FetchedAt: at.UnixMilli(), User: CompactUser{ID: "U0TARGET01", Name: "cached"}},
+		}})
+		if err := os.WriteFile(cachePath(dir, "https://test.slack.com"), data, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	limited := &recorder{serve: func(method string, _ map[string]any) (map[string]any, error) {
+		return nil, &slackapi.RateLimitError{Method: method, RetryAfter: time.Minute}
+	}}
+	for _, st := range states {
+		t.Run("file/"+st.name, func(t *testing.T) {
+			dir := t.TempDir()
+			write(t, dir, st.at)
+			if _, err := ResolveByID(context.Background(), infoServer().client(), []string{"U0OTHER001"}, ResolveOptions{CacheDir: dir, Now: at(now)}); err != nil {
+				t.Fatal(err)
+			}
+			_, kept := loadCache(cachePath(dir, "https://test.slack.com"))["U0TARGET01"]
+			if kept != st.fresh {
+				t.Errorf("kept in the file = %v, want %v", kept, st.fresh)
+			}
+		})
+
+		t.Run("read/"+st.name, func(t *testing.T) {
+			dir := t.TempDir()
+			write(t, dir, st.at)
+			rec := infoServer()
+			got, err := ResolveByID(context.Background(), rec.client(), []string{"U0TARGET01"}, ResolveOptions{CacheDir: dir, Now: at(now)})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if called := len(rec.calls) > 0; called == st.fresh {
+				t.Errorf("asked Slack = %v for a %s user", called, st.name)
+			}
+			if st.fresh && got["U0TARGET01"].Name != "cached" {
+				t.Errorf("got %+v", got)
+			}
+
+			// Rate limited: the fallback.
+			write(t, dir, st.at)
+			if st.fresh {
+				return
+			}
+			got, err = ResolveByID(context.Background(), limited.client(), []string{"U0TARGET01"}, ResolveOptions{CacheDir: dir, Now: at(now)})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if served := got["U0TARGET01"].Name == "cached"; served != st.usable {
+				t.Errorf("served after a rate limit = %v, want %v", served, st.usable)
+			}
+		})
+	}
+}

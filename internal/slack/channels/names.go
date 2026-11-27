@@ -27,6 +27,11 @@ const (
 	nameCacheKeep = 30 * 24 * time.Hour
 )
 
+// namesPolicy decides, for the file and the memory alike, whether a name
+// is fresh, stale or to be discarded, and which of two copies wins (see
+// cachefile.Policy).
+var namesPolicy = cachefile.Policy{TTL: NameCacheTTL, Keep: nameCacheKeep}
+
 // NamesOptions tunes NewNames.
 type NamesOptions struct {
 	// WorkspaceURL keys the cache; "" means the WorkspaceURL of the client
@@ -79,16 +84,8 @@ type nameCacheFile struct {
 	Entries map[string]nameEntry `json:"entries"`
 }
 
-// age returns how long ago e was fetched. An entry dated in the future
-// (the clock moved backwards) is not trusted: it would otherwise never
-// expire, so it is given an age past every limit.
-func (e nameEntry) age(now time.Time) time.Duration {
-	age := now.Sub(time.UnixMilli(e.FetchedAt))
-	if age < 0 {
-		return time.Duration(1<<63 - 1)
-	}
-	return age
-}
+// Fetched is when the lookup that got e started (cachefile.Entry).
+func (e nameEntry) Fetched() int64 { return e.FetchedAt }
 
 // NewNames returns a cache of conversation names. The file is read on the
 // first lookup.
@@ -110,7 +107,7 @@ func (n *Names) Lookup(ctx context.Context, client *slackapi.Client, channelID s
 		n.mu.Lock()
 		e, ok := n.entries[channelID]
 		n.mu.Unlock()
-		if ok && e.age(n.now()) < NameCacheTTL {
+		if ok && namesPolicy.State(e.FetchedAt, n.now()) == cachefile.Fresh {
 			return e.Name, nil
 		}
 	}
@@ -134,10 +131,10 @@ func (n *Names) Now() time.Time {
 	return n.now()
 }
 
-// Stale returns the cached name of a conversation, expired or not, ""
-// when there is none: for a conversation whose lookup was rate limited, a
-// stale name is better than none. A name older than the file keeps
-// (nameCacheKeep), or dated in the future, is no name.
+// Stale returns the cached name of a conversation, fresh or stale, ""
+// when there is none or it is to be discarded (dated in the future, or
+// older than nameCacheKeep): for a conversation whose lookup was rate
+// limited, a stale name is better than none.
 func (n *Names) Stale(client *slackapi.Client, channelID string) string {
 	if n == nil {
 		return ""
@@ -146,7 +143,7 @@ func (n *Names) Stale(client *slackapi.Client, channelID string) string {
 	n.mu.Lock()
 	e, ok := n.entries[channelID]
 	n.mu.Unlock()
-	if !ok || e.age(n.now()) >= nameCacheKeep {
+	if !ok || namesPolicy.State(e.FetchedAt, n.now()) == cachefile.Discard {
 		return ""
 	}
 	return e.Name
@@ -154,9 +151,10 @@ func (n *Names) Stale(client *slackapi.Client, channelID string) string {
 
 // Remember caches a name learnt from Slack by a call made for more than
 // the name (Lookup, for the read cursor) that started at fetchedAt (see
-// Now). An empty name is not cached. Of two names of a conversation, the
-// one whose lookup started last wins, in the file as in memory, whichever
-// was written last.
+// Now). An empty name is not cached. The file, the names this Names
+// shows and the ones it learnt are all merged by namesPolicy: what is to
+// be discarded is dropped, and of two names of a conversation, the one
+// whose lookup started last wins, whichever was written last.
 //
 // The file is written at once, not when the command ends, so that a
 // long-running command (watch, inbox wait) shares what it learns. It is
@@ -169,57 +167,42 @@ func (n *Names) Remember(client *slackapi.Client, channelID, name string, fetche
 	}
 	n.open(client)
 	e := nameEntry{FetchedAt: fetchedAt.UnixMilli(), Name: name}
+	// n.mu keeps the lookups of this invocation from writing at the same
+	// time, the file lock those of other invocations.
 	n.mu.Lock()
 	defer n.mu.Unlock()
-	keepNewer(n.entries, channelID, e)
-	keepNewer(n.fetched, channelID, e)
+	if n.path != "" {
+		defer cachefile.Lock(n.path)()
+	}
+	// The clock is read once the locks are held: while this call looked
+	// the name up and waited, other invocations may have committed names
+	// dated after fetchedAt, which must not look like names from the
+	// future.
+	now := n.now()
+	cachefile.Prune(namesPolicy, n.entries, now, cachefile.Stale)
+	cachefile.Prune(namesPolicy, n.fetched, now, cachefile.Stale)
+	cachefile.Merge(namesPolicy, n.entries, channelID, e, now)
+	cachefile.Merge(namesPolicy, n.fetched, channelID, e, now)
 	if n.path == "" {
 		return
 	}
-	// n.mu keeps the lookups of this invocation from writing at the same
-	// time, the file lock those of other invocations.
-	defer cachefile.Lock(n.path)()
-	// Expiry is judged by the clock read now: while this call looked the
-	// name up and waited for the locks, other invocations may have
-	// committed names dated after fetchedAt, which must not look like
-	// names from the future and be pruned.
-	now := n.now()
 	entries := loadNames(n.path)
-	for id, old := range entries {
-		if old.age(now) >= nameCacheKeep {
-			delete(entries, id)
-		}
-	}
+	cachefile.Prune(namesPolicy, entries, now, cachefile.Stale)
 	// Writing again every name this invocation learnt makes up for an
-	// update lost when the lock could not be had. Not one the file has a
-	// newer copy of (another invocation refreshed it since), nor one the
-	// file no longer keeps.
+	// update lost when the lock could not be had.
 	for id, mine := range n.fetched {
-		if mine.age(now) >= nameCacheKeep {
-			delete(n.fetched, id)
-			continue
-		}
-		keepNewer(entries, id, mine)
+		cachefile.Merge(namesPolicy, entries, id, mine, now)
 	}
 	// What other invocations refreshed since this one read the file is
 	// what it shows from now on (a long-running watch or inbox wait).
 	for id, theirs := range entries {
-		keepNewer(n.entries, id, theirs)
+		cachefile.Merge(namesPolicy, n.entries, id, theirs, now)
 	}
 	data, err := json.MarshalIndent(nameCacheFile{Version: nameCacheVersion, Entries: entries}, "", "  ")
 	if err != nil {
 		return
 	}
 	cachefile.Write(n.path, append(data, '\n'))
-}
-
-// keepNewer puts e in entries unless they hold a name of id whose lookup
-// started later. On a tie, e wins: it is the same lookup, or one that
-// started in the same millisecond.
-func keepNewer(entries map[string]nameEntry, id string, e nameEntry) {
-	if old, ok := entries[id]; !ok || old.FetchedAt <= e.FetchedAt {
-		entries[id] = e
-	}
 }
 
 // open reads the cache file of the workspace, once.
