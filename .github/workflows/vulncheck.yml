@@ -15,9 +15,11 @@ on:
 permissions:
   contents: read
 
+# As in ci.yml: a new push to a PR cancels the run it supersedes, and every
+# push to main, weekly or manual run (its run ID) finishes.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: true
 
 jobs:
   govulncheck:
