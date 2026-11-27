@@ -490,3 +490,17 @@ func TestResolveIDIgnoresTheNamesCache(t *testing.T) {
 		t.Errorf("calls %v, want a live lookup", rec.methods())
 	}
 }
+
+// A name dated in the future (the clock moved backwards) is no more
+// trusted as a stale fallback than as a fresh one.
+func TestNamesStaleRejectsFutureEntries(t *testing.T) {
+	dir := t.TempDir()
+	NewNames(NamesOptions{CacheDir: dir, WorkspaceURL: "https://test.slack.com", Now: at(t0.Add(time.Hour))}).Remember(nil, "C0GENERAL1", "general")
+	if got := NewNames(NamesOptions{CacheDir: dir, Now: at(t0)}).Stale(namesServer().client(), "C0GENERAL1"); got != "" {
+		t.Errorf("Stale = %q, want nothing from the future", got)
+	}
+	// Nor is a name older than what the file keeps.
+	if got := NewNames(NamesOptions{CacheDir: dir, Now: at(t0.Add(time.Hour + nameCacheKeep))}).Stale(namesServer().client(), "C0GENERAL1"); got != "" {
+		t.Errorf("Stale = %q, want nothing past nameCacheKeep", got)
+	}
+}

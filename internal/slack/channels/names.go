@@ -122,17 +122,22 @@ func (n *Names) Lookup(ctx context.Context, client *slackapi.Client, channelID s
 	return name, err
 }
 
-// Stale returns the cached name of a conversation however old it is, ""
+// Stale returns the cached name of a conversation, expired or not, ""
 // when there is none: for a conversation whose lookup was rate limited, a
-// stale name is better than none.
+// stale name is better than none. A name older than the file keeps
+// (nameCacheKeep), or dated in the future, is no name.
 func (n *Names) Stale(client *slackapi.Client, channelID string) string {
 	if n == nil {
 		return ""
 	}
 	n.open(client)
 	n.mu.Lock()
-	defer n.mu.Unlock()
-	return n.entries[channelID].Name
+	e, ok := n.entries[channelID]
+	n.mu.Unlock()
+	if !ok || e.age(n.now()) >= nameCacheKeep {
+		return ""
+	}
+	return e.Name
 }
 
 // Remember caches a name learnt from Slack by a call made for more than
