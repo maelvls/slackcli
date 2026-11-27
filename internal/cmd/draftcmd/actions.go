@@ -23,6 +23,9 @@ type listOptions struct {
 	// limit is 0 when --limit was not given: all that Slack returns.
 	limit int
 	all   bool
+	// refreshNames looks the channel names up again instead of using the
+	// cache.
+	refreshNames bool
 }
 
 type listOutput struct {
@@ -57,6 +60,7 @@ func draftsClient(ctx context.Context, rt *clictx.Context, workspace string) (*s
 
 func list(ctx context.Context, rt *clictx.Context, opts listOptions) (listOutput, error) {
 	workspace := rt.EffectiveWorkspace(opts.workspace)
+	names := channels.NewNames(channels.NamesOptions{ForceRefresh: opts.refreshNames})
 	return clictx.WithAutoRefresh(ctx, rt, func() (listOutput, error) {
 		client, err := draftsClient(ctx, rt, workspace)
 		if err != nil {
@@ -66,7 +70,7 @@ func list(ctx context.Context, rt *clictx.Context, opts listOptions) (listOutput
 		if err != nil {
 			return listOutput{}, err
 		}
-		if err := nameChannels(ctx, client, found); err != nil {
+		if err := nameChannels(ctx, client, names, found); err != nil {
 			return listOutput{}, err
 		}
 		return listOutput{OK: true, Drafts: found, Count: len(found)}, nil
@@ -79,10 +83,10 @@ const maxNameLookups = 8
 // nameChannels fills in the display name of every destination. A name is
 // an enrichment (see package enrich): a draft whose channel cannot be read
 // is listed without one, and a rate limit stops the lookups with a
-// warning. Only what no further call would survive is an error: a
-// cancelled command, or credentials that are no longer valid (which the
-// caller then refreshes).
-func nameChannels(ctx context.Context, client *slackapi.Client, found []drafts.Draft) error {
+// warning, unless the cache has a stale name for every channel left. Only
+// what no further call would survive is an error: a cancelled command, or
+// credentials that are no longer valid (which the caller then refreshes).
+func nameChannels(ctx context.Context, client *slackapi.Client, cache *channels.Names, found []drafts.Draft) error {
 	var ids []string
 	for _, d := range found {
 		for _, dest := range d.Destinations {
@@ -98,24 +102,38 @@ func nameChannels(ctx context.Context, client *slackapi.Client, found []drafts.D
 		fatal   error
 		limited enrich.Gate
 		sem     = make(chan struct{}, maxNameLookups)
+		// staleNames counts the channels whose lookup was rate limited
+		// but which a stale cached name was found for.
+		staleNames int
 	)
+	stale := func(id string) {
+		if name := cache.Stale(client, id); name != "" {
+			mu.Lock()
+			names[id] = name
+			staleNames++
+			mu.Unlock()
+		}
+	}
 	for _, id := range ids {
 		wg.Go(func() {
 			sem <- struct{}{}
 			defer func() { <-sem }()
 			if limited.Closed() {
+				stale(id)
 				return
 			}
-			name, err := channels.LookupName(ctx, client, id)
-			mu.Lock()
-			defer mu.Unlock()
+			name, err := cache.Lookup(ctx, client, id)
 			switch {
 			case err == nil:
+				mu.Lock()
 				names[id] = name
+				mu.Unlock()
 			case enrich.MustAbort(ctx, err):
+				mu.Lock()
 				fatal = cmp.Or(fatal, err)
-			default:
-				limited.Failed(err)
+				mu.Unlock()
+			case limited.Failed(err):
+				stale(id)
 			}
 		})
 	}
@@ -123,9 +141,9 @@ func nameChannels(ctx context.Context, client *slackapi.Client, found []drafts.D
 	if fatal != nil {
 		return fmt.Errorf("looking up the channels of the drafts: %w", fatal)
 	}
-	if skipped, rateLimit := limited.Skipped(); skipped > 0 {
+	if skipped, rateLimit := limited.Skipped(); skipped > staleNames {
 		enrich.Warnf(ctx, "the names of %d of %d channels were not looked up (%v): their drafts are listed with the channel ID only; %s",
-			skipped, len(ids), enrich.Cause(rateLimit), enrich.Hint())
+			skipped-staleNames, len(ids), enrich.Cause(rateLimit), enrich.Hint())
 	}
 	for i := range found {
 		for j := range found[i].Destinations {

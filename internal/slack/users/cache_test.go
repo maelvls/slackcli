@@ -194,7 +194,7 @@ func TestResolveByIDKeysCacheByWorkspace(t *testing.T) {
 	}
 
 	// By default the client's workspace is the key (NewFake: test.slack.com).
-	if workspaceKey("https://test.slack.com") == "" || cachePath(dir, "") != "" {
+	if cachePath(dir, "https://test.slack.com") == "" || cachePath(dir, "") != "" {
 		t.Error("unexpected workspace keys")
 	}
 	rec := infoServer()
@@ -445,6 +445,15 @@ func TestCacheConcurrentWriters(t *testing.T) {
 	if entries["U0SHARED00"].User.ID != "U0SHARED00" {
 		t.Errorf("shared user missing from the cache (%d entries)", len(entries))
 	}
+	// Every invocation keeps what it fetched: the read, merge and write of
+	// the file are one step across processes.
+	for w := range 8 {
+		for i := range 10 {
+			if id := fmt.Sprintf("U%04d%04d", w, i); entries[id].User.ID != id {
+				t.Errorf("%s lost (%d entries)", id, len(entries))
+			}
+		}
+	}
 	if left := cacheFiles(t, dir); len(left) != 1 {
 		t.Errorf("temporary files left behind: %v", left)
 	}
@@ -538,5 +547,168 @@ func TestResolveByIDRateLimitedReturnsWhatItHas(t *testing.T) {
 	}
 	if len(cacheFiles(t, fresh)) != 1 {
 		t.Errorf("what was fetched before the rate limit was not cached")
+	}
+}
+
+// Fetching the users and waiting for the lock take time, during which
+// another invocation may commit users: by the time this one reads the
+// file, they are newer than when it started. They must not be taken for
+// users from the future and pruned.
+func TestResolveByIDKeepsWhatWasCommittedMeanwhile(t *testing.T) {
+	dir := t.TempDir()
+	// Committed a minute after this invocation started.
+	if _, err := ResolveByID(context.Background(), infoServer().client(), []string{"U22222222"}, ResolveOptions{CacheDir: dir, Now: at(t0.Add(time.Minute))}); err != nil {
+		t.Fatal(err)
+	}
+	// The clock reads t0 when it starts, two minutes later once it writes.
+	var calls atomic.Int32
+	clock := func() time.Time {
+		if calls.Add(1) == 1 {
+			return t0
+		}
+		return t0.Add(2 * time.Minute)
+	}
+	if _, err := ResolveByID(context.Background(), infoServer().client(), []string{"U11111111"}, ResolveOptions{CacheDir: dir, Now: clock}); err != nil {
+		t.Fatal(err)
+	}
+	entries := loadCache(cachePath(dir, "https://test.slack.com"))
+	if e := entries["U22222222"]; e.FetchedAt != t0.Add(time.Minute).UnixMilli() {
+		t.Errorf("U22222222 = %+v, want the entry committed meanwhile", e)
+	}
+	// Stamped when it was fetched.
+	if e := entries["U11111111"]; e.FetchedAt != t0.UnixMilli() {
+		t.Errorf("U11111111 = %+v", e)
+	}
+}
+
+// A batch that started before a --refresh-users of the same user but
+// ends after it must not win: its profile may be the older one.
+func TestResolveByIDOlderBatchDoesNotOverwriteANewerRefresh(t *testing.T) {
+	dir := t.TempDir()
+	server := func(display string) *recorder {
+		return &recorder{serve: func(_ string, params map[string]any) (map[string]any, error) {
+			id := params["user"].(string)
+			return map[string]any{"user": member(id, "handle", "profile", profile("display_name", display))}, nil
+		}}
+	}
+	// The older batch starts at t0 and writes at t0+2m; the refresh runs
+	// at t0+1m, while the batch is fetching.
+	var calls atomic.Int32
+	clock := func() time.Time {
+		if calls.Add(1) == 1 {
+			return t0
+		}
+		return t0.Add(2 * time.Minute)
+	}
+	old := server("old")
+	serve := old.serve
+	old.serve = func(method string, params map[string]any) (map[string]any, error) {
+		if _, err := ResolveByID(context.Background(), server("new").client(), []string{"U11111111"},
+			ResolveOptions{CacheDir: dir, ForceRefresh: true, Now: at(t0.Add(time.Minute))}); err != nil {
+			t.Error(err)
+		}
+		return serve(method, params)
+	}
+	if _, err := ResolveByID(context.Background(), old.client(), []string{"U11111111"}, ResolveOptions{CacheDir: dir, ForceRefresh: true, Now: clock}); err != nil {
+		t.Fatal(err)
+	}
+	e := loadCache(cachePath(dir, "https://test.slack.com"))["U11111111"]
+	if e.User.DisplayName != "new" || e.FetchedAt != t0.Add(time.Minute).UnixMilli() {
+		t.Errorf("U11111111 = %+v, want the refresh", e)
+	}
+}
+
+// A user dated in the future (the clock moved backwards) is no more
+// trusted as a stale fallback after a rate limit than as a fresh entry.
+func TestResolveByIDRateLimitedIgnoresFutureEntries(t *testing.T) {
+	dir := t.TempDir()
+	if _, err := ResolveByID(context.Background(), infoServer().client(), []string{"U11111111"}, ResolveOptions{CacheDir: dir, Now: at(t0.Add(time.Hour))}); err != nil {
+		t.Fatal(err)
+	}
+	limited := &recorder{serve: func(method string, _ map[string]any) (map[string]any, error) {
+		return nil, &slackapi.RateLimitError{Method: method, RetryAfter: time.Minute}
+	}}
+	ctx, warnings := enrich.Collect(context.Background())
+	got, err := ResolveByID(ctx, limited.client(), []string{"U11111111"}, ResolveOptions{CacheDir: dir, Now: at(t0)})
+	if err != nil || len(got) != 0 {
+		t.Errorf("got %+v, %v, want no user", got, err)
+	}
+	if list := warnings.List(); len(list) != 1 {
+		t.Errorf("warnings = %q, want the user reported missing", list)
+	}
+}
+
+// The invariants of usersPolicy, wherever a user is: in the file (a write
+// keeps only fresh users) and in the users read from it at the start of
+// ResolveByID (a fresh one is served without a call, a stale one only
+// after a rate limit, one dated in the future never). The users cache has
+// no set of users written again: each write has only its own batch.
+func TestUsersPolicyEverywhere(t *testing.T) {
+	now := t0.Add(60 * 24 * time.Hour)
+	states := []struct {
+		name          string
+		at            time.Time
+		fresh, usable bool
+	}{
+		{"fresh", now.Add(-time.Hour), true, true},
+		{"stale", now.Add(-48 * time.Hour), false, true},
+		{"future", now.Add(time.Hour), false, false},
+		// No retention limit of its own: an old user is stale until the
+		// next write drops it.
+		{"old", now.Add(-40 * 24 * time.Hour), false, true},
+	}
+	write := func(t *testing.T, dir string, at time.Time) {
+		t.Helper()
+		data, _ := json.Marshal(cacheFile{Version: cacheVersion, Entries: map[string]cacheEntry{
+			"U0TARGET01": {FetchedAt: at.UnixMilli(), User: CompactUser{ID: "U0TARGET01", Name: "cached"}},
+		}})
+		if err := os.WriteFile(cachePath(dir, "https://test.slack.com"), data, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	limited := &recorder{serve: func(method string, _ map[string]any) (map[string]any, error) {
+		return nil, &slackapi.RateLimitError{Method: method, RetryAfter: time.Minute}
+	}}
+	for _, st := range states {
+		t.Run("file/"+st.name, func(t *testing.T) {
+			dir := t.TempDir()
+			write(t, dir, st.at)
+			if _, err := ResolveByID(context.Background(), infoServer().client(), []string{"U0OTHER001"}, ResolveOptions{CacheDir: dir, Now: at(now)}); err != nil {
+				t.Fatal(err)
+			}
+			_, kept := loadCache(cachePath(dir, "https://test.slack.com"))["U0TARGET01"]
+			if kept != st.fresh {
+				t.Errorf("kept in the file = %v, want %v", kept, st.fresh)
+			}
+		})
+
+		t.Run("read/"+st.name, func(t *testing.T) {
+			dir := t.TempDir()
+			write(t, dir, st.at)
+			rec := infoServer()
+			got, err := ResolveByID(context.Background(), rec.client(), []string{"U0TARGET01"}, ResolveOptions{CacheDir: dir, Now: at(now)})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if called := len(rec.calls) > 0; called == st.fresh {
+				t.Errorf("asked Slack = %v for a %s user", called, st.name)
+			}
+			if st.fresh && got["U0TARGET01"].Name != "cached" {
+				t.Errorf("got %+v", got)
+			}
+
+			// Rate limited: the fallback.
+			write(t, dir, st.at)
+			if st.fresh {
+				return
+			}
+			got, err = ResolveByID(context.Background(), limited.client(), []string{"U0TARGET01"}, ResolveOptions{CacheDir: dir, Now: at(now)})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if served := got["U0TARGET01"].Name == "cached"; served != st.usable {
+				t.Errorf("served after a rate limit = %v, want %v", served, st.usable)
+			}
+		})
 	}
 }

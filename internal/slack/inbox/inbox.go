@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/maelvls/slackcli/internal/jsonx"
+	"github.com/maelvls/slackcli/internal/slack/channels"
 	"github.com/maelvls/slackcli/internal/slack/enrich"
 	"github.com/maelvls/slackcli/internal/slack/messages"
 	"github.com/maelvls/slackcli/internal/slack/slacktext"
@@ -126,6 +127,9 @@ type Options struct {
 	NoThreads bool
 	// CacheDir overrides where the user cache lives (tests).
 	CacheDir string
+	// Names gives the names of the channels a Waiter looks up; nil looks
+	// each one up.
+	Names *channels.Names
 }
 
 // latestMargin is how far past the local clock fetcher.latest is put.

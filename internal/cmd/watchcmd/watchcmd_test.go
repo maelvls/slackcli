@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http/httptest"
 	"path/filepath"
@@ -191,6 +192,27 @@ func TestWatch(t *testing.T) {
 	}
 }
 
+// The names of the channels are cached on disk: the next watch takes them
+// from there, and prints the same lines.
+func TestWatchCachesChannelNames(t *testing.T) {
+	h := newHarness(t)
+	first := h.run(4)
+	again := h.run(4)
+	if !reflect.DeepEqual(again, first) {
+		t.Errorf("from the cache:\n%s\nlooked up:\n%s", strings.Join(again, "\n"), strings.Join(first, "\n"))
+	}
+	// Only the channel Slack gives no name for is asked for again.
+	infos := 0
+	for _, c := range h.calls {
+		if c == "conversations.info" {
+			infos++
+		}
+	}
+	if infos != 1 {
+		t.Errorf("API calls = %v, want a single conversations.info", h.calls)
+	}
+}
+
 func TestWatchTextAndFilters(t *testing.T) {
 	h := newHarness(t)
 
@@ -302,6 +324,48 @@ func TestNamesAreNotLookedUpWithEachMessage(t *testing.T) {
 	}
 	if got := incomplete.List(); len(got) != 0 {
 		t.Errorf("warnings left for the end of the command: %v", got)
+	}
+}
+
+// While the lookups are paused after a rate limit, the names the disk
+// cache has are still printed: those that have expired as well as those
+// of conversations not seen yet in this run.
+func TestCachedNamesArePrintedWhileLookupsArePaused(t *testing.T) {
+	testenv.Isolate(t)
+	var infos atomic.Int32
+	client := slackapi.NewFake(func(_ context.Context, method string, _ map[string]any) (map[string]any, error) {
+		if method == "conversations.info" {
+			infos.Add(1)
+		}
+		return nil, &slackapi.RateLimitError{Method: method, RetryAfter: 30 * time.Second}
+	})
+	dayAgo := time.Now().Add(-channels.NameCacheTTL - time.Hour)
+	expired := channels.NewNames(channels.NamesOptions{Now: func() time.Time { return dayAgo }})
+	expired.Remember(client, "C0STALE001", "stale", dayAgo)
+	channels.NewNames(channels.NamesOptions{}).Remember(client, "C0FRESH001", "fresh", time.Now())
+
+	var stdout, stderr bytes.Buffer
+	w := &watcher{
+		rt: &clictx.Context{Stdout: &stdout, Stderr: &stderr}, client: client, text: true, maxBodyChars: 100,
+		channelNames: map[string]string{}, userNames: map[string]string{}, unnamedUntil: map[string]time.Time{},
+		names: channels.NewNames(channels.NamesOptions{}),
+	}
+	for i, channel := range []string{"C0STALE001", "C0STALE001", "C0FRESH001"} {
+		raw := map[string]any{"type": "message", "channel": channel, "channel_type": "channel", "bot_id": "B000000001", "username": "bot",
+			"text": "m", "ts": fmt.Sprintf("1700000001.00010%d", i)}
+		if err := w.handle(context.Background(), raw); err != nil {
+			t.Fatal(err)
+		}
+	}
+	lines := strings.Split(strings.TrimSpace(stdout.String()), "\n")
+	for i, want := range []string{"#stale ", "#stale ", "#fresh "} {
+		if i >= len(lines) || !strings.Contains(lines[i], want) {
+			t.Errorf("line %d = %q, want %q in it\n%s", i, lines[min(i, len(lines)-1)], want, stdout.String())
+		}
+	}
+	// One lookup, the rate-limited one; the fresh name needs none.
+	if n := infos.Load(); n != 1 {
+		t.Errorf("%d conversations.info calls, want 1", n)
 	}
 }
 

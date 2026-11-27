@@ -190,6 +190,38 @@ func TestWaitThreads(t *testing.T) {
 	}
 }
 
+// The name of the channel of an item is cached on disk: the next "inbox
+// wait" takes it from there.
+func TestWaitCachesChannelNames(t *testing.T) {
+	mention := tsAgo(-time.Minute)
+	events := []string{event(`"channel":"C000000002","channel_type":"channel","user":"U000000008","text":"<@U000000001> look","ts":"` + mention + `"`)}
+	h := waitHarness(t, events, func(method string, params map[string]any) map[string]any {
+		switch method {
+		case "conversations.replies":
+			return map[string]any{"messages": []any{map[string]any{"ts": mention, "user": "U000000008", "text": "<@U000000001> look"}}}
+		case "conversations.history":
+			return map[string]any{"messages": []any{}}
+		}
+		return nil
+	})
+	var printed []string
+	for run := range 2 {
+		before := h.count("conversations.info")
+		out := h.runWait(t)
+		items := out["items"].([]any)
+		if len(items) != 1 || items[0].(map[string]any)["channel_name"] != "general" {
+			t.Fatalf("run %d printed %s", run, h.stdout.String())
+		}
+		printed = append(printed, h.stdout.String())
+		if n := h.count("conversations.info") - before; n != []int{1, 0}[run] {
+			t.Errorf("run %d: %d conversations.info calls", run, n)
+		}
+	}
+	if printed[0] != printed[1] {
+		t.Errorf("from the cache:\n%s\nlooked up:\n%s", printed[1], printed[0])
+	}
+}
+
 func TestWaitCatchUp(t *testing.T) {
 	after, dmTS, oldTS := tsAgo(2*time.Hour), tsAgo(time.Hour), tsAgo(3*time.Hour)
 	h := waitHarness(t, nil, func(method string, params map[string]any) map[string]any {
