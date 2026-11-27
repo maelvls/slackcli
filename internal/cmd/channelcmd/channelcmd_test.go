@@ -101,6 +101,14 @@ func (h *harness) serve(method string, params map[string]any) map[string]any {
 		return map[string]any{"members": []any{map[string]any{"id": "U000000123", "name": "alice"}}}
 	case "users.lookupByEmail":
 		return map[string]any{"user": map[string]any{"id": "U000000456", "name": "carol"}}
+	case "search.modules.people":
+		// Browser credentials look an email up with the people search,
+		// whose items have no email, then users.info.
+		return map[string]any{"items": []any{map[string]any{"id": "U000000456", "username": "carol"}}}
+	case "users.info":
+		if params["user"] == "U000000456" {
+			return map[string]any{"user": map[string]any{"id": "U000000456", "name": "carol", "profile": map[string]any{"email": "carol@example.com"}}}
+		}
 	case "search.messages":
 		return map[string]any{"messages": map[string]any{"matches": []any{map[string]any{"channel": map[string]any{"id": "C000000001", "name": "general"}}}}}
 	case "conversations.create":

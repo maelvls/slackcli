@@ -63,6 +63,10 @@ func TestMustAbortRequired(t *testing.T) {
 		"wrapped auth error": fmt.Errorf("wrapped: %w", authError()),
 		"rate limit":         rateLimit("conversations.replies"),
 		"wrapped rate limit": fmt.Errorf("wrapped: %w", rateLimit("conversations.replies")),
+		// The code some methods answer in the body of an HTTP 200, for an
+		// *APIError that did not come from the client (which gives it as
+		// a *RateLimitError).
+		"ratelimited code": fmt.Errorf("wrapped: %w", &slackapi.APIError{Method: "conversations.replies", Code: RateLimitedCode}),
 	} {
 		if !MustAbortRequired(ctx, err) {
 			t.Errorf("%s does not abort a required lookup", name)
@@ -163,6 +167,10 @@ func TestCauseLeavesTheAdviceToHint(t *testing.T) {
 		if warning := fmt.Sprintf("3 of 9 users were not resolved (%s): %s", cause, Hint()); strings.Count(warning, env) != 1 {
 			t.Errorf("the warning names %s %d times, want once: %q", env, strings.Count(warning, env), warning)
 		}
+	}
+	coded := fmt.Errorf("looking up U1: %w", &slackapi.APIError{Method: "users.info", Code: RateLimitedCode})
+	if got := Cause(coded); got != "Slack API call users.info was rate limited" {
+		t.Errorf("Cause(%v) = %q", coded, got)
 	}
 	if got := Cause(errors.New("boom")); got != "boom" {
 		t.Errorf("Cause of another error = %q, want it as it is", got)

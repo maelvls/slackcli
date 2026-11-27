@@ -38,8 +38,8 @@ func addScheduledListFlags(cmd *cobra.Command, o *scheduledListOptions) {
 	f.StringVar(&o.channel, "channel", "", "Only messages scheduled in this conversation: "+scheduledChannelHelp)
 	f.StringVar(&o.oldest, "oldest", "", "Only messages scheduled to post after this Unix timestamp (seconds)")
 	f.StringVar(&o.latest, "latest", "", "Only messages scheduled to post before this Unix timestamp (seconds)")
-	f.StringVar(&o.cursor, "cursor", "", `Fetch the next page: the "next_cursor" of the previous output`)
-	f.IntVar(&o.limit, "limit", 0, "Max scheduled messages per page (positive integer; default: Slack's)")
+	f.StringVar(&o.cursor, "cursor", "", `Fetch the next page: the "next_cursor" of the previous output (app tokens only: a browser session gets everything at once)`)
+	f.IntVar(&o.limit, "limit", 0, "Max scheduled messages per page (positive integer; default: Slack's, or all with a browser session)")
 }
 
 func (c *command) newScheduled() *cobra.Command {
@@ -47,8 +47,9 @@ func (c *command) newScheduled() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "scheduled",
 		Short: "List or cancel pending scheduled messages",
-		Long: fmt.Sprintf(`List or cancel the messages you scheduled with
-"%[1]s message send --schedule/--schedule-in".
+		Long: fmt.Sprintf(`List or cancel pending scheduled messages: with a browser session, the
+ones scheduled in the Slack client; with an app token, the ones that token
+scheduled with "%[1]s message send --schedule/--schedule-in".
 
 "%[1]s message scheduled" is short for "%[1]s message scheduled list".`, appinfo.Name),
 		Args: cobra.NoArgs,
@@ -69,7 +70,17 @@ func (c *command) newScheduledList() *cobra.Command {
 Prints {ok, scheduled_messages: [{id, channel_id, post_at, date_created, text}],
 next_cursor}. "scheduled_messages" is [] when there are none. "id" and
 "channel_id" are what "scheduled cancel" needs; pass "next_cursor", when
-present, as --cursor to get the next page.`,
+present, as --cursor to get the next page.
+
+With an app token (xoxb-/xoxp-), the list is chat.scheduledMessages.list:
+the messages that token scheduled, not those scheduled in the Slack client.
+Slack refuses that method to a browser session (the default credentials):
+the list is then the messages scheduled in the Slack client, which are
+drafts with a send time ("id" is a draft ID, "Dr…"), read with drafts.list,
+soonest first. --channel, --oldest, --latest and --limit are applied to
+what drafts.list returns; there is no next_cursor and --cursor is refused.
+drafts.list returns at most 100 drafts: when Slack has more, "warnings"
+says that scheduled messages may be missing.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error { return c.runScheduledList(cmd, opts) },
 	}
@@ -118,6 +129,9 @@ func (c *command) runScheduledList(cmd *cobra.Command, opts scheduledListOptions
 	if err != nil {
 		return err
 	}
+	if result.Incomplete {
+		c.rt.Warnf("Slack has more drafts than the %d it returns at once, and gives no way to get the rest: scheduled messages may be missing from this list. The Slack client shows them all", scheduled.DraftsPageSize)
+	}
 	return cmdutil.PrintList(c.rt, result, "scheduled_messages")
 }
 
@@ -128,9 +142,15 @@ func (c *command) newScheduledCancel() *cobra.Command {
 		Short: "Cancel a pending scheduled message",
 		Long: `Cancel a pending scheduled message, so that it is never sent.
 
-<id> is the scheduled_message_id printed by "message send --schedule" (or the
-"id" printed by "message scheduled list"). Slack refuses to cancel a message
-due within the next 60 seconds.
+<id> is the "id" printed by "message scheduled list", or the
+scheduled_message_id printed by "message send --schedule". Slack refuses to
+cancel a message due within the next 60 seconds.
+
+With a browser session, a draft ID ("Dr…", which "list" prints for such a
+session) is cancelled by deleting that draft (drafts.delete), as the Slack
+client does; a draft that has no send time, or is scheduled in another
+conversation than --channel, is refused. Any other ID, and every ID with an
+app token, goes to chat.deleteScheduledMessage.
 
 Prints {ok, channel_id, scheduled_message_id}. Refused in safe mode: a human
 must decide that a message they scheduled is not to be sent after all.`,

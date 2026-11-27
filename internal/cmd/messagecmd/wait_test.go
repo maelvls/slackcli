@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/maelvls/slackcli/internal/clictx"
+	"github.com/maelvls/slackcli/internal/slack/messages"
 	"github.com/maelvls/slackcli/internal/slackapi"
 )
 
@@ -185,7 +186,12 @@ func TestWaitPagesBackThroughABusyChannel(t *testing.T) {
 		newest[i] = msg(fmt.Sprintf("1770170000.%06d", full-i), "U3", "chatter")
 	}
 	h.fixtures["conversations.history"] = func(p map[string]any) (map[string]any, error) {
-		if p["latest"] == nil {
+		// The first call has a latest too, in the future: with oldest
+		// alone, Slack would walk forward from it.
+		if p["latest"] != "1770170000.000001" {
+			if latest, _ := p["latest"].(string); messages.CompareTS(latest, "1770170000.001000") <= 0 {
+				t.Errorf("first history call = %+v, want a latest after the newest message", p)
+			}
 			return map[string]any{"ok": true, "messages": newest, "has_more": true}, nil
 		}
 		return map[string]any{"ok": true, "messages": []any{msg("1770165200.000001", "U2", "the answer")}}, nil
