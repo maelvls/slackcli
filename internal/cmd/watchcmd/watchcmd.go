@@ -249,15 +249,16 @@ func (w *watcher) handle(ctx context.Context, raw map[string]any) error {
 	}
 
 	name, err := w.name(ctx, w.channelNames, ev.ChannelID, func() (string, error) {
-		name, err := w.names.Lookup(ctx, w.client, ev.ChannelID)
-		if enrich.IsRateLimit(err) {
-			// Better a stale name than none.
-			name = w.names.Stale(w.client, ev.ChannelID)
-		}
-		return name, err
+		return w.names.Lookup(ctx, w.client, ev.ChannelID)
 	})
 	if err != nil {
 		return err
+	}
+	if name == "" && time.Now().Before(w.namesPausedUntil) {
+		// Slack rate limited the lookups, this one or an earlier one, and
+		// w.name asks for none until the pause ends: what the disk cache
+		// has, expired or not, is better than no name.
+		name = w.names.Stale(w.client, ev.ChannelID)
 	}
 	ev.ChannelName = name
 
