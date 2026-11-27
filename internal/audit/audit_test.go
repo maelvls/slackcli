@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"sync"
@@ -91,7 +92,7 @@ func TestRecordWritesOneSafeLine(t *testing.T) {
 		"https://acme.slack.com/archives/C0123ABCD/p1700000000123456?thread_ts=1.2&cid=x",
 		"https://files.slack.com/files-pri/T0123ABCD-F0123ABCD/payroll.pdf",
 		"xoxc-1234-abcd", "-n5",
-	})
+	}, testFlags)
 	ok := true
 	Record(Entry{Kind: KindAPI, Host: "acme.slack.com", Method: "chat.postMessage", Status: 200, OK: &ok, DurationMS: 12, Attempt: 1})
 
@@ -135,21 +136,92 @@ func TestRecordWritesOneSafeLine(t *testing.T) {
 	}
 }
 
+// testFlags knows the flags of the tests: those that take a value and
+// the others.
+func testFlags(name string, short bool) (known, takesValue bool) {
+	if short {
+		return name == "n" || name == "v", name == "n"
+	}
+	switch name {
+	case "thread-ts", "text", "limit":
+		return true, true
+	case "safe-mode", "force":
+		return true, false
+	}
+	return false, false
+}
+
+func knowsAll(string, bool) (bool, bool) { return true, false }
+
+func TestSanitizeArgsKeepsOnlyKnownFlags(t *testing.T) {
+	for _, tc := range []struct {
+		args, want []string
+	}{
+		// The value of a flag is a value, even when it looks like a flag.
+		{[]string{"--text", "--confidential acquisition details"}, []string{"--text", Placeholder}},
+		{[]string{"--text", "--force"}, []string{"--text", Placeholder}},
+		{[]string{"-n", "-v"}, []string{"-n", Placeholder}},
+		{[]string{"-n", "20"}, []string{"-n", "20"}},
+		// After "--", everything is positional.
+		{[]string{"C0123ABCD", "--", "--confidential acquisition details", "--force", "-v"}, []string{"C0123ABCD", "--", Placeholder, Placeholder, Placeholder}},
+		// Dash text that is no flag of the command.
+		{[]string{"--> see below", "--confidential", "-1 for me", "- item"}, []string{Placeholder, Placeholder, Placeholder, Placeholder}},
+		// A boolean flag takes no value: what follows is positional.
+		{[]string{"--force", "C0123ABCD", "-v", "secret"}, []string{"--force", "C0123ABCD", "-v", Placeholder}},
+		{[]string{"--text=--secret", "--limit=5", "-n5", "-n=5"}, []string{"--text", "--limit", "-n", "-n"}},
+		{[]string{"-5"}, []string{"-5"}},
+	} {
+		if got := SanitizeArgs("", tc.args, testFlags); !slices.Equal(got, tc.want) {
+			t.Errorf("SanitizeArgs(%q) = %q, want %q", tc.args, got, tc.want)
+		}
+	}
+	if got := SanitizeArgs("", []string{"--force", "--text"}, nil); !slices.Equal(got, []string{Placeholder, Placeholder}) {
+		t.Errorf("with no lookup: %q", got)
+	}
+}
+
+func TestExistingLogIsMadePrivate(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("no mode bits")
+	}
+	path := useLog(t)
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(path, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	Record(Entry{Kind: KindAPI, Method: "auth.test"})
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if perm := info.Mode().Perm(); perm != 0o600 {
+		t.Errorf("mode = %o, want 600", perm)
+	}
+	if n := len(readLines(t, path)); n != 1 {
+		t.Errorf("%d lines, want 1", n)
+	}
+}
+
 func TestSanitizeArgsLimitsTheLength(t *testing.T) {
 	args := make([]string, 50)
 	for i := range args {
 		args[i] = "--flag" + fmt.Sprint(i)
 	}
-	got := SanitizeArgs("", args)
+	got := SanitizeArgs("", args, knowsAll)
 	if len(got) != maxArgs+1 || got[maxArgs] != Placeholder+"+18" {
 		t.Errorf("got %d args, last %q", len(got), got[len(got)-1])
 	}
 	long := "--" + strings.Repeat("x", 500)
-	if got := SanitizeArgs("", []string{long}); len(got[0]) > maxArgLen+len(Placeholder) {
+	if got := SanitizeArgs("", []string{long}, knowsAll); len(got[0]) > maxArgLen+len(Placeholder) {
 		t.Errorf("a long argument is kept whole (%d bytes)", len(got[0]))
 	}
 	// A word of the command later on the line is not kept for that.
-	if got := SanitizeArgs("search", []string{"search", "search"}); !slices.Equal(got, []string{"search", Placeholder}) {
+	if got := SanitizeArgs("search", []string{"search", "search"}, nil); !slices.Equal(got, []string{"search", Placeholder}) {
 		t.Errorf("got %q", got)
 	}
 }
@@ -225,7 +297,7 @@ func TestRotation(t *testing.T) {
 
 func TestConcurrentWritesKeepLinesWhole(t *testing.T) {
 	path := useLog(t)
-	SetCommand("message list", []string{"message", "list", "C0123ABCD"})
+	SetCommand("message list", []string{"message", "list", "C0123ABCD"}, nil)
 	var wg sync.WaitGroup
 	for g := range 20 {
 		wg.Go(func() {
@@ -250,7 +322,7 @@ func TestTransportRecordsHostNotPath(t *testing.T) {
 		_, _ = w.Write([]byte("data"))
 	}))
 	t.Cleanup(srv.Close)
-	hc := &http.Client{Transport: Transport(nil, "files.download")}
+	hc := &http.Client{Transport: Transport(nil, "files.download", true)}
 	for _, p := range []string{"/files-pri/T1-F1/payroll.pdf?sig=abc", "/limited"} {
 		resp, err := hc.Get(srv.URL + p)
 		if err != nil {
@@ -259,7 +331,7 @@ func TestTransportRecordsHostNotPath(t *testing.T) {
 		resp.Body.Close()
 	}
 	// A request that gets no answer.
-	if resp, err := (&http.Client{Transport: Transport(nil, "files.upload")}).Get("http://127.0.0.1:1/x"); err == nil {
+	if resp, err := (&http.Client{Transport: Transport(nil, "files.upload", false)}).Get("http://127.0.0.1:1/x"); err == nil {
 		resp.Body.Close()
 	}
 
@@ -306,7 +378,7 @@ func TestTail(t *testing.T) {
 
 func BenchmarkRecord(b *testing.B) {
 	b.Setenv("SLACKCLI_AUDIT_LOG", filepath.Join(b.TempDir(), "audit.jsonl"))
-	SetCommand("message list", []string{"message", "list", "C0123ABCD", "--limit", "20"})
+	SetCommand("message list", []string{"message", "list", "C0123ABCD", "--limit", "20"}, testFlags)
 	b.Cleanup(Reset)
 	ok := true
 	for b.Loop() {

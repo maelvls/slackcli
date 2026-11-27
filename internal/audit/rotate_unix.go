@@ -20,3 +20,10 @@ func rotate(f *os.File, info os.FileInfo, path string) error {
 	defer syscall.Flock(fd, syscall.LOCK_UN)
 	return renameIfSame(info, path)
 }
+
+// lockShared takes a shared lock on f, which rotate's exclusive lock waits
+// for: no file is renamed while a line is being written to it. Closing f
+// releases it.
+func lockShared(f *os.File) error { return syscall.Flock(int(f.Fd()), syscall.LOCK_SH) }
+
+func unlock(f *os.File) { _ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN) }
