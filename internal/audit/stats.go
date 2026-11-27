@@ -117,12 +117,13 @@ type Count struct {
 	Errors int `json:"errors"`
 }
 
-// Source is a number of requests made by one command run from one parent
-// process.
+// Source is a number of requests made by one command run by one program.
 type Source struct {
-	Parent string `json:"parent"`
-	Cmd    string `json:"cmd"`
-	Count  int    `json:"count"`
+	// Program is the process that ran slackcli, looking through the
+	// shells and wrappers in between (see Program).
+	Program string `json:"program"`
+	Cmd     string `json:"cmd"`
+	Count   int    `json:"count"`
 	// Processes is how many slackcli processes those were.
 	Processes int `json:"processes"`
 }
@@ -164,7 +165,7 @@ type Stats struct {
 // counted but take no part in the time buckets.
 func Summarize(entries []Entry) Stats {
 	var s Stats
-	type key struct{ parent, cmd string }
+	type key struct{ program, cmd string }
 	methods := map[string]*Count{}
 	errs := map[string]*Count{}
 	hosts := map[string]*Count{}
@@ -200,10 +201,10 @@ func Summarize(entries []Entry) Stats {
 		if code := errorCode(e); code != "" {
 			bump(errs, code, true)
 		}
-		k := key{e.Parent, e.Cmd}
+		k := key{Program(e), e.Cmd}
 		src := sources[k]
 		if src == nil {
-			src = &Source{Parent: e.Parent, Cmd: e.Cmd}
+			src = &Source{Program: k.program, Cmd: e.Cmd}
 			sources[k] = src
 			sourcePIDs[k] = map[int]bool{}
 		}
@@ -239,8 +240,8 @@ func Summarize(entries []Entry) Stats {
 		if a.Count != b.Count {
 			return a.Count > b.Count
 		}
-		if a.Parent != b.Parent {
-			return a.Parent < b.Parent
+		if a.Program != b.Program {
+			return a.Program < b.Program
 		}
 		return a.Cmd < b.Cmd
 	})
@@ -249,6 +250,31 @@ func Summarize(entries []Entry) Stats {
 	}
 	sort.Slice(s.ByHour, func(i, j int) bool { return s.ByHour[i].Start < s.ByHour[j].Start })
 	return s
+}
+
+// wrappers are the programs that only run another one: shells, and the
+// commands that run a command under some condition. Program looks
+// through them.
+var wrappers = map[string]bool{
+	"sh": true, "bash": true, "zsh": true, "dash": true, "fish": true, "ksh": true,
+	"mksh": true, "ash": true, "csh": true, "tcsh": true, "busybox": true, "nu": true,
+	"env": true, "timeout": true, "gtimeout": true, "nohup": true, "nice": true,
+	"ionice": true, "time": true, "xargs": true, "sudo": true, "doas": true,
+	"script": true, "stdbuf": true, "caffeinate": true, "flock": true, "setsid": true,
+}
+
+// Program is the process an entry counts under in Stats.BySource: the
+// first of its parent and ancestors that is not a shell or a wrapper
+// (sh, bash, zsh, env, timeout, nohup…), else the direct parent. A daemon
+// that runs slackcli through "sh -c" is named, not "sh".
+func Program(e Entry) string {
+	for _, name := range append([]string{e.Parent}, e.Ancestors...) {
+		// A login shell is named "-zsh".
+		if base := strings.TrimPrefix(name, "-"); base != "" && !wrappers[base] {
+			return name
+		}
+	}
+	return e.Parent
 }
 
 // errorCode is what an entry is counted under in Stats.ByError: its error

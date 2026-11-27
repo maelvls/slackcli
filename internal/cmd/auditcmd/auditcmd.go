@@ -50,19 +50,30 @@ func newPathCommand(rt *clictx.Context) *cobra.Command {
 	return &cobra.Command{
 		Use:   "path",
 		Short: "Print where the audit log is",
-		Long: fmt.Sprintf(`Print {"path": …, "enabled": …}: the file the audit log is written
-to, and whether it is written (it is not when %s is
-off).`, appinfo.EnvName(audit.EnvSuffix)),
-		Example: fmt.Sprintf(`  tail -f "$(%s audit path | jq -r .path)"`, appinfo.Name),
+		Long: fmt.Sprintf(`Print the path of the file the audit log is written to, alone on its
+line. When the log is turned off (%s=off), say so
+on stderr and exit with code 1.`, appinfo.EnvName(audit.EnvSuffix)),
+		Example: fmt.Sprintf(`  tail -f "$(%s audit path)"`, appinfo.Name),
 		Args:    cobra.NoArgs,
 		RunE: func(*cobra.Command, []string) error {
 			path, enabled := audit.Path()
-			return rt.Print(struct {
-				Path    string `json:"path"`
-				Enabled bool   `json:"enabled"`
-			}{path, enabled})
+			if !enabled {
+				return disabledError(path)
+			}
+			_, err := fmt.Fprintln(rt.Stdout, path)
+			return err
 		},
 	}
+}
+
+// disabledError says why the audit log at path is not written.
+func disabledError(path string) error {
+	name, raw := appinfo.EnvSource(audit.EnvSuffix)
+	if raw == "" {
+		// Only a test binary leaves the log off without being told to.
+		return fmt.Errorf("the audit log is not written by this binary (a test): set %s to a path to write it", appinfo.EnvName(audit.EnvSuffix))
+	}
+	return fmt.Errorf("the audit log is turned off (%s=%s): nothing is written. Unset the variable to write it to %s", name, raw, path)
 }
 
 func newTailCommand(rt *clictx.Context) *cobra.Command {
@@ -118,8 +129,11 @@ Prints {"path", "since", "from", "to", "total", "processes", "errors",
 "by_host", "by_hour"}. processes is how many slackcli processes made the
 requests; peak_minute the most requests made in any 60 seconds, and when
 that minute started. by_method, by_error and by_host count the requests,
-and those that failed, per key; by_source per parent process and command,
-with how many processes that was; all sorted by count, highest first.
+and those that failed, per key; by_source per program and command, with
+how many processes that was; all sorted by count, highest first. The
+program is the first parent process of slackcli that is not a shell or a
+wrapper (sh, bash, zsh, env, timeout, nohup…), else the direct parent:
+the line itself, as "audit tail" prints it, keeps the direct parent.
 by_hour counts the requests per hour (UTC). Lines that could not be read
 are counted in "skipped".`,
 		Example: fmt.Sprintf(`  %s audit stats --since 1h`, appinfo.Name),

@@ -40,20 +40,18 @@ func writeLog(t *testing.T, lines ...string) string {
 
 func TestPath(t *testing.T) {
 	path := writeLog(t)
-	out, err := run(t, "path")
-	if err != nil {
-		t.Fatal(err)
-	}
-	want, _ := json.Marshal(struct {
-		Path    string `json:"path"`
-		Enabled bool   `json:"enabled"`
-	}{path, true})
-	if strings.TrimSpace(out) != string(want) {
-		t.Errorf("out = %s, want %s", out, want)
+	if out, err := run(t, "path"); err != nil || out != path+"\n" {
+		t.Errorf("path = %q, %v; want %q", out, err, path+"\n")
 	}
 	t.Setenv("SLACKCLI_AUDIT_LOG", "off")
-	if out, _ := run(t, "path"); !strings.Contains(out, `"enabled":false`) {
-		t.Errorf("off: %s", out)
+	out, err := run(t, "path")
+	if err == nil || out != "" || !strings.Contains(err.Error(), "SLACKCLI_AUDIT_LOG=off") {
+		t.Errorf("off: out %q, err %v", out, err)
+	}
+	// A test binary does not write the log unless told to.
+	t.Setenv("SLACKCLI_AUDIT_LOG", "")
+	if _, err := run(t, "path"); err == nil || !strings.Contains(err.Error(), "test") {
+		t.Errorf("unset in a test: %v", err)
 	}
 }
 
@@ -75,8 +73,8 @@ func TestStats(t *testing.T) {
 	t.Cleanup(func() { now = time.Now })
 	path := writeLog(t,
 		`{"ts":"2026-11-25T10:00:00Z","pid":9,"kind":"api","method":"too.old"}`,
-		`{"ts":"2026-11-27T11:10:00Z","pid":1,"parent":"node","cmd":"inbox","kind":"api","method":"search.messages","status":200,"ok":true}`,
-		`{"ts":"2026-11-27T11:10:01Z","pid":1,"parent":"node","cmd":"inbox","kind":"api","method":"search.messages","status":429,"rate_limited":true,"retry_after_s":30,"error":"ratelimited"}`,
+		`{"ts":"2026-11-27T11:10:00Z","pid":1,"parent":"bash","ancestors":["node"],"cmd":"inbox","kind":"api","method":"search.messages","status":200,"ok":true}`,
+		`{"ts":"2026-11-27T11:10:01Z","pid":1,"parent":"bash","ancestors":["node"],"cmd":"inbox","kind":"api","method":"search.messages","status":429,"rate_limited":true,"retry_after_s":30,"error":"ratelimited"}`,
 		`garbage`,
 	)
 	out, err := run(t, "stats", "--since", "24h")
@@ -90,7 +88,7 @@ func TestStats(t *testing.T) {
 	if got["path"] != path || got["since"] != "2026-11-26T12:00:00Z" || got["total"] != 2.0 || got["rate_limited"] != 1.0 || got["errors"] != 1.0 || got["skipped"] != 1.0 {
 		t.Errorf("stats = %s", out)
 	}
-	if !strings.Contains(out, `"by_source":[{"parent":"node","cmd":"inbox","count":2,"processes":1}]`) {
+	if !strings.Contains(out, `"by_source":[{"program":"node","cmd":"inbox","count":2,"processes":1}]`) {
 		t.Errorf("by_source: %s", out)
 	}
 

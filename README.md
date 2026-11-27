@@ -193,12 +193,14 @@ Every request slackcli makes to Slack is appended, as one JSON line, to `~/.conf
 
 A line has `ts`, `pid`, `ppid`, the names of the parent processes (`parent`, `ancestors`; macOS and Linux), `cmd` and `args`, `kind` (`api`, `file`, `websocket`), `host`, `method`, `status`, `ok`, `error`, `duration_ms`, `attempt`, `rate_limited` and `retry_after_s`. It holds no token, cookie, message or search query: of the arguments only the flag names, Slack IDs, timestamps, numbers and Slack URLs (without their query) are kept, everything else is `…`. Of a file request only the host is kept.
 
+In `audit stats`, `by_source` counts the requests per program and command; the program is the first parent process that is not a shell or a wrapper (`sh`, `bash`, `zsh`, `env`, `timeout`, `nohup`…), so that a daemon running slackcli through `sh -c` is named. `audit path` prints the bare path, and fails when the log is off.
+
 The file is created `0600` and moved to `audit.jsonl.1` once it reaches 20 MB. A failure to write it never fails a command. `SLACKCLI_AUDIT_LOG=<path>` writes it elsewhere and `SLACKCLI_AUDIT_LOG=off` turns it off.
 
 ```console
-$ slackcli audit stats --since 1h   # totals, per method, per parent process and command, per hour, peak minute, errors
+$ slackcli audit stats --since 1h   # totals, per method, per program and command, per hour, peak minute, errors
 $ slackcli audit tail -n 50 | jq -c 'select(.rate_limited)'
-$ tail -f "$(slackcli audit path | jq -r .path)"
+$ tail -f "$(slackcli audit path)"
 ```
 
 ## Environment variables

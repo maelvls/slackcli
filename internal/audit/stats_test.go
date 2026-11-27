@@ -15,7 +15,7 @@ func TestSummarize(t *testing.T) {
 	yes, no := true, false
 	at := func(s string) string { return "2026-11-27T" + s + "Z" }
 	entries := []Entry{
-		{TS: at("10:00:00"), PID: 1, Parent: "node", Cmd: "inbox", Method: "search.messages", Host: "a.slack.com", Status: 200, OK: &yes},
+		{TS: at("10:00:00"), PID: 1, Parent: "sh", Ancestors: []string{"node", "launchd"}, Cmd: "inbox", Method: "search.messages", Host: "a.slack.com", Status: 200, OK: &yes},
 		{TS: at("10:00:20"), PID: 1, Parent: "node", Cmd: "inbox", Method: "users.info", Host: "a.slack.com", Status: 200, OK: &yes},
 		{TS: at("10:00:40"), PID: 2, Parent: "node", Cmd: "inbox", Method: "search.messages", Host: "a.slack.com", Status: 429, RateLimited: true, RetryAfterS: 30, Error: "ratelimited"},
 		{TS: at("10:00:59.999"), PID: 3, Parent: "node", Cmd: "inbox", Method: "search.messages", Host: "a.slack.com", Status: 200, OK: &no, Error: "invalid_auth"},
@@ -46,9 +46,9 @@ func TestSummarize(t *testing.T) {
 		t.Errorf("by_method = %+v", s.ByMethod)
 	}
 	wantSources := []Source{
-		{Parent: "node", Cmd: "inbox", Count: 4, Processes: 3},
-		{Parent: "zsh", Cmd: "message get", Count: 2, Processes: 1},
-		{Parent: "zsh", Cmd: "message list", Count: 1, Processes: 1},
+		{Program: "node", Cmd: "inbox", Count: 4, Processes: 3},
+		{Program: "zsh", Cmd: "message get", Count: 2, Processes: 1},
+		{Program: "zsh", Cmd: "message list", Count: 1, Processes: 1},
 	}
 	if !reflect.DeepEqual(s.BySource, wantSources) {
 		t.Errorf("by_source = %+v", s.BySource)
@@ -71,6 +71,25 @@ func TestSummarize(t *testing.T) {
 
 	if empty := Summarize(nil); empty.Total != 0 || empty.PeakMinute.Count != 0 || empty.From != "" {
 		t.Errorf("Summarize(nil) = %+v", empty)
+	}
+}
+
+func TestProgramLooksThroughShellsAndWrappers(t *testing.T) {
+	for _, tc := range []struct {
+		parent    string
+		ancestors []string
+		want      string
+	}{
+		{"node", []string{"launchd"}, "node"},
+		{"sh", []string{"node", "launchd"}, "node"},
+		{"timeout", []string{"env", "bash", "-zsh", "kb-daemon", "launchd"}, "kb-daemon"},
+		{"zsh", []string{"-zsh", "bash"}, "zsh"}, // only shells: the direct parent
+		{"zsh", nil, "zsh"},
+		{"", nil, ""},
+	} {
+		if got := Program(Entry{Parent: tc.parent, Ancestors: tc.ancestors}); got != tc.want {
+			t.Errorf("Program(%q, %q) = %q, want %q", tc.parent, tc.ancestors, got, tc.want)
+		}
 	}
 }
 
