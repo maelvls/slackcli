@@ -384,7 +384,7 @@ func TestWaitRetriesARateLimitedFirstConnection(t *testing.T) {
 	if items := out["items"].([]any); len(items) != 1 || out["after"] != ts || connects.Load() != 2 {
 		t.Fatalf("printed %s after %d connections", h.stdout.String(), connects.Load())
 	}
-	if got := stderr.String(); !strings.Contains(got, "Cannot connect to Slack yet") || !strings.Contains(got, "ratelimited") {
+	if got := stderr.String(); !strings.Contains(got, "Cannot connect to Slack yet") || !strings.Contains(got, "rate limited") {
 		t.Errorf("stderr:\n%s", got)
 	}
 }
