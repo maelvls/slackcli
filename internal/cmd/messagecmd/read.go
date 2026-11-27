@@ -59,8 +59,14 @@ type listResult struct {
 	Messages  []messages.CompactMessage `json:"messages"`
 	// SystemMessagesHidden is the number of system messages (joins,
 	// leaves, topic changes …) left out of a channel's history.
-	SystemMessagesHidden int                          `json:"system_messages_hidden,omitempty"`
-	ReferencedUsers      map[string]users.CompactUser `json:"referenced_users"`
+	SystemMessagesHidden int `json:"system_messages_hidden,omitempty"`
+	// HasMore says that a channel's history stopped at --limit while
+	// older messages were left, with a hint on how to get them.
+	HasMore         bool                         `json:"has_more,omitempty"`
+	ReferencedUsers map[string]users.CompactUser `json:"referenced_users"`
+	// oldestTS is the ts of the oldest top-level message listed: the
+	// --latest that pages further back.
+	oldestTS string
 }
 
 func addReadFlags(cmd *cobra.Command, o *readOptions) {
@@ -207,12 +213,14 @@ started a thread, whose replies are not listed. List that thread to read
 them, or pass --expand-threads to get the replies of every thread listed,
 each after its first message. System messages (joins, leaves, topic changes …)
 are left out and counted in "system_messages_hidden", unless
---include-system is given. At most %d messages are returned per call; to page
-back, pass the ts of the oldest message received as --latest.
+--include-system is given. At most %d messages are returned per call
+(--limit); when older ones were left, "has_more" is true and a hint says how
+to get them: to page back, pass the ts of the oldest message received as
+--latest.
 
 Prints {channel_id, messages: [{channel_id, ts, time, thread_ts, reply_count,
 author: {user_id, bot_id, name}, content, files, reactions,
-forwarded_threads}], system_messages_hidden, referenced_users}, oldest
+forwarded_threads}], system_messages_hidden, has_more, referenced_users}, oldest
 message first, in the same shape for a channel and for a thread.
 "messages" is [] when there are none, with a hint in "hints". "time" is "ts"
 as a local date and time. "content" is Markdown. "thread_ts" is the root of
@@ -404,12 +412,25 @@ func (c *command) listHistory(ctx context.Context, target cmdutil.Target, opts l
 		if err != nil {
 			return listResult{}, err
 		}
-		return listResult{ChannelID: loc.ChannelID, Messages: compact, SystemMessagesHidden: history.SystemHidden, ReferencedUsers: referenced}, nil
+		res := listResult{ChannelID: loc.ChannelID, Messages: compact, SystemMessagesHidden: history.SystemHidden, HasMore: history.HasMore, ReferencedUsers: referenced}
+		if len(history.Messages) > 0 {
+			res.oldestTS = history.Messages[0].TS
+		}
+		return res, nil
 	})
 	if err != nil {
 		return err
 	}
 	switch {
+	case result.HasMore:
+		limit := cmp.Or(opts.limit, messages.DefaultHistoryLimit)
+		var next []string
+		if oldest != "" {
+			next = append(next, "--oldest "+oldest)
+		}
+		next = append(next, "--latest "+result.oldestTS)
+		c.rt.ResultHintf("Only the newest %d top-level messages in %s are listed (has_more): older ones are left. Messages are oldest first: for older messages, repeat with %s (--latest is exclusive). Raising --limit (now %d, max %d) returns more at once.",
+			limit, describeRange(oldest, latest), strings.Join(next, " "), limit, messages.MaxHistoryLimit)
 	case len(result.Messages) > 0:
 	case result.SystemMessagesHidden > 0:
 		c.rt.ResultHintf("No messages matched in %s, other than %d system messages (joins, leaves, topic changes …): pass --include-system to see them.",

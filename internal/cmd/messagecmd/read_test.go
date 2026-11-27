@@ -669,6 +669,36 @@ func TestListHistoryDefaultLimitAndEmptyResult(t *testing.T) {
 	}
 }
 
+// A history cut short by --limit says so, and how to get the rest: "what
+// was said since Monday" must not silently be the newest 25 messages.
+func TestListHistoryHasMore(t *testing.T) {
+	h := newHarness(t)
+	h.fixtures["conversations.history"] = func(map[string]any) (map[string]any, error) {
+		return map[string]any{"ok": true, "has_more": true, "messages": []any{
+			map[string]any{"ts": "1770160600.000200", "user": "U05BRPTKL6A", "text": "newer"},
+			map[string]any{"ts": "1770160000.000001", "user": "U0AAAAAAAAA", "text": "older"},
+		}}, nil
+	}
+	got := h.mustRun("list", testChannel, "--limit", "2", "--oldest", "2026-02-03")
+	if got["has_more"] != true || len(got["messages"].([]any)) != 2 {
+		t.Errorf("printed %s, want has_more and 2 messages", h.stdout)
+	}
+	want := []any{"Only the newest 2 top-level messages in the channel after 1770076800 (2026-02-03T00:00:00Z) are listed (has_more): older ones are left. Messages are oldest first: for older messages, repeat with --oldest 1770076800 --latest 1770160000.000001 (--latest is exclusive). Raising --limit (now 2, max 1000) returns more at once."}
+	if !reflect.DeepEqual(got["hints"], want) {
+		t.Errorf("hints = %q\nwant %q", got["hints"], want)
+	}
+	if h.stderr.Len() != 0 {
+		t.Errorf("stderr = %q", h.stderr)
+	}
+
+	// Everything there was: neither has_more nor a hint.
+	h.history(map[string]any{"ts": "1770160000.000001", "user": "U0AAAAAAAAA", "text": "older"})
+	got = h.mustRun("list", testChannel, "--limit", "2")
+	if got["has_more"] != nil || got["hints"] != nil {
+		t.Errorf("complete history printed %s", h.stdout)
+	}
+}
+
 func TestListHistoryByChannelURL(t *testing.T) {
 	h := newHarness(t)
 	h.history(map[string]any{"ts": testTS, "text": "x"})
