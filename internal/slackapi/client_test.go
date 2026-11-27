@@ -220,7 +220,7 @@ func TestPostingRateLimitedCodeIsARateLimit(t *testing.T) {
 	fake := NewFake(func(context.Context, string, map[string]any) (map[string]any, error) {
 		return map[string]any{"ok": false, "error": "rate_limited"}, nil
 	})
-	if _, err := fake.API(context.Background(), "chat.scheduleMessage", nil); !errors.As(err, &rl) || !IsErrorCode(err, PostingRateLimitedCode) {
+	if _, err := fake.API(context.Background(), "chat.scheduleMessage", nil); !errors.As(err, &rl) || !IsErrorCode(err, PostingRateLimitedCode) || !strings.Contains(err.Error(), "was not scheduled") {
 		t.Errorf("fake: err = %v", err)
 	}
 }

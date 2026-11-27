@@ -61,7 +61,7 @@ var channelLevelCodes = []string{
 	"channel_not_found", "not_in_channel", "is_archived", "method_not_supported_for_channel_type",
 	"missing_scope", "not_allowed_token_type", "no_permission", "restricted_action",
 	"ekm_access_denied", "team_access_not_granted", "access_denied", "invalid_channel",
-	"ratelimited", "fatal_error", "internal_error", "service_unavailable", "request_timeout",
+	slackapi.RateLimitedCode, slackapi.PostingRateLimitedCode, "fatal_error", "internal_error", "service_unavailable", "request_timeout",
 }
 
 // fatal reports whether err must abort the whole invite. Errors that are

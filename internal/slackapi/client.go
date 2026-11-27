@@ -6,6 +6,7 @@ package slackapi
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -395,7 +396,7 @@ func (c *Client) callOnce(ctx context.Context, method string, params map[string]
 			case errors.As(err, &limited):
 				rec.entry.RetryAfterS = limited.RetryAfter.Seconds()
 				rec.entry.RateLimited = true
-				code = "ratelimited"
+				code = cmp.Or(code, RateLimitedCode)
 			case code == "":
 				code = audit.ErrorClass(ctx, err)
 			}
