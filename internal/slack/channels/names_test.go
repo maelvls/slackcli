@@ -9,6 +9,7 @@ import (
 	"reflect"
 	"runtime"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -544,5 +545,41 @@ func TestNamesWritesKeepNewerEntries(t *testing.T) {
 	}
 	if entries["C0RANDOM01"].Name == "" || entries["C0OTHER001"].Name == "" {
 		t.Errorf("entries = %+v", entries)
+	}
+}
+
+// A writer may wait for the lock while another one commits its names: by
+// the time it reads the file, those are newer than when it started. They
+// must not be taken for names from the future and pruned.
+func TestNamesWriteAfterWaitingKeepsWhatWasCommittedMeanwhile(t *testing.T) {
+	dir := t.TempDir()
+	// The clock reads t0 when this writer starts, two minutes later once
+	// it holds the lock.
+	var calls atomic.Int32
+	clock := func() time.Time {
+		if calls.Add(1) == 1 {
+			return t0
+		}
+		return t0.Add(2 * time.Minute)
+	}
+	slow := NewNames(NamesOptions{CacheDir: dir, WorkspaceURL: "https://test.slack.com", Now: clock})
+	slow.open(nil)
+	// Meanwhile, another writer commits two names.
+	other := NewNames(NamesOptions{CacheDir: dir, WorkspaceURL: "https://test.slack.com", Now: at(t0.Add(time.Minute))})
+	other.Remember(nil, "C0GENERAL1", "renamed")
+	other.Remember(nil, "C0OTHER001", "other")
+
+	slow.fetched["C0GENERAL1"] = nameEntry{FetchedAt: t0.Add(-time.Hour).UnixMilli(), Name: "general"}
+	slow.Remember(nil, "C0RANDOM01", "random")
+
+	entries := loadNames(namesFile(t, dir))
+	want := map[string]nameEntry{
+		"C0GENERAL1": {FetchedAt: t0.Add(time.Minute).UnixMilli(), Name: "renamed"},
+		"C0OTHER001": {FetchedAt: t0.Add(time.Minute).UnixMilli(), Name: "other"},
+		// Stamped when it was fetched, not when it was written.
+		"C0RANDOM01": {FetchedAt: t0.UnixMilli(), Name: "random"},
+	}
+	if !reflect.DeepEqual(entries, want) {
+		t.Errorf("entries = %+v\nwant %+v", entries, want)
 	}
 }

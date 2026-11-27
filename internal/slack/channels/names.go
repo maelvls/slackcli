@@ -164,6 +164,11 @@ func (n *Names) Remember(client *slackapi.Client, channelID, name string) {
 	// n.mu keeps the lookups of this invocation from writing at the same
 	// time, the file lock those of other invocations.
 	defer cachefile.Lock(n.path)()
+	// The clock is read again: while this call waited for the locks,
+	// other invocations may have committed names dated after the one
+	// above, which must not look like names from the future and be
+	// pruned. The name itself keeps the time it was fetched at.
+	now = n.now()
 	entries := loadNames(n.path)
 	for id, old := range entries {
 		if old.age(now) >= nameCacheKeep {

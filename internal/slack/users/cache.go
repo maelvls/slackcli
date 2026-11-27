@@ -82,10 +82,11 @@ func ResolveByID(ctx context.Context, client *slackapi.Client, userIDs []string,
 		return out, nil
 	}
 
-	now := time.Now()
-	if opts.Now != nil {
-		now = opts.Now()
+	clock := opts.Now
+	if clock == nil {
+		clock = time.Now
 	}
+	now := clock()
 	path := cachePath(cmp.Or(opts.CacheDir, appinfo.CacheDir()), cmp.Or(opts.WorkspaceURL, client.WorkspaceURL()))
 	cached := loadCache(path)
 
@@ -107,7 +108,7 @@ func ResolveByID(ctx context.Context, client *slackapi.Client, userIDs []string,
 		out[id] = user
 	}
 	// Keep what was fetched even when the batch was cut short.
-	storeCache(path, fetched, now)
+	storeCache(path, fetched, now, clock)
 	if err != nil {
 		return nil, err
 	}
@@ -207,11 +208,17 @@ func loadCache(path string) map[string]cacheEntry {
 // (cachefile.Lock), so that entries another process added meanwhile are
 // kept, and it is replaced atomically, so that a reader never sees a
 // half-written file.
-func storeCache(path string, fetched map[string]CompactUser, now time.Time) {
+//
+// The users fetched are dated fetchedAt, when the fetch started. Expiry is
+// judged by the clock read once the lock is held: users that another
+// invocation committed while this one was fetching or waiting are dated
+// after fetchedAt, and must not look like users from the future.
+func storeCache(path string, fetched map[string]CompactUser, fetchedAt time.Time, clock func() time.Time) {
 	if path == "" || len(fetched) == 0 {
 		return
 	}
 	defer cachefile.Lock(path)()
+	now := clock()
 	entries := loadCache(path)
 	for id, e := range entries {
 		if !e.fresh(now) {
@@ -219,7 +226,7 @@ func storeCache(path string, fetched map[string]CompactUser, now time.Time) {
 		}
 	}
 	for id, user := range fetched {
-		entries[id] = cacheEntry{FetchedAt: now.UnixMilli(), User: user}
+		entries[id] = cacheEntry{FetchedAt: fetchedAt.UnixMilli(), User: user}
 	}
 	data, err := json.MarshalIndent(cacheFile{Version: cacheVersion, Entries: entries}, "", "  ")
 	if err != nil {

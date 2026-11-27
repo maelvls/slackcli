@@ -549,3 +549,34 @@ func TestResolveByIDRateLimitedReturnsWhatItHas(t *testing.T) {
 		t.Errorf("what was fetched before the rate limit was not cached")
 	}
 }
+
+// Fetching the users and waiting for the lock take time, during which
+// another invocation may commit users: by the time this one reads the
+// file, they are newer than when it started. They must not be taken for
+// users from the future and pruned.
+func TestResolveByIDKeepsWhatWasCommittedMeanwhile(t *testing.T) {
+	dir := t.TempDir()
+	// Committed a minute after this invocation started.
+	if _, err := ResolveByID(context.Background(), infoServer().client(), []string{"U22222222"}, ResolveOptions{CacheDir: dir, Now: at(t0.Add(time.Minute))}); err != nil {
+		t.Fatal(err)
+	}
+	// The clock reads t0 when it starts, two minutes later once it writes.
+	var calls atomic.Int32
+	clock := func() time.Time {
+		if calls.Add(1) == 1 {
+			return t0
+		}
+		return t0.Add(2 * time.Minute)
+	}
+	if _, err := ResolveByID(context.Background(), infoServer().client(), []string{"U11111111"}, ResolveOptions{CacheDir: dir, Now: clock}); err != nil {
+		t.Fatal(err)
+	}
+	entries := loadCache(cachePath(dir, "https://test.slack.com"))
+	if e := entries["U22222222"]; e.FetchedAt != t0.Add(time.Minute).UnixMilli() {
+		t.Errorf("U22222222 = %+v, want the entry committed meanwhile", e)
+	}
+	// Stamped when it was fetched.
+	if e := entries["U11111111"]; e.FetchedAt != t0.UnixMilli() {
+		t.Errorf("U11111111 = %+v", e)
+	}
+}
