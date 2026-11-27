@@ -199,14 +199,15 @@ func lookup(ctx context.Context, client *slackapi.Client, inputs []string) ([]fo
 			w.email = strings.ToLower(trimmed)
 			viaPeople := false
 			if client.Auth().IsBrowser() {
-				user, amb, err := lookupByPeopleSearch(ctx, client, trimmed)
+				user, unresolved, err := lookupByPeopleSearch(ctx, client, trimmed)
 				viaPeople = true
+				var infoErr *emailLookupError
 				switch {
 				case user != nil:
 					out[i] = found{id: jsonx.Str(user["id"]), raw: user}
 					continue
-				case amb != nil:
-					out[i].err = amb
+				case unresolved != nil:
+					out[i].err = unresolved
 					continue
 				case err == nil:
 					// No active member has that address. A deactivated
@@ -214,6 +215,9 @@ func lookup(ctx context.Context, client *slackapi.Client, inputs []string) ([]fo
 					w.deactivated, w.bounded, w.notFoundBy = true, true, peopleSearchName
 				case enrich.MustAbort(ctx, err):
 					return nil, fmt.Errorf("looking up user %s: %w", trimmed, err)
+				case errors.As(err, &infoErr):
+					// users.info, after the search, did not answer.
+					return nil, infoErr
 				case slackapi.IsTransient(err):
 					// As for users.lookupByEmail below: Slack did not
 					// answer, which says nothing about the user.

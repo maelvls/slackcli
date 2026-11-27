@@ -2,11 +2,13 @@ package users
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
 
 	"github.com/maelvls/slackcli/internal/jsonx"
+	"github.com/maelvls/slackcli/internal/slack/enrich"
 	"github.com/maelvls/slackcli/internal/slackapi"
 )
 
@@ -41,18 +43,22 @@ const peopleSearchName = "Slack's people search (search.modules.people)"
 // Its items have no email (nor tz), and the search is fuzzy, so no item is
 // taken at its word: each candidate (an item without an email, or with
 // that one) is fetched with users.info, which has the email, and only a
-// member whose email is the address is accepted. The result is:
+// member whose email is the address is accepted. Only the first
+// maxPeopleByEmailChecks candidates, in the order of the search, are
+// checked. The result is:
 //
-//   - the user (as users.info gives it) when exactly one candidate has the
-//     address;
-//   - amb when several have it, when users.info hides the email of the
-//     candidates so that none can be confirmed, or when there are too many
-//     candidates to check (more than maxPeopleByEmailChecks): none is
-//     picked;
+//   - the user (as users.info gives it) when exactly one checked candidate
+//     has the address;
+//   - unresolved, an error for this address alone, when several have it,
+//     when users.info hides the email of the candidates (or fails for
+//     them) so that none can be confirmed, or when none of the checked
+//     candidates has it but others were left unchecked: none is picked;
 //   - nothing at all when no candidate has the address;
-//   - err when a call failed: the search (see peopleSearchRefused for the
-//     failures that leave users.lookupByEmail to try) or users.info.
-func lookupByPeopleSearch(ctx context.Context, client *slackapi.Client, email string) (user map[string]any, amb *AmbiguousError, err error) {
+//   - err when a call failed in a way that says nothing about the address:
+//     the search (see peopleSearchRefused for the failures that leave
+//     users.lookupByEmail to try), or users.info not answering (an
+//     *emailLookupError naming it).
+func lookupByPeopleSearch(ctx context.Context, client *slackapi.Client, email string) (user map[string]any, unresolved error, err error) {
 	resp, err := client.API(ctx, "search.modules.people", map[string]any{
 		"module": "people",
 		"query":  email,
@@ -77,25 +83,39 @@ func lookupByPeopleSearch(ctx context.Context, client *slackapi.Client, email st
 			candidates = append(candidates, u)
 		}
 	}
+	unchecked := 0
 	if len(candidates) > maxPeopleByEmailChecks {
-		amb = &AmbiguousError{Input: email, Reason: fmt.Sprintf(
-			"%s finds %d members for that email address, too many to check which one has it", peopleSearchName, len(candidates))}
-		for _, c := range candidates {
-			amb.Matches = append(amb.Matches, ToCompactUser(c))
-		}
-		return nil, amb, nil
+		unchecked = len(candidates) - maxPeopleByEmailChecks
+		candidates = candidates[:maxPeopleByEmailChecks]
 	}
 
 	var confirmed, hidden []map[string]any
+	var failedID string
+	var failed error
 	for _, c := range candidates {
 		id := jsonx.Str(c["id"])
 		resp, err := client.API(ctx, "users.info", map[string]any{"user": id})
-		if err != nil {
+		switch {
+		case enrich.MustAbort(ctx, err):
 			return nil, nil, fmt.Errorf("looking up user %s (%s, found by %s): %w", id, email, peopleSearchName, err)
+		case slackapi.IsTransient(err):
+			// Slack did not answer: that says nothing about the
+			// address, and the next candidate would fare no better.
+			return nil, nil, &emailLookupError{email: email, method: "users.info", tries: 1, err: err}
+		case err != nil:
+			// This candidate cannot be checked (a member of another
+			// workspace, a refusal): it does not decide for the others.
+			if failed == nil {
+				failedID, failed = id, err
+			}
+			continue
 		}
 		u := jsonx.Map(resp["user"])
 		if jsonx.Str(u["id"]) != id {
-			return nil, nil, fmt.Errorf("looking up user %s (%s, found by %s): users.info returned no user", id, email, peopleSearchName)
+			if failed == nil {
+				failedID, failed = id, errors.New("users.info returned no user")
+			}
+			continue
 		}
 		switch got := userEmail(u); {
 		case strings.EqualFold(got, email):
@@ -110,19 +130,30 @@ func lookupByPeopleSearch(ctx context.Context, client *slackapi.Client, email st
 	case len(confirmed) == 1:
 		return confirmed[0], nil, nil
 	case len(confirmed) > 1:
-		amb = &AmbiguousError{Input: email, Reason: fmt.Sprintf("%d members have that email address", len(confirmed))}
+		amb := &AmbiguousError{Input: email, Reason: fmt.Sprintf("%d members have that email address", len(confirmed))}
 		for _, u := range confirmed {
 			amb.Matches = append(amb.Matches, ToCompactUser(u))
 		}
 		return nil, amb, nil
 	case len(hidden) > 0:
-		amb = &AmbiguousError{Input: email, Reason: fmt.Sprintf(
+		amb := &AmbiguousError{Input: email, Reason: fmt.Sprintf(
 			"%s finds %d member(s) for that email address, but Slack does not show their email to you (users.info), so whether they have it cannot be checked",
 			peopleSearchName, len(hidden))}
 		for _, u := range hidden {
 			amb.Matches = append(amb.Matches, ToCompactUser(u))
 		}
 		return nil, amb, nil
+	case unchecked > 0:
+		return nil, fmt.Errorf("could not resolve user %q: %s finds %d members for that email address, too many to check: "+
+			"none of the first %d has it (users.info), the other %d were not checked. "+
+			"Pass the user ID (U…) instead, or check the address",
+			email, peopleSearchName, len(candidates)+unchecked, len(candidates), unchecked), nil
+	case failed != nil:
+		// %v, not %w: the code of users.info (missing_scope, …) must not
+		// pass for a refusal of the people search.
+		return nil, fmt.Errorf("could not resolve user %q: %s finds member %s for that email address, but users.info cannot show it (%v), "+
+			"so whether it has the address cannot be checked. Pass the user ID (U…) instead",
+			email, peopleSearchName, failedID, failed), nil
 	}
 	return nil, nil, nil
 }
@@ -136,13 +167,16 @@ func userEmail(u map[string]any) string {
 // deactivated members (see want.bounded) may ask for the page after the
 // pages it has read (the last one took took): no more than
 // deactivatedScanPages in all, and only when the command has the time for
-// another page and a little more.
+// another page and a little more. A command without a timeout scans the
+// whole directory.
 func roomForAnotherPage(ctx context.Context, pages int, took time.Duration) bool {
-	if pages >= deactivatedScanPages {
-		return false
-	}
 	left, limited := slackapi.TimeLeft(ctx)
-	return !limited || left > 2*took+time.Second
+	if !limited {
+		// No command timeout (COMMAND_TIMEOUT_MS=0): the scan may take
+		// as long as it takes, as for the other tokens.
+		return true
+	}
+	return pages < deactivatedScanPages && left > 2*took+time.Second
 }
 
 // boundedScanError says that a directory scan for deactivated members was

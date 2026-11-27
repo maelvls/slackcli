@@ -168,19 +168,83 @@ func TestEmailWithBrowserCredentialsUsesThePeopleSearch(t *testing.T) {
 		}
 	})
 
-	t.Run("too many matches are not checked one by one", func(t *testing.T) {
+	t.Run("too many matches: only the first ones are checked, and none is offered", func(t *testing.T) {
 		var items []map[string]any
 		for i := range maxPeopleByEmailChecks + 1 {
 			items = append(items, person(fmt.Sprintf("U%09dA", i), fmt.Sprintf("a%d", i), "", ""))
 		}
 		rec := peopleWorkspace{items: items}.recorder()
-		_, err := ResolveUserID(ctx, rec.client(), "a@example.com")
-		var amb *AmbiguousError
-		if !errors.As(err, &amb) || len(amb.Matches) != maxPeopleByEmailChecks+1 || !strings.Contains(err.Error(), "too many to check") {
-			t.Errorf("err = %v", err)
+		got, err := ResolveUserIDs(ctx, rec.client(), []string{"a@example.com", "U00000009A"})
+		if err != nil {
+			t.Fatal(err)
 		}
-		if want := []string{"search.modules.people"}; !reflect.DeepEqual(rec.methods(), want) {
-			t.Errorf("methods = %v", rec.methods())
+		var amb *AmbiguousError
+		if errors.As(got[0].Err, &amb) || got[0].Err == nil || !strings.Contains(got[0].Err.Error(), "too many to check") ||
+			strings.Contains(got[0].Err.Error(), "Pass one of these") || got[1].ID != "U00000009A" {
+			t.Errorf("got %+v, want an error for the email alone that offers no candidate", got)
+		}
+		if n := len(rec.only("users.info")); n != maxPeopleByEmailChecks || len(rec.only("users.list")) != 0 {
+			t.Errorf("methods = %v, want %d users.info and no scan", rec.methods(), maxPeopleByEmailChecks)
+		}
+	})
+
+	t.Run("too many matches: the one the search ranks first is confirmed", func(t *testing.T) {
+		items := []map[string]any{person("U00000001A", "alice", "Alice A", "")}
+		for i := range maxPeopleByEmailChecks {
+			items = append(items, person(fmt.Sprintf("U%09dB", i), fmt.Sprintf("a%d", i), "", ""))
+		}
+		rec := peopleWorkspace{items: items, info: []map[string]any{alice}}.recorder()
+		got, err := ResolveUserID(ctx, rec.client(), "alice@example.com")
+		if err != nil || got != "U00000001A" {
+			t.Fatalf("got %q, %v", got, err)
+		}
+	})
+
+	t.Run("a match users.info fails for does not hide the right one", func(t *testing.T) {
+		rec := peopleWorkspace{
+			// U00000008A is unknown to users.info: user_not_found.
+			items: []map[string]any{person("U00000008A", "stranger", "", ""), person("U00000001A", "alice", "Alice A", "")},
+			info:  []map[string]any{alice},
+		}.recorder()
+		got, err := ResolveUserID(ctx, rec.client(), "alice@example.com")
+		if err != nil || got != "U00000001A" {
+			t.Fatalf("got %q, %v", got, err)
+		}
+	})
+
+	t.Run("a single match users.info refuses is an error for that email, not a fallback", func(t *testing.T) {
+		rec := peopleWorkspace{items: []map[string]any{person("U00000001A", "alice", "", "")}}.recorder()
+		serve := rec.serve
+		rec.serve = func(method string, params map[string]any) (map[string]any, error) {
+			if method == "users.info" {
+				return apiError("missing_scope"), nil
+			}
+			return serve(method, params)
+		}
+		got, err := ResolveUserIDs(ctx, rec.client(), []string{"alice@example.com"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got[0].Err == nil || !strings.Contains(got[0].Err.Error(), "missing_scope") || !strings.Contains(got[0].Err.Error(), "user ID (U…)") {
+			t.Errorf("err = %v", got[0].Err)
+		}
+		if want := []string{"search.modules.people", "users.info"}; !reflect.DeepEqual(rec.methods(), want) {
+			t.Errorf("methods = %v, want %v (no users.lookupByEmail, no scan)", rec.methods(), want)
+		}
+	})
+
+	t.Run("users.info not answering is named in the error", func(t *testing.T) {
+		rec := peopleWorkspace{items: []map[string]any{person("U00000001A", "alice", "", "")}}.recorder()
+		serve := rec.serve
+		rec.serve = func(method string, params map[string]any) (map[string]any, error) {
+			if method == "users.info" {
+				return nil, &slackapi.RateLimitError{Method: method, RetryAfter: time.Minute}
+			}
+			return serve(method, params)
+		}
+		_, err := ResolveUserID(ctx, rec.client(), "alice@example.com")
+		if err == nil || !strings.Contains(err.Error(), "users.info gave no answer") || !strings.Contains(err.Error(), "temporary") {
+			t.Errorf("err = %v", err)
 		}
 	})
 
@@ -197,6 +261,8 @@ func TestEmailWithBrowserCredentialsUsesThePeopleSearch(t *testing.T) {
 	})
 
 	t.Run("no match: a directory too large to scan is given up on early", func(t *testing.T) {
+		deadline := time.Now().Add(time.Hour)
+		ctx := slackapi.WithCommandDeadline(ctx, func() (time.Time, bool) { return deadline, true })
 		rec := peopleWorkspace{pages: bigDirectory(deactivatedScanPages + 3)}.recorder()
 		_, err := ResolveUserID(ctx, rec.client(), "nobody@example.com")
 		if err == nil {
@@ -213,6 +279,18 @@ func TestEmailWithBrowserCredentialsUsesThePeopleSearch(t *testing.T) {
 		var nf *NotFoundError
 		if errors.As(err, &nf) {
 			t.Errorf("a scan given up on is not a NotFoundError")
+		}
+	})
+
+	t.Run("no match: a command without a timeout scans the whole directory", func(t *testing.T) {
+		rec := peopleWorkspace{pages: bigDirectory(deactivatedScanPages + 3)}.recorder()
+		_, err := ResolveUserID(ctx, rec.client(), "nobody@example.com")
+		var nf *NotFoundError
+		if !errors.As(err, &nf) {
+			t.Errorf("err = %v, want a NotFoundError", err)
+		}
+		if n := len(rec.only("users.list")); n != deactivatedScanPages+3 {
+			t.Errorf("%d users.list calls, want %d", n, deactivatedScanPages+3)
 		}
 	})
 

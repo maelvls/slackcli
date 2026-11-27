@@ -28,7 +28,7 @@ credentials, which may not use it, Slack's people search, each match
 confirmed by its email with users.info). Several members matching an email
 is an error that lists them. An email that no active member has is looked
 for among deactivated members in the directory, given up on after 5000
-members.`
+members (unless the command timeout is off).`
 
 // New returns the "user" command.
 func New(rt *clictx.Context) *cobra.Command {
