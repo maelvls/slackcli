@@ -166,7 +166,7 @@ Saved credentials live in `~/.config/slackcli/credentials.json`. On macOS the se
 ## Output
 
 - Results are JSON on stdout, with empty fields removed: on one line, or indented when stdout is a terminal.
-- Warnings and hints are part of the result, in its `warnings` and `hints` arrays, so a successful command that prints JSON writes nothing on stderr and `slackcli … 2>&1 | jq` still parses. Stderr gets the error of a command that failed (and the warnings that came before it), the notes of the few `auth` commands that print text, the connection notes of `watch` (a stream, not one result), and, when it is a terminal, the progress of `message compose` while it waits for a human. An error is not JSON: keep stderr apart (`2>err.txt`) and check the exit code before parsing.
+- Warnings and hints are part of the result, in its `warnings` and `hints` arrays, and most successful commands write nothing on stderr. Stderr gets the error of a command that failed (and the warnings that came before it), the notes of the few `auth` commands that print text, the notes of the long-running commands while they wait (`watch`, a stream rather than one result, and `inbox wait`: connections and reconnections; `message wait`: Slack unreachable and back), and, when it is a terminal, the progress of `message compose` while it waits for a human. An error is not JSON: never `2>&1 | jq`; keep stderr apart (`2>err.txt`) and check the exit code before parsing.
 - Messages have `ts`, which identifies them, and `time`, the same instant as a local date and time.
 - A list command always prints its list, `[]` when empty, and `next_cursor` when there is more (pass it to `--cursor`).
 - Files attached to messages are downloaded to the cache directory and listed with their local `path`. A file that Slack does not host, such as a Google Docs link, is listed with `"external": true` and its `url` instead. `--no-download` (`message get`, `message list`, `search`) lists them without downloading anything.
@@ -221,7 +221,7 @@ $ tail -f "$(slackcli audit path)"
 | `SLACK_COOKIE_D` | The browser `d` cookie (`xoxd-…`), needed with an `xoxc-` token. |
 | `SLACK_WORKSPACE_URL` | Default for `--workspace`. |
 | `SLACKCLI_SAFE_MODE` | Turns safe mode on. |
-| `SLACKCLI_COMMAND_TIMEOUT_MS` | Time limit of a command (default 30000). `message compose` and uploads have none. |
+| `SLACKCLI_COMMAND_TIMEOUT_MS` | Time limit of a command (default 30000). `watch`, `inbox wait`, `message wait`, `message compose`, `message draft create/update` and uploads (`message send --attach`) have none. |
 | `SLACKCLI_API_TIMEOUT_MS` | Time limit of one Slack request (default 20000). |
 | `SLACKCLI_RATE_LIMIT_MAX_WAIT_MS` | How long to wait and retry when Slack rate-limits (default 0: fail at once). |
 | `SLACKCLI_KEYCHAIN_TIMEOUT_MS` | Time limit of a macOS keychain call (default 3000). |
