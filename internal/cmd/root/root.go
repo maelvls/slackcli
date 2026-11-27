@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/spf13/pflag"
 
 	"github.com/maelvls/slackcli/internal/appinfo"
 	"github.com/maelvls/slackcli/internal/audit"
@@ -382,7 +383,7 @@ func (r runner) execute(args []string, stdout, stderr io.Writer) int {
 			ran.Store(c)
 			// The audit log names the command on each of its lines, with
 			// only what is safe to keep of its arguments.
-			audit.SetCommand(commandName(c), args)
+			audit.SetCommand(commandName(c), args, flagLookup(c))
 			// The trace names the command, not its arguments: they may
 			// hold a message or a secret.
 			if clictx.HasNoTimeout(c) {
@@ -643,4 +644,24 @@ func ErrorMessage(err error) string {
 		return ""
 	}
 	return err.Error()
+}
+
+// flagLookup tells the audit log which arguments of c's command line are
+// its flags (its own and those it inherits), and which of them take a
+// value: only their names are kept.
+func flagLookup(c *cobra.Command) audit.FlagLookup {
+	return func(name string, short bool) (bool, bool) {
+		for _, fs := range []*pflag.FlagSet{c.Flags(), c.InheritedFlags()} {
+			var f *pflag.Flag
+			if short {
+				f = fs.ShorthandLookup(name)
+			} else {
+				f = fs.Lookup(name)
+			}
+			if f != nil {
+				return true, f.NoOptDefVal == ""
+			}
+		}
+		return false, false
+	}
 }

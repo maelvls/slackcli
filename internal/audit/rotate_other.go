@@ -11,3 +11,8 @@ func rotate(f *os.File, info os.FileInfo, path string) error {
 	f.Close()
 	return renameIfSame(info, path)
 }
+
+// lockShared and unlock do nothing here: see rotate.
+func lockShared(*os.File) error { return nil }
+
+func unlock(*os.File) {}

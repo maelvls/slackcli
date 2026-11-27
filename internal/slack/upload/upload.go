@@ -330,7 +330,7 @@ func postBytes(ctx context.Context, client *slackapi.Client, uploadURL string, b
 	// would pass for a successful upload, and cannot replay a streamed
 	// body (307, 308).
 	hc := *client.HTTPClient()
-	hc.Transport = audit.Transport(hc.Transport, "files.upload")
+	hc.Transport = audit.Transport(hc.Transport, "files.upload", false)
 	hc.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
 	resp, err := hc.Do(req)
 	if err != nil && errors.Is(context.Cause(ctx), errStalled) {

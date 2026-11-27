@@ -20,6 +20,7 @@ import (
 	"github.com/maelvls/slackcli/internal/audit"
 	"github.com/maelvls/slackcli/internal/auth"
 	"github.com/maelvls/slackcli/internal/clictx"
+	"github.com/maelvls/slackcli/internal/cmd/cmdutil"
 	"github.com/maelvls/slackcli/internal/slackapi"
 	"github.com/maelvls/slackcli/internal/testenv"
 	"github.com/maelvls/slackcli/internal/trace"
@@ -528,6 +529,38 @@ func TestRunNamesTheCommandInTheAuditLog(t *testing.T) {
 	e := entries[0]
 	if e.Cmd != "work" || strings.Join(e.Args, " ") != "work C0123ABCD "+audit.Placeholder || e.Method != "conversations.history" {
 		t.Errorf("entry = %+v", e)
+	}
+}
+
+// Of the arguments that start with a dash, only the flags of the command
+// are kept, by name: not the value of a flag, even one that looks like a
+// flag, nor message text that starts with a dash, nor what follows "--".
+func TestAuditLogKeepsOnlyTheFlagsOfTheCommand(t *testing.T) {
+	log := filepath.Join(t.TempDir(), "audit.jsonl")
+	t.Setenv(appinfo.EnvName(audit.EnvSuffix), log)
+	work := &cobra.Command{Use: "work", Args: cobra.ArbitraryArgs, RunE: func(cmd *cobra.Command, _ []string) error {
+		_, err := slackapi.NewFake(func(context.Context, string, map[string]any) (map[string]any, error) {
+			return nil, nil
+		}).API(cmd.Context(), "chat.postMessage", nil)
+		return err
+	}}
+	work.Flags().String("text", "", "")
+	work.Flags().Bool("force", false, "")
+	work.Flags().IntP("limit", "n", 0, "")
+	cmdutil.AllowDashText(work)
+	got := runWith(t, time.Second, one(work), "work", "C0123ABCD", "--text", "--confidential plan",
+		"- first item", "--force", "-n", "5", "--", "--secret", "-1")
+	if got.code != ExitOK {
+		t.Fatalf("%+v", got)
+	}
+	entries, _, err := audit.Read(log, time.Time{})
+	if err != nil || len(entries) != 1 {
+		t.Fatalf("entries = %+v, %v", entries, err)
+	}
+	p := audit.Placeholder
+	want := strings.Join([]string{"work", "C0123ABCD", "--text", p, p, "--force", "-n", p, "--", p, p}, " ")
+	if args := strings.Join(entries[0].Args, " "); args != want {
+		t.Errorf("args = %q, want %q", args, want)
 	}
 }
 

@@ -150,9 +150,11 @@ func Get(ctx context.Context, client *slackapi.Client, rawURL string) (*http.Res
 	// its choosing.
 	hc := *client.HTTPClient()
 	// Every request of the chain is a line of the audit log.
-	hc.Transport = audit.Transport(hc.Transport, "files.download")
+	hc.Transport = audit.Transport(hc.Transport, "files.download", true)
 	hc.CheckRedirect = func(next *http.Request, via []*http.Request) error {
 		if len(via) >= maxRedirects {
+			// The download fails on this redirect: so does its line.
+			audit.RefuseRedirect(next.Response)
 			return fmt.Errorf("stopped after %d redirects", maxRedirects)
 		}
 		for _, h := range []string{"Authorization", "Cookie", "Referer"} {
