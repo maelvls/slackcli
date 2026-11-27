@@ -217,7 +217,8 @@ type runner struct {
 	// (0 means grace).
 	interruptGrace time.Duration
 	// elapsed is the clock of the watchdog (see stopwatch); nil means the
-	// real one. Tests replace it to put the machine to sleep.
+	// real one. Tests replace it to put the machine to sleep, or to time
+	// a command out only once it has started (expiresOnceStarted).
 	elapsed func() (awake, wall time.Duration)
 	// goroutines, when set, counts every goroutine the run starts (the
 	// command, the watchdog, the writes to stderr that are not waited

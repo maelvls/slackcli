@@ -102,6 +102,28 @@ func TestMain(m *testing.M) {
 	os.Exit(m.Run())
 }
 
+// expiresOnceStarted is a watchdog clock (runner.elapsed) on which the
+// command timeout (SLACKCLI_COMMAND_TIMEOUT_MS) is up once the command has
+// set started, and not before. A test whose command must be running when
+// the time is up uses it: on a loaded machine, the set-up alone (cobra,
+// the credentials store) may take longer than the few milliseconds of a
+// test's timeout, and the command would never run. A command that never
+// sets started is timed out all the same after 10s, for the test to fail
+// instead of hanging.
+func expiresOnceStarted(started *atomic.Bool) func() (awake, wall time.Duration) {
+	timeout := CommandTimeout()
+	real := stopwatch()
+	return func() (time.Duration, time.Duration) {
+		if started.Load() {
+			return timeout, timeout
+		}
+		if awake, _ := real(); awake > 10*time.Second {
+			return awake, awake
+		}
+		return 0, 0
+	}
+}
+
 // one wraps a single test command.
 func one(cmd *cobra.Command) func(*clictx.Context) []*cobra.Command {
 	return func(*clictx.Context) []*cobra.Command { return []*cobra.Command{cmd} }
@@ -159,9 +181,10 @@ func TestRunSuccessAndErrors(t *testing.T) {
 
 func TestRunTimeoutCancelsTheCommandAndLetsItCleanUp(t *testing.T) {
 	t.Setenv(appinfo.EnvName("COMMAND_TIMEOUT_MS"), "40")
-	var cancelled, cleaned atomic.Bool
+	var started, cancelled, cleaned atomic.Bool
 	slow := &cobra.Command{Use: "slow", RunE: func(cmd *cobra.Command, _ []string) error {
 		defer cleaned.Store(true) // a deferred cleanup, e.g. removing a temp file
+		started.Store(true)
 		select {
 		case <-cmd.Context().Done():
 			cancelled.Store(true)
@@ -171,7 +194,7 @@ func TestRunTimeoutCancelsTheCommandAndLetsItCleanUp(t *testing.T) {
 		}
 	}}
 	start := time.Now()
-	got := runWith(t, 5*time.Second, one(slow), "slow")
+	got := runRunner(t, runner{commands: one(slow), grace: 5 * time.Second, elapsed: expiresOnceStarted(&started)}, "slow")
 	if got.code != ExitTimeout {
 		t.Fatalf("exit code = %d, want %d (%+v)", got.code, ExitTimeout, got)
 	}
@@ -361,16 +384,18 @@ func TestRunTimeoutDoesNotWaitOnABlockedStderr(t *testing.T) {
 // still waiting for, without SLACKCLI_DEBUG.
 func TestRunTimeoutSaysWhereTheTimeWent(t *testing.T) {
 	t.Setenv(appinfo.EnvName("COMMAND_TIMEOUT_MS"), "40")
+	var waiting atomic.Bool
 	slow := &cobra.Command{Use: "slow", RunE: func(cmd *cobra.Command, _ []string) error {
 		trace.Begin("api conversations.info", "").End("HTTP 200")
 		trace.Begin("api users.info", "").Fail("HTTP 429")
 		trace.Begin("api users.info", "").End("HTTP 200")
 		span := trace.Begin("api conversations.history", "(attempt 2)")
+		waiting.Store(true)
 		<-cmd.Context().Done()
 		span.EndErr(cmd.Context().Err())
 		return cmd.Context().Err()
 	}}
-	got := runWith(t, time.Second, one(slow), "slow")
+	got := runRunner(t, runner{commands: one(slow), grace: time.Second, elapsed: expiresOnceStarted(&waiting)}, "slow")
 	if got.code != ExitTimeout {
 		t.Fatalf("%+v", got)
 	}
