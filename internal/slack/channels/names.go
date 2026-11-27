@@ -114,11 +114,24 @@ func (n *Names) Lookup(ctx context.Context, client *slackapi.Client, channelID s
 			return e.Name, nil
 		}
 	}
+	// Dated by when the lookup started, not when it ended: a lookup that
+	// started before a refresh made by another invocation may get the
+	// name from before a rename, and must not win over the refresh.
+	started := n.now()
 	name, err := LookupName(ctx, client, channelID)
 	if err == nil {
-		n.Remember(client, channelID, name)
+		n.Remember(client, channelID, name, started)
 	}
 	return name, err
+}
+
+// Now is the time to give Remember for a lookup that starts now; for a nil
+// *Names, the current time.
+func (n *Names) Now() time.Time {
+	if n == nil {
+		return time.Now()
+	}
+	return n.now()
 }
 
 // Stale returns the cached name of a conversation, expired or not, ""
@@ -140,35 +153,37 @@ func (n *Names) Stale(client *slackapi.Client, channelID string) string {
 }
 
 // Remember caches a name learnt from Slack by a call made for more than
-// the name (Lookup, for the read cursor). An empty name is not cached.
+// the name (Lookup, for the read cursor) that started at fetchedAt (see
+// Now). An empty name is not cached. Of two names of a conversation, the
+// one whose lookup started last wins, in the file as in memory, whichever
+// was written last.
 //
 // The file is written at once, not when the command ends, so that a
 // long-running command (watch, inbox wait) shares what it learns. It is
 // read again, merged and written under the lock of the file
 // (cachefile.Lock), so that the entries other invocations add meanwhile
 // are kept.
-func (n *Names) Remember(client *slackapi.Client, channelID, name string) {
+func (n *Names) Remember(client *slackapi.Client, channelID, name string, fetchedAt time.Time) {
 	if n == nil || name == "" || !slackid.IsChannelID(channelID) {
 		return
 	}
 	n.open(client)
-	now := n.now()
-	e := nameEntry{FetchedAt: now.UnixMilli(), Name: name}
+	e := nameEntry{FetchedAt: fetchedAt.UnixMilli(), Name: name}
 	n.mu.Lock()
 	defer n.mu.Unlock()
-	n.entries[channelID] = e
-	n.fetched[channelID] = e
+	keepNewer(n.entries, channelID, e)
+	keepNewer(n.fetched, channelID, e)
 	if n.path == "" {
 		return
 	}
 	// n.mu keeps the lookups of this invocation from writing at the same
 	// time, the file lock those of other invocations.
 	defer cachefile.Lock(n.path)()
-	// The clock is read again: while this call waited for the locks,
-	// other invocations may have committed names dated after the one
-	// above, which must not look like names from the future and be
-	// pruned. The name itself keeps the time it was fetched at.
-	now = n.now()
+	// Expiry is judged by the clock read now: while this call looked the
+	// name up and waited for the locks, other invocations may have
+	// committed names dated after fetchedAt, which must not look like
+	// names from the future and be pruned.
+	now := n.now()
 	entries := loadNames(n.path)
 	for id, old := range entries {
 		if old.age(now) >= nameCacheKeep {
@@ -184,15 +199,27 @@ func (n *Names) Remember(client *slackapi.Client, channelID, name string) {
 			delete(n.fetched, id)
 			continue
 		}
-		if theirs, ok := entries[id]; !ok || theirs.FetchedAt <= mine.FetchedAt {
-			entries[id] = mine
-		}
+		keepNewer(entries, id, mine)
+	}
+	// What other invocations refreshed since this one read the file is
+	// what it shows from now on (a long-running watch or inbox wait).
+	for id, theirs := range entries {
+		keepNewer(n.entries, id, theirs)
 	}
 	data, err := json.MarshalIndent(nameCacheFile{Version: nameCacheVersion, Entries: entries}, "", "  ")
 	if err != nil {
 		return
 	}
 	cachefile.Write(n.path, append(data, '\n'))
+}
+
+// keepNewer puts e in entries unless they hold a name of id whose lookup
+// started later. On a tie, e wins: it is the same lookup, or one that
+// started in the same millisecond.
+func keepNewer(entries map[string]nameEntry, id string, e nameEntry) {
+	if old, ok := entries[id]; !ok || old.FetchedAt <= e.FetchedAt {
+		entries[id] = e
+	}
 }
 
 // open reads the cache file of the workspace, once.

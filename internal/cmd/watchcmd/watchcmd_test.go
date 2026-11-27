@@ -341,8 +341,8 @@ func TestCachedNamesArePrintedWhileLookupsArePaused(t *testing.T) {
 	})
 	dayAgo := time.Now().Add(-channels.NameCacheTTL - time.Hour)
 	expired := channels.NewNames(channels.NamesOptions{Now: func() time.Time { return dayAgo }})
-	expired.Remember(client, "C0STALE001", "stale")
-	channels.NewNames(channels.NamesOptions{}).Remember(client, "C0FRESH001", "fresh")
+	expired.Remember(client, "C0STALE001", "stale", dayAgo)
+	channels.NewNames(channels.NamesOptions{}).Remember(client, "C0FRESH001", "fresh", time.Now())
 
 	var stdout, stderr bytes.Buffer
 	w := &watcher{

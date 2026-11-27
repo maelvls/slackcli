@@ -277,9 +277,10 @@ func Fetch(ctx context.Context, client *slackapi.Client, opts Options) (Result, 
 		if viaUsersCounts {
 			// The call is needed for the read cursor: only a name that
 			// is nothing more is taken from the cache.
+			started := opts.Names.Now()
 			info, err = channels.Lookup(ctx, client, e.id)
 			if err == nil {
-				opts.Names.Remember(client, e.id, info.Name)
+				opts.Names.Remember(client, e.id, info.Name, started)
 			}
 		} else {
 			info.Name, err = opts.Names.Lookup(ctx, client, e.id)

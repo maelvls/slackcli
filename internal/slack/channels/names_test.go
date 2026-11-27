@@ -190,7 +190,7 @@ func TestNilNames(t *testing.T) {
 			t.Fatalf("got %q, %v", got, err)
 		}
 	}
-	names.Remember(rec.client(), "C0GENERAL1", "general")
+	names.Remember(rec.client(), "C0GENERAL1", "general", time.Now())
 	if len(rec.calls) != 4 || names.Stale(rec.client(), "C0GENERAL1") != "" {
 		t.Errorf("calls %v", rec.methods())
 	}
@@ -238,7 +238,7 @@ func TestNamesStale(t *testing.T) {
 	}
 	// After nameCacheKeep, the next write drops it.
 	names = NewNames(NamesOptions{CacheDir: dir, Now: at(t0.Add(nameCacheKeep))})
-	names.Remember(namesServer().client(), "C0OTHER001", "other")
+	names.Remember(namesServer().client(), "C0OTHER001", "other", names.Now())
 	if entries := loadNames(namesFile(t, dir)); len(entries) != 2 || entries["C0GENERAL1"].Name != "" {
 		t.Errorf("entries = %+v", entries)
 	}
@@ -480,7 +480,7 @@ func TestNamesConcurrentWriters(t *testing.T) {
 func TestResolveIDIgnoresTheNamesCache(t *testing.T) {
 	testenv.Isolate(t)
 	// The cache says C0STALE001 is #general (it was, before a rename).
-	NewNames(NamesOptions{Now: at(t0)}).Remember(namesServer().client(), "C0STALE001", "general")
+	NewNames(NamesOptions{Now: at(t0)}).Remember(namesServer().client(), "C0STALE001", "general", t0)
 
 	rec := workspace{search: map[string]map[string]any{"general": ch("C0LIVE0001", "general")}}.recorder()
 	id, err := ResolveID(context.Background(), rec.client(), "#general")
@@ -496,7 +496,7 @@ func TestResolveIDIgnoresTheNamesCache(t *testing.T) {
 // trusted as a stale fallback than as a fresh one.
 func TestNamesStaleRejectsFutureEntries(t *testing.T) {
 	dir := t.TempDir()
-	NewNames(NamesOptions{CacheDir: dir, WorkspaceURL: "https://test.slack.com", Now: at(t0.Add(time.Hour))}).Remember(nil, "C0GENERAL1", "general")
+	NewNames(NamesOptions{CacheDir: dir, WorkspaceURL: "https://test.slack.com", Now: at(t0.Add(time.Hour))}).Remember(nil, "C0GENERAL1", "general", t0.Add(time.Hour))
 	if got := NewNames(NamesOptions{CacheDir: dir, Now: at(t0)}).Stale(namesServer().client(), "C0GENERAL1"); got != "" {
 		t.Errorf("Stale = %q, want nothing from the future", got)
 	}
@@ -566,11 +566,11 @@ func TestNamesWriteAfterWaitingKeepsWhatWasCommittedMeanwhile(t *testing.T) {
 	slow.open(nil)
 	// Meanwhile, another writer commits two names.
 	other := NewNames(NamesOptions{CacheDir: dir, WorkspaceURL: "https://test.slack.com", Now: at(t0.Add(time.Minute))})
-	other.Remember(nil, "C0GENERAL1", "renamed")
-	other.Remember(nil, "C0OTHER001", "other")
+	other.Remember(nil, "C0GENERAL1", "renamed", other.Now())
+	other.Remember(nil, "C0OTHER001", "other", other.Now())
 
 	slow.fetched["C0GENERAL1"] = nameEntry{FetchedAt: t0.Add(-time.Hour).UnixMilli(), Name: "general"}
-	slow.Remember(nil, "C0RANDOM01", "random")
+	slow.Remember(nil, "C0RANDOM01", "random", slow.Now())
 
 	entries := loadNames(namesFile(t, dir))
 	want := map[string]nameEntry{
@@ -581,5 +581,80 @@ func TestNamesWriteAfterWaitingKeepsWhatWasCommittedMeanwhile(t *testing.T) {
 	}
 	if !reflect.DeepEqual(entries, want) {
 		t.Errorf("entries = %+v\nwant %+v", entries, want)
+	}
+}
+
+// A lookup that started before a refresh but ends after it must not win:
+// what it got may be the name from before a rename. A name is dated by
+// when its lookup started.
+func TestNamesOlderLookupDoesNotOverwriteANewerRefresh(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	var clockAt atomic.Int64
+	clockAt.Store(t0.UnixMilli())
+	clock := func() time.Time { return time.UnixMilli(clockAt.Load()) }
+
+	// A long-running invocation starts looking the channel up at t0;
+	// Slack is slow to answer it.
+	started, release := make(chan struct{}), make(chan struct{})
+	slow := &recorder{serve: func(string, map[string]any) (map[string]any, error) {
+		close(started)
+		<-release
+		return map[string]any{"channel": map[string]any{"id": "C0GENERAL1", "name": "general"}}, nil
+	}}
+	watch := NewNames(NamesOptions{CacheDir: dir, Now: clock})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		if _, err := watch.Lookup(ctx, slow.client(), "C0GENERAL1"); err != nil {
+			t.Error(err)
+		}
+	}()
+	<-started
+
+	// Meanwhile the channel is renamed, and another invocation refreshes
+	// it at t0+1m.
+	renamed := &recorder{serve: func(string, map[string]any) (map[string]any, error) {
+		return map[string]any{"channel": map[string]any{"id": "C0GENERAL1", "name": "renamed"}}, nil
+	}}
+	if _, err := NewNames(NamesOptions{CacheDir: dir, Now: at(t0.Add(time.Minute)), ForceRefresh: true}).Lookup(ctx, renamed.client(), "C0GENERAL1"); err != nil {
+		t.Fatal(err)
+	}
+	// The slow lookup ends at t0+2m.
+	clockAt.Store(t0.Add(2 * time.Minute).UnixMilli())
+	close(release)
+	<-done
+
+	if e := loadNames(namesFile(t, dir))["C0GENERAL1"]; e.Name != "renamed" || e.FetchedAt != t0.Add(time.Minute).UnixMilli() {
+		t.Errorf("C0GENERAL1 = %+v, want the refresh", e)
+	}
+	// Nor does it win in the memory of the long-running invocation.
+	if got := watch.Stale(nil, "C0GENERAL1"); got != "renamed" {
+		t.Errorf("Stale = %q, want the refresh", got)
+	}
+}
+
+// A long-running invocation sees the names other invocations refreshed
+// since it started, as soon as it writes the file again.
+func TestNamesWritesPickUpNewerNames(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	now := t0
+	watch := NewNames(NamesOptions{CacheDir: dir, Now: func() time.Time { return now }})
+	if _, err := watch.Lookup(ctx, namesServer().client(), "C0GENERAL1"); err != nil {
+		t.Fatal(err)
+	}
+	renamed := &recorder{serve: func(string, map[string]any) (map[string]any, error) {
+		return map[string]any{"channel": map[string]any{"id": "C0GENERAL1", "name": "renamed"}}, nil
+	}}
+	if _, err := NewNames(NamesOptions{CacheDir: dir, Now: at(t0.Add(time.Hour)), ForceRefresh: true}).Lookup(ctx, renamed.client(), "C0GENERAL1"); err != nil {
+		t.Fatal(err)
+	}
+	now = t0.Add(2 * time.Hour)
+	if _, err := watch.Lookup(ctx, namesServer().client(), "C0RANDOM01"); err != nil {
+		t.Fatal(err)
+	}
+	if got := watch.Stale(nil, "C0GENERAL1"); got != "renamed" {
+		t.Errorf("Stale = %q, want the name refreshed by the other invocation", got)
 	}
 }

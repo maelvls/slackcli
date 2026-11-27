@@ -63,7 +63,7 @@ func TestListCachesNames(t *testing.T) {
 func TestListRateLimitedNamesUseStaleEntries(t *testing.T) {
 	dir := t.TempDir()
 	old := channels.NewNames(channels.NamesOptions{CacheDir: dir, WorkspaceURL: "https://test.slack.com", Now: clock(t0.Add(-48 * time.Hour))})
-	old.Remember(nil, "C0GENERAL1", "general")
+	old.Remember(nil, "C0GENERAL1", "general", old.Now())
 
 	serve := namedLater(true)
 	client := slackapi.NewFake(func(_ context.Context, method string, params map[string]any) (map[string]any, error) {
