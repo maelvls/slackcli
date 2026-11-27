@@ -66,7 +66,8 @@ func TestMustAbortRequired(t *testing.T) {
 		// The code some methods answer in the body of an HTTP 200, for an
 		// *APIError that did not come from the client (which gives it as
 		// a *RateLimitError).
-		"ratelimited code": fmt.Errorf("wrapped: %w", &slackapi.APIError{Method: "conversations.replies", Code: RateLimitedCode}),
+		"ratelimited code":  fmt.Errorf("wrapped: %w", &slackapi.APIError{Method: "conversations.replies", Code: RateLimitedCode}),
+		"rate_limited code": fmt.Errorf("wrapped: %w", &slackapi.APIError{Method: "chat.postMessage", Code: slackapi.PostingRateLimitedCode}),
 	} {
 		if !MustAbortRequired(ctx, err) {
 			t.Errorf("%s does not abort a required lookup", name)

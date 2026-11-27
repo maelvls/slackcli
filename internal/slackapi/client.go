@@ -303,7 +303,8 @@ func RateLimitMaxWait() time.Duration {
 // everything else (maps, slices, structs) is JSON-encoded.
 //
 // A response with ok=false is returned as an *APIError, except a rate
-// limit: an HTTP 429 or the "ratelimited" error code is a *RateLimitError
+// limit: an HTTP 429 or the "ratelimited" (or "rate_limited", see
+// PostingRateLimitedCode) error code is a *RateLimitError
 // (which wraps the *APIError of the code).
 func (c *Client) API(ctx context.Context, method string, params map[string]any) (map[string]any, error) {
 	return c.call(ctx, method, params, false)
@@ -404,7 +405,7 @@ func (c *Client) callOnce(ctx context.Context, method string, params map[string]
 		if resp == nil {
 			resp = map[string]any{"ok": true}
 		}
-		if code, _ := resp["error"].(string); code == RateLimitedCode && resp["ok"] != true {
+		if code, _ := resp["error"].(string); IsRateLimitCode(code) && resp["ok"] != true {
 			// The rate limit a handler answers in the body, as Slack
 			// may: the same error as an HTTP 429 (see the loop below).
 			rec.done(0, resp, code)
@@ -487,10 +488,13 @@ func (c *Client) callOnce(ctx context.Context, method string, params map[string]
 			rec.done(status, data, code)
 		}
 		switch {
-		case code == RateLimitedCode && data["ok"] != true:
+		case IsRateLimitCode(code) && data["ok"] != true:
 			// Some methods answer a rate limit with an HTTP 200 (or
-			// another status) and this code instead of an HTTP 429: it is
-			// the same refusal, waited for and retried the same way.
+			// another status) and one of these codes instead of an HTTP
+			// 429: it is the same refusal, waited for and retried the same
+			// way. Retrying is safe for a write too: an ok=false answer
+			// means it was not done (chat.postMessage's rate_limited: the
+			// message was not posted).
 			retryAfter := parseRetryAfter(header.Get("Retry-After"))
 			maxWait := RateLimitMaxWait()
 			span.Fail(fmt.Sprintf("HTTP %d, %s, Retry-After %s", status, code, retryAfter))

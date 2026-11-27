@@ -59,12 +59,13 @@ func MustAbortRequired(ctx context.Context, err error) bool {
 
 // IsRateLimit reports whether err is Slack refusing a call for now: an
 // HTTP 429, or the "ratelimited" error code that some methods answer in
-// the body of an HTTP 200. The client returns both as a
-// *slackapi.RateLimitError; the code is also recognised on its own, for an
-// *slackapi.APIError that did not come from the client.
+// the body of an HTTP 200 ("rate_limited" for chat.postMessage and
+// chat.scheduleMessage). The client returns all of them as a
+// *slackapi.RateLimitError; the codes are also recognised on their own,
+// for an *slackapi.APIError that did not come from the client.
 func IsRateLimit(err error) bool {
 	var rl *slackapi.RateLimitError
-	return errors.As(err, &rl) || slackapi.IsErrorCode(err, RateLimitedCode)
+	return errors.As(err, &rl) || slackapi.IsRateLimitCode(slackapi.ErrorCode(err))
 }
 
 // Gate stops one kind of optional lookup for the rest of an invocation
@@ -124,7 +125,7 @@ func Cause(err error) string {
 		return rl.Summary()
 	}
 	var api *slackapi.APIError
-	if errors.As(err, &api) && api.Code == RateLimitedCode {
+	if errors.As(err, &api) && slackapi.IsRateLimitCode(api.Code) {
 		return fmt.Sprintf("Slack API call %s was rate limited", api.Method)
 	}
 	if err == nil {
