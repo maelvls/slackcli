@@ -194,7 +194,7 @@ func TestResolveByIDKeysCacheByWorkspace(t *testing.T) {
 	}
 
 	// By default the client's workspace is the key (NewFake: test.slack.com).
-	if workspaceKey("https://test.slack.com") == "" || cachePath(dir, "") != "" {
+	if cachePath(dir, "https://test.slack.com") == "" || cachePath(dir, "") != "" {
 		t.Error("unexpected workspace keys")
 	}
 	rec := infoServer()

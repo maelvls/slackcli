@@ -3,17 +3,14 @@ package users
 import (
 	"cmp"
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
-	"net/url"
 	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/maelvls/slackcli/internal/appinfo"
+	"github.com/maelvls/slackcli/internal/cachefile"
 	"github.com/maelvls/slackcli/internal/jsonx"
 	"github.com/maelvls/slackcli/internal/slack/enrich"
 	"github.com/maelvls/slackcli/internal/slackapi"
@@ -178,23 +175,7 @@ func fetchUsers(ctx context.Context, client *slackapi.Client, ids []string, limi
 // cachePath returns the cache file of a workspace, or "" when the
 // workspace is unknown (nothing is cached then).
 func cachePath(dir, workspaceURL string) string {
-	key := workspaceKey(workspaceURL)
-	if key == "" {
-		return ""
-	}
-	return filepath.Join(dir, "users-cache-"+key+".json")
-}
-
-func workspaceKey(workspaceURL string) string {
-	source := strings.ToLower(strings.TrimSpace(workspaceURL))
-	if u, err := url.Parse(source); err == nil && u.Hostname() != "" {
-		source = u.Hostname()
-	}
-	if source == "" || source == "unknown" {
-		return ""
-	}
-	sum := sha256.Sum256([]byte(source))
-	return hex.EncodeToString(sum[:])[:16]
+	return cachefile.Path(dir, "users-cache", workspaceURL)
 }
 
 // loadCache reads a cache file. A missing, unreadable, corrupt or
@@ -242,24 +223,7 @@ func storeCache(path string, fetched map[string]CompactUser, now time.Time) {
 	if err != nil {
 		return
 	}
-
-	dir := filepath.Dir(path)
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return
-	}
-	tmp, err := os.CreateTemp(dir, ".users-cache-*.tmp") // created 0600
-	if err != nil {
-		return
-	}
-	defer os.Remove(tmp.Name()) // no-op once renamed
-	if _, err := tmp.Write(append(data, '\n')); err != nil {
-		tmp.Close()
-		return
-	}
-	if err := tmp.Close(); err != nil {
-		return
-	}
-	_ = os.Rename(tmp.Name(), path)
+	cachefile.Write(path, append(data, '\n'))
 }
 
 func dedupeUserIDs(ids []string) []string {
