@@ -301,11 +301,15 @@ func postBytes(ctx context.Context, client *slackapi.Client, uploadURL string, b
 	// connection that went dead: a half-open TCP connection, a captive
 	// portal, a laptop put to sleep. The watchdog cancels the request when
 	// no byte of the file was taken for idle, and, once all of it was
-	// taken, when no answer came idle after the last one.
+	// taken, when no answer came within tail after the last one. The tail
+	// is longer: a byte taken is not a byte sent, and the last megabytes
+	// may still sit in the socket buffers of a slow link, which drain with
+	// nothing more to read, before Slack even starts to answer.
 	idle := stallTimeout()
+	tail := max(idle, stallTailMin)
 	ctx, cancel := context.WithCancelCause(ctx)
 	defer cancel(nil)
-	w := &stallWatch{r: body, idle: idle, size: size}
+	w := &stallWatch{r: body, idle: idle, tail: tail, size: size}
 	w.timer = time.AfterFunc(idle, func() { cancel(errStalled) })
 	defer w.timer.Stop()
 
@@ -352,11 +356,14 @@ func postBytes(ctx context.Context, client *slackapi.Client, uploadURL string, b
 	}
 	// The answer came: the rest (a short body) gets one more idle period.
 	w.timer.Reset(idle)
-	snippet, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+	snippet, readErr := io.ReadAll(io.LimitReader(resp.Body, 512))
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
 		msg := fmt.Sprintf("sending file bytes to %s failed with HTTP %d", u.Host, resp.StatusCode)
 		if s := strings.TrimSpace(string(snippet)); s != "" {
 			msg += ": " + s
+		}
+		if readErr != nil && errors.Is(context.Cause(ctx), errStalled) {
+			msg += fmt.Sprintf(" (the rest of its answer stalled for %s)", idle)
 		}
 		return errors.New(msg)
 	}
@@ -371,11 +378,17 @@ var errStalled = errors.New("upload stalled")
 // limit of one Slack request (slackapi.APITimeout). A variable for tests.
 var stallTimeout = slackapi.APITimeout
 
+// stallTailMin is the least time to wait for an answer after the last
+// byte of the file was taken (the stall timeout when longer). A variable
+// for tests.
+var stallTailMin = 2 * time.Minute
+
 // stallWatch passes the bytes of a file on to the transport, and pushes
 // back the stall watchdog (timer) each time some are taken.
 type stallWatch struct {
 	r     io.Reader
 	idle  time.Duration
+	tail  time.Duration
 	size  int64
 	timer *time.Timer
 	// sent is the number of bytes handed to the transport. The transport
@@ -385,9 +398,12 @@ type stallWatch struct {
 
 func (w *stallWatch) Read(p []byte) (int, error) {
 	n, err := w.r.Read(p)
-	if n > 0 {
-		w.sent.Add(int64(n))
-		w.timer.Reset(w.idle)
+	if n > 0 || err == io.EOF {
+		d := w.idle
+		if w.sent.Add(int64(n)) >= w.size || err == io.EOF {
+			d = w.tail
+		}
+		w.timer.Reset(d)
 	}
 	return n, err
 }
@@ -396,15 +412,17 @@ func (w *stallWatch) Read(p []byte) (int, error) {
 // do about it.
 func (w *stallWatch) stalledError(host string) error {
 	sent := w.sent.Load()
+	waited := w.idle
 	where := fmt.Sprintf("after %s of %s were sent", humanSize(sent), humanSize(w.size))
 	if sent >= w.size {
-		where = fmt.Sprintf("all %s were sent but %s never answered", humanSize(w.size), host)
+		waited = w.tail
+		where = fmt.Sprintf("all %s were handed to the network but %s never answered", humanSize(w.size), host)
 	}
 	return fmt.Errorf("sending file bytes to %s: the upload stalled: no progress for %s (%s). "+
 		"The connection is probably dead (network change, sleep, captive portal, VPN): "+
 		"check the network and run the command again; nothing was posted. "+
-		"%s sets how long to wait (in milliseconds)",
-		host, w.idle, where, appinfo.EnvName("API_TIMEOUT_MS"))
+		"%s sets how long to wait for progress (in milliseconds; the wait for an answer is at least %s)",
+		host, waited, where, appinfo.EnvName("API_TIMEOUT_MS"), stallTailMin)
 }
 
 func describe(files []File) string {

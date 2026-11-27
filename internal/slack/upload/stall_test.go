@@ -15,9 +15,10 @@ import (
 // withStallTimeout shortens the stall timeout for the test.
 func withStallTimeout(t *testing.T, d time.Duration) {
 	t.Helper()
-	old := stallTimeout
+	old, oldTail := stallTimeout, stallTailMin
 	stallTimeout = func() time.Duration { return d }
-	t.Cleanup(func() { stallTimeout = old })
+	stallTailMin = d
+	t.Cleanup(func() { stallTimeout, stallTailMin = old, oldTail })
 }
 
 // byteServer is a pre-signed upload endpoint served by handler, and a
@@ -60,7 +61,7 @@ func TestUploadFailsWhenTheAnswerNeverComes(t *testing.T) {
 	if elapsed > 3*time.Second {
 		t.Errorf("failed after %s, want about the stall timeout", elapsed)
 	}
-	for _, want := range []string{"the upload stalled", "no progress for 200ms", "all 10000 bytes were sent", "never answered", "run the command again", "SLACKCLI_API_TIMEOUT_MS"} {
+	for _, want := range []string{"the upload stalled", "no progress for 200ms", "all 10000 bytes were handed to the network", "never answered", "run the command again", "SLACKCLI_API_TIMEOUT_MS"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("error does not say %q: %v", want, err)
 		}
@@ -136,4 +137,21 @@ func (s *slowReader) Read(p []byte) (int, error) {
 	s.chunks--
 	p[0] = 's'
 	return 1, nil
+}
+
+// After the last byte was taken, the answer gets the longer tail wait,
+// not the stall timeout: the end of a large file may still be draining
+// from the socket buffers of a slow link.
+func TestAnswerAfterTheLastByteGetsTheTailWait(t *testing.T) {
+	withStallTimeout(t, 200*time.Millisecond)
+	stallTailMin = 2 * time.Second
+	srv, client := byteServer(t, func(w http.ResponseWriter, r *http.Request, _ <-chan struct{}) {
+		_, _ = io.Copy(io.Discard, r.Body)
+		// Longer than the stall timeout, shorter than the tail.
+		time.Sleep(600 * time.Millisecond)
+	})
+	content := strings.Repeat("x", 10_000)
+	if err := postBytes(context.Background(), client, srv.URL+"/f", strings.NewReader(content), int64(len(content))); err != nil {
+		t.Fatal(err)
+	}
 }

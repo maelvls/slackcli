@@ -222,7 +222,7 @@ $ tail -f "$(slackcli audit path)"
 | `SLACK_WORKSPACE_URL` | Default for `--workspace`. |
 | `SLACKCLI_SAFE_MODE` | Turns safe mode on. |
 | `SLACKCLI_COMMAND_TIMEOUT_MS` | Time limit of a command (default 30000). `message compose` and uploads (`--attach`) have none. |
-| `SLACKCLI_API_TIMEOUT_MS` | Time limit of one Slack request (default 20000). An upload fails when it makes no progress for that long: no byte of the file sent, or no answer after the last one. |
+| `SLACKCLI_API_TIMEOUT_MS` | Time limit of one Slack request (default 20000). An upload fails when no byte of the file is sent for that long, or when no answer comes within 2 minutes (or that long, if longer) after the last one. |
 | `SLACKCLI_RATE_LIMIT_MAX_WAIT_MS` | How long to wait and retry when Slack rate-limits (default 0: fail at once). |
 | `SLACKCLI_KEYCHAIN_TIMEOUT_MS` | Time limit of a macOS keychain call (default 3000). |
 | `SLACKCLI_DEBUG` | Set to 1 to trace every Slack call and wait on stderr, with durations (see [Output](#output)). |
