@@ -229,7 +229,7 @@ func TestResolveUserIDBySearch(t *testing.T) {
 	t.Run("GetUser fetches the profile of a user found by search", func(t *testing.T) {
 		full := member("U00000001A", "alice", "real_name", "Alice A")
 		rec := directory{posted: map[string]string{"alice": "U00000001A"}, pages: [][]map[string]any{{full}}}.recorder()
-		got, err := GetUser(ctx, rec.client(), "@alice")
+		got, err := GetUser(ctx, rec.client(), "@alice", GetUserOptions{})
 		if err != nil || got.RealName != "Alice A" {
 			t.Errorf("got %+v, %v", got, err)
 		}

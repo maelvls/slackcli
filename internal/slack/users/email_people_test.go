@@ -75,7 +75,7 @@ func TestEmailWithBrowserCredentialsUsesThePeopleSearch(t *testing.T) {
 	// email and no tz. users.info has them, and confirms the address.
 	t.Run("one match without email, confirmed by users.info", func(t *testing.T) {
 		rec := peopleWorkspace{items: []map[string]any{person("U00000001A", "alice", "Alice A", "")}, info: []map[string]any{alice}}.recorder()
-		got, err := GetUser(ctx, rec.client(), "alice@example.com")
+		got, err := GetUser(ctx, rec.client(), "alice@example.com", GetUserOptions{})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -363,7 +363,7 @@ func TestEmailWithBrowserCredentialsUsesThePeopleSearch(t *testing.T) {
 	// The tokens that may call users.lookupByEmail keep using it.
 	t.Run("a user token still uses users.lookupByEmail", func(t *testing.T) {
 		rec := directory{byEmail: map[string]map[string]any{"alice@example.com": alice}}.recorder()
-		got, err := GetUser(ctx, rec.userTokenClient(), "alice@example.com")
+		got, err := GetUser(ctx, rec.userTokenClient(), "alice@example.com", GetUserOptions{})
 		if err != nil || got.ID != "U00000001A" {
 			t.Fatalf("got %+v, %v", got, err)
 		}

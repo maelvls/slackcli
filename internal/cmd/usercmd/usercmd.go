@@ -162,7 +162,17 @@ func newGetCommand(rt *clictx.Context) *cobra.Command {
 Prints the user: id, name (the handle), real_name, display_name, email,
 title, tz, is_bot, deleted, status_text, status_emoji, status_expiration.
 Fails when nobody matches, or when a name designates several members (the
-error lists their IDs).`,
+error lists their IDs).
+
+Slack hides the email of many members from browser credentials. When the
+people search finds one member, and only one, for an email address, and
+Slack hides that member's email, so that nothing can confirm it is theirs,
+"user get" still prints that member, with "email_verified": false and a
+hint that says so: the match is the search's word only. Check it before
+acting on it (the commands that act on a user, such as "channel invite",
+"user dm-open" and "search --user", refuse such a match). email_verified
+is absent otherwise, which does not mean that an email was checked: a
+user given by ID or handle has none either.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := cmd.Context()
@@ -172,10 +182,16 @@ error lists their IDs).`,
 				if err != nil {
 					return users.CompactUser{}, err
 				}
-				return users.GetUser(ctx, r.Client, args[0])
+				// Read-only: a match the people search alone vouches
+				// for is shown, marked email_verified: false.
+				return users.GetUser(ctx, r.Client, args[0], users.GetUserOptions{AllowUnverifiedEmail: true})
 			})
 			if err != nil {
 				return err
+			}
+			if payload.EmailVerified != nil && !*payload.EmailVerified {
+				rt.ResultHintf("Slack hides this member's email: matched to %q by Slack's people search only, not confirmed by users.info. "+
+					"Check that this is the right person before acting on it.", strings.TrimSpace(args[0]))
 			}
 			return rt.Print(payload)
 		},

@@ -601,3 +601,23 @@ func TestMaxBodyCharsAndItsAlias(t *testing.T) {
 		}
 	}
 }
+
+// TestUserFlagRefusesAnUnverifiedEmailMatch: "user get" shows the one
+// member the people search finds for an email that Slack hides on that
+// member; --user does not search on the people search's word alone.
+func TestUserFlagRefusesAnUnverifiedEmailMatch(t *testing.T) {
+	h := newHarness(t)
+	h.on("search.modules.people", func(map[string]any) (map[string]any, error) {
+		return map[string]any{"items": []any{map[string]any{"id": "U000000789", "username": "dan"}}}, nil
+	})
+	h.on("users.info", func(map[string]any) (map[string]any, error) {
+		return map[string]any{"user": map[string]any{"id": "U000000789", "name": "dan", "profile": map[string]any{"real_name": "Dan D"}}}, nil
+	})
+	out, err := h.run("messages", "hello", "--user", "dan@example.com")
+	if err == nil || !strings.Contains(err.Error(), "cannot be checked") || !strings.Contains(err.Error(), "U000000789") {
+		t.Errorf("err = %v", err)
+	}
+	if out != "" || len(h.callsTo("search.messages")) != 0 {
+		t.Errorf("printed %q, search.messages calls = %v", out, h.callsTo("search.messages"))
+	}
+}

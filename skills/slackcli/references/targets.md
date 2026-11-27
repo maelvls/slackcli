@@ -27,13 +27,13 @@ A user ID (`U...` or `W...`, equivalent) means the direct message with that user
 - `message send`, `message compose`, `message draft create`, `message draft update --channel` and `message scheduled list/cancel --channel` write to it, opening it if need be.
 - `message edit/delete/react`, `channel mark` and the `later` write commands reject it: pass a message URL, or the DM's channel ID (`D…`, the `channel_id` that `message list U…` prints) with `--ts`.
 
-A `@handle` is not a target: get the ID with `user get <handle>`, or with `user search <words>` when you only know part of the name. For a group DM, `user dm-open <users...>` (2 to 8 other users; IDs or emails are fastest) prints its `channel_id`; it is a write, as it opens the conversation.
+A `@handle` is not a target: get the ID with `user get <handle>`, or with `user search <words>` when you only know part of the name; a `user get` result with `"email_verified": false` is unconfirmed (see Users below). For a group DM, `user dm-open <users...>` (2 to 8 other users; IDs or emails are fastest) prints its `channel_id`; it is a write, as it opens the conversation.
 
 Other argument kinds:
 
 - `<canvas>`: a canvas URL (`https://<workspace>.slack.com/docs/T.../F...`), a channel-canvas URL (`https://<workspace>.slack.com/canvas/C...`) or a canvas ID (`F...`).
 - `<trigger>` for `workflow preview/run`: a trigger ID (`Ft...`, from `workflow list`) or a shortcut URL (`https://slack.com/shortcuts/Ft.../...`). `workflow get` also takes a workflow ID (`Wf...`). `workflow run` requires `--channel`.
-- Users (`user get`, `--user`, `--users`): a user ID, an email, `@handle`/`handle`; `user get`, `user dm-open` and `search --user` also take an exact display name. Handles and names scan the directory: prefer IDs or emails. An email is one lookup, browser credentials included (Slack's people search, confirmed with `users.info`); when several members match it, the error lists their IDs: pick one, never guess.
+- Users (`user get`, `--user`, `--users`): a user ID, an email, `@handle`/`handle`; `user get`, `user dm-open` and `search --user` also take an exact display name. Handles and names scan the directory: prefer IDs or emails. An email is one lookup, browser credentials included (Slack's people search, confirmed with `users.info`); when several members match it, the error lists their IDs: pick one, never guess. Slack hides the email of many members from browser credentials: when the people search finds exactly one member for the address and Slack hides that member's email, `user get` still prints it, with `"email_verified": false` and a hint (the search's word only, not confirmed); `channel invite`, `user dm-open` and `search --user` refuse that match with an error that gives the candidate's ID. Before acting on an `email_verified: false` user, make sure it is the right person (name, title), then pass its ID. `email_verified` is never `true`: its absence does not mean an email was checked.
 
 ## Workspaces
 
