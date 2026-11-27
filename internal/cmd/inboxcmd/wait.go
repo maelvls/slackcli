@@ -167,8 +167,8 @@ like "inbox", search (for --after): not the token of a Slack app.`,
 			if err := cmdutil.CheckMaxChars("--max-body-chars", maxBodyChars); err != nil {
 				return err
 			}
-			if maxConversations < 1 {
-				return fmt.Errorf("invalid --max-conversations value %d: must be a positive integer", maxConversations)
+			if err := checkMaxConversations(maxConversations); err != nil {
+				return err
 			}
 			if timeout < 0 {
 				return fmt.Errorf("--timeout must be a positive duration such as 30m or 2h, got %s", timeout)

@@ -77,7 +77,7 @@ With several workspaces saved, a channel name needs `--workspace <url-or-name>`,
 
 ```bash
 slackcli inbox                      # the last 3 days
-slackcli inbox --since 12h          # or 2d, or 2026-01-31 (UTC)
+slackcli inbox --since 12h          # or 2d, or 2026-01-31 (from 00:00 local time)
 slackcli inbox --no-threads --max-body-chars 120
 ```
 

@@ -149,7 +149,8 @@ var skippableCodes = []string{
 var relativeSinceRe = regexp.MustCompile(`^(\d+)([dh])$`)
 
 // ParseSince parses the value of --since: "Nd" or "Nh" before now, or a
-// day "YYYY-MM-DD", which starts at midnight UTC.
+// day "YYYY-MM-DD", which starts at midnight in now's location: the local
+// time zone for time.Now(), as for a day given to "message list --oldest".
 func ParseSince(input string, now time.Time) (time.Time, error) {
 	value := strings.TrimSpace(input)
 	if m := relativeSinceRe.FindStringSubmatch(value); m != nil {
@@ -162,10 +163,10 @@ func ParseSince(input string, now time.Time) (time.Time, error) {
 		if n, err := strconv.ParseInt(m[1], 10, 64); err == nil && n <= int64(maxSince/unit) {
 			return now.Add(-time.Duration(n) * unit), nil
 		}
-	} else if t, err := time.Parse("2006-01-02", value); err == nil {
+	} else if t, err := time.ParseInLocation("2006-01-02", value, now.Location()); err == nil {
 		return t, nil
 	}
-	return time.Time{}, fmt.Errorf(`invalid --since value %q: expected a number of days or hours such as 3d or 12h, or a day such as 2026-01-31 (from 00:00 UTC)`, input)
+	return time.Time{}, fmt.Errorf(`invalid --since value %q: expected a number of days or hours such as 3d or 12h, or a day such as 2026-01-31 (from 00:00 local time)`, input)
 }
 
 // candidate is a conversation or a thread that may be waiting on the
