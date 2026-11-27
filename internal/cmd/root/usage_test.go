@@ -59,8 +59,8 @@ func TestEveryGroupRejectsAnUnknownSubcommand(t *testing.T) {
 		}
 
 		// Without arguments a group prints its help, successfully; these
-		// two run their "list" instead.
-		if path == "later" || path == "message scheduled" {
+		// two run their "list" instead, and "inbox" the inbox.
+		if path == "later" || path == "message scheduled" || path == "inbox" {
 			continue
 		}
 		got = runWith(t, time.Second, commands, strings.Fields(path)...)

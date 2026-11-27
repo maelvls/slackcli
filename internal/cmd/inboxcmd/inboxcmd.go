@@ -64,7 +64,9 @@ to see whether it still waits. Nothing is marked as read.
 
 The search goes back to two days before --since, for your own thread posts
 too: a thread whose last post of yours is older than that is not found,
-however recent its replies, unless one of them mentions you.`,
+however recent its replies, unless one of them mentions you.
+
+To wait until something new comes instead of asking again: "inbox wait".`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			start, err := inbox.ParseSince(since, time.Now())
@@ -102,5 +104,6 @@ however recent its replies, unless one of them mentions you.`,
 	cmd.Flags().IntVar(&maxBodyChars, "max-body-chars", inbox.DefaultMaxBodyChars, "Max text characters per item (-1 for unlimited)")
 	cmd.Flags().IntVar(&maxConversations, "max-conversations", inbox.DefaultMaxConversations, "Max conversations and threads to inspect, the most recently active first; when there are more, truncated is true")
 	cmd.Flags().BoolVar(&noThreads, "no-threads", false, "Leave out the new replies in threads you posted in (kind thread)")
+	cmd.AddCommand(newWait(rt))
 	return cmd
 }

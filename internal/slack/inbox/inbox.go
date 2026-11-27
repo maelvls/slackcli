@@ -24,6 +24,7 @@ import (
 
 	"github.com/maelvls/slackcli/internal/jsonx"
 	"github.com/maelvls/slackcli/internal/slack/enrich"
+	"github.com/maelvls/slackcli/internal/slack/messages"
 	"github.com/maelvls/slackcli/internal/slack/slacktext"
 	"github.com/maelvls/slackcli/internal/slack/slackurl"
 	"github.com/maelvls/slackcli/internal/slack/users"
@@ -184,6 +185,8 @@ type candidate struct {
 	// thread posts.
 	mine   bool
 	newest float64
+	// posted is set by evaluate: whether the caller wrote in what it read.
+	posted bool
 }
 
 const convChannel = "channel"
@@ -196,22 +199,39 @@ type draft struct {
 }
 
 type fetcher struct {
-	client  *slackapi.Client
-	sem     chan struct{}
-	me      string
-	sinceTS float64
-	oldest  string
-	// latest is a Slack timestamp after every message there is: with it,
-	// conversations.history pages from the newest message back. It is a
-	// day after Fetch started, so that a local clock running behind
-	// Slack's does not hide the newest messages.
-	latest       string
+	client       *slackapi.Client
+	sem          chan struct{}
+	me           string
+	sinceTS      float64
+	oldest       string
 	baseURL      string
 	maxBodyChars int
 	noThreads    bool
 	// incomplete is set when a conversation or a thread had more messages
 	// than were read.
 	incomplete atomic.Bool
+	// after, when set, is a Slack timestamp: only the messages strictly
+	// after it count, instead of those from sinceTS on (see Waiter).
+	after string
+	// cacheDir is Options.CacheDir.
+	cacheDir string
+}
+
+// latest is a Slack timestamp after every message there is: with it,
+// conversations.history pages from the newest message back. It is a day
+// ahead of the local clock, so that a clock running behind Slack's does
+// not hide the newest messages; it is computed for each read, as a Waiter
+// can run for days.
+func latest() string {
+	return strconv.FormatFloat(float64(time.Now().Add(latestMargin).UnixMicro())/1e6, 'f', 6, 64)
+}
+
+// inWindow reports whether a message of timestamp ts is in the window.
+func (f *fetcher) inWindow(ts string) bool {
+	if f.after != "" {
+		return messages.CompareTS(ts, f.after) > 0
+	}
+	return tsNum(ts) >= f.sinceTS
 }
 
 // Fetch lists what is waiting on the caller since opts.Since.
@@ -236,20 +256,26 @@ type fetcher struct {
 // with holes would read as "nobody else is waiting". Names are an
 // enrichment (see package enrich).
 func Fetch(ctx context.Context, client *slackapi.Client, opts Options) (Result, error) {
+	f, err := newFetcher(ctx, client, opts)
+	if err != nil {
+		return Result{}, err
+	}
+	return f.fetch(ctx, opts)
+}
+
+// newFetcher applies the defaults of opts and asks Slack who the caller is.
+func newFetcher(ctx context.Context, client *slackapi.Client, opts Options) (*fetcher, error) {
 	if opts.MaxBodyChars == 0 {
 		opts.MaxBodyChars = DefaultMaxBodyChars
-	}
-	if opts.MaxConversations <= 0 {
-		opts.MaxConversations = DefaultMaxConversations
 	}
 
 	auth, err := client.API(ctx, "auth.test", nil)
 	if err != nil {
-		return Result{}, err
+		return nil, err
 	}
 	me := jsonx.Str(auth["user_id"])
 	if me == "" {
-		return Result{}, fmt.Errorf("auth.test returned no user_id")
+		return nil, fmt.Errorf("auth.test returned no user_id")
 	}
 	sinceTS := float64(opts.Since.UnixMicro()) / 1e6
 	f := &fetcher{
@@ -258,12 +284,20 @@ func Fetch(ctx context.Context, client *slackapi.Client, opts Options) (Result, 
 		me:           me,
 		sinceTS:      sinceTS,
 		oldest:       strconv.FormatFloat(sinceTS, 'f', 6, 64),
-		latest:       strconv.FormatFloat(float64(time.Now().Add(latestMargin).UnixMicro())/1e6, 'f', 6, 64),
 		baseURL:      strings.TrimRight(cmp.Or(jsonx.Str(auth["url"]), client.WorkspaceURL()), "/"),
 		maxBodyChars: opts.MaxBodyChars,
 		noThreads:    opts.NoThreads,
+		cacheDir:     opts.CacheDir,
 	}
+	return f, nil
+}
 
+// fetch runs the searches and judges each candidate they find.
+func (f *fetcher) fetch(ctx context.Context, opts Options) (Result, error) {
+	if opts.MaxConversations <= 0 {
+		opts.MaxConversations = DefaultMaxConversations
+	}
+	me := f.me
 	// Slack's after: is an exclusive day in the user's timezone: two days
 	// back covers any timezone.
 	after := opts.Since.UTC().Add(-48 * time.Hour).Format("2006-01-02")
@@ -274,7 +308,7 @@ func Fetch(ctx context.Context, client *slackapi.Client, opts Options) (Result, 
 	}
 	found := make([][]map[string]any, len(queries))
 	capped := make([]bool, len(queries))
-	err = each(ctx, len(queries), func(ctx context.Context, i int) (err error) {
+	err := each(ctx, len(queries), func(ctx context.Context, i int) (err error) {
 		found[i], capped[i], err = f.search(ctx, queries[i]+" after:"+after)
 		return err
 	})
@@ -309,27 +343,39 @@ func Fetch(ctx context.Context, client *slackapi.Client, opts Options) (Result, 
 		return Result{}, err
 	}
 	var drafts []*draft
-	var ids []string
 	for _, d := range evaluated {
 		if d != nil {
 			drafts = append(drafts, d)
-			ids = append(ids, d.item.Author.UserID, d.imUser)
-			ids = append(ids, users.MentionedInContent(d.item.Text)...)
 		}
 	}
-	slices.SortStableFunc(drafts, func(a, b *draft) int { return cmp.Compare(tsNum(b.item.TS), tsNum(a.item.TS)) })
-
-	byID, err := users.ResolveByID(ctx, client, ids, users.ResolveOptions{CacheDir: opts.CacheDir})
+	items, err := f.finish(ctx, drafts)
 	if err != nil {
 		return Result{}, err
 	}
-	name := func(id string) string { return users.Label(byID[id]) }
-	result := Result{
+	return Result{
 		UserID:    me,
 		Since:     opts.Since.UTC().Format("2006-01-02T15:04:05.000Z"),
 		Truncated: truncated || f.incomplete.Load(),
-		Items:     make([]Item, len(drafts)),
+		Items:     items,
+	}, nil
+}
+
+// finish turns drafts into items, newest first, with the names of the
+// users looked up.
+func (f *fetcher) finish(ctx context.Context, drafts []*draft) ([]Item, error) {
+	var ids []string
+	for _, d := range drafts {
+		ids = append(ids, d.item.Author.UserID, d.imUser)
+		ids = append(ids, users.MentionedInContent(d.item.Text)...)
 	}
+	slices.SortStableFunc(drafts, func(a, b *draft) int { return cmp.Compare(tsNum(b.item.TS), tsNum(a.item.TS)) })
+
+	byID, err := users.ResolveByID(ctx, f.client, ids, users.ResolveOptions{CacheDir: f.cacheDir})
+	if err != nil {
+		return nil, err
+	}
+	name := func(id string) string { return users.Label(byID[id]) }
+	items := make([]Item, len(drafts))
 	for i, d := range drafts {
 		item := d.item
 		item.ChannelName = d.channelName
@@ -338,9 +384,9 @@ func Fetch(ctx context.Context, client *slackapi.Client, opts Options) (Result, 
 		}
 		item.Author.Name = name(item.Author.UserID)
 		item.Text = users.NameContent(item.Text, byID)
-		result.Items[i] = item
+		items[i] = item
 	}
-	return result, nil
+	return items, nil
 }
 
 // each runs fn(ctx, i) for every i below n, all at once (fetcher.api
@@ -426,7 +472,7 @@ func (s *candidates) add(f *fetcher, m map[string]any, mention, mine bool) {
 	if channelID == "" || ts == "" {
 		return
 	}
-	if !mine && (tsNum(ts) < f.sinceTS || jsonx.Str(m["user"]) == f.me) {
+	if !mine && (!f.inWindow(ts) || jsonx.Str(m["user"]) == f.me) {
 		return
 	}
 	name := jsonx.Str(ch["name"])
@@ -501,9 +547,10 @@ func (f *fetcher) evaluate(ctx context.Context, c *candidate) (*draft, error) {
 			ack = max(ack, ts)
 		}
 	}
+	c.posted = posted
 	var waiting []map[string]any
 	for _, m := range msgs {
-		if ts := tsNum(jsonx.Str(m["ts"])); ts > ack && ts >= f.sinceTS && isFromOther(m, f.me) {
+		if ts := jsonx.Str(m["ts"]); tsNum(ts) > ack && f.inWindow(ts) && isFromOther(m, f.me) {
 			waiting = append(waiting, m)
 		}
 	}
@@ -626,7 +673,7 @@ func (f *fetcher) history(ctx context.Context, channelID string) ([]map[string]a
 	msgs, err := f.pages(ctx, "conversations.history", map[string]any{
 		"channel":   channelID,
 		"oldest":    f.oldest,
-		"latest":    f.latest,
+		"latest":    latest(),
 		"inclusive": true,
 	}, func(m map[string]any) bool { return f.acknowledged(m, true) })
 	if err != nil {
