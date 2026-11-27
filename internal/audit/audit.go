@@ -184,6 +184,10 @@ func Record(e Entry) {
 		}
 	})
 	e.Parent, e.Ancestors = process.parent, process.ancestors
+	// The error code comes from the answer: a long one is not Slack's.
+	if len(e.Error) > maxErrorLen {
+		e.Error = e.Error[:maxErrorLen] + Placeholder
+	}
 	process.mu.Lock()
 	e.Cmd, e.Args = process.cmd, process.args
 	process.mu.Unlock()
@@ -197,6 +201,9 @@ func Record(e Entry) {
 		reportOnce(err)
 	}
 }
+
+// maxErrorLen bounds the error code that is kept.
+const maxErrorLen = 100
 
 // maxAncestors is how many processes up from slackcli are named.
 const maxAncestors = 5
@@ -239,9 +246,10 @@ func appendLine(path string, line []byte) error {
 			f.Close()
 			continue
 		}
-		if info.Size()+int64(len(line)) > maxSize {
+		if info.Size()+int64(len(line)) > maxSize && info.Size() >= maxSize/2 {
 			// rotate closes f; the line goes to the file that replaces
-			// it.
+			// it. A file under half the limit is not rotated (see
+			// renameIfSame): a long line is appended to it instead.
 			unlock(f)
 			if err := rotate(f, info, path); err != nil {
 				return err
