@@ -37,7 +37,8 @@ Slackbot, system messages and the DM with yourself are ignored.
 
 Prints JSON:
   user_id    you
-  since      start of the window, in UTC
+  since      start of the window, in UTC (a --since day starts at local
+             midnight, so east of UTC this reads as the evening before)
   truncated  true when there was more to look at than was looked at: more
              candidates than --max-conversations (raise it), or more
              matches than the 200 read from each search, or a
