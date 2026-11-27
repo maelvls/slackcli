@@ -16,6 +16,7 @@ import (
 	"github.com/maelvls/slackcli/internal/auth"
 	"github.com/maelvls/slackcli/internal/clictx"
 	"github.com/maelvls/slackcli/internal/slackapi"
+	"github.com/maelvls/slackcli/internal/testenv"
 )
 
 const messageURL = "https://acme.slack.com/archives/C12345678/p1700000000000100"
@@ -43,6 +44,9 @@ type harness struct {
 
 func newHarness(t *testing.T) *harness {
 	t.Helper()
+	// The channel names are cached on disk: never in the real cache, and
+	// never from one test to the next.
+	testenv.Isolate(t)
 	for _, env := range []string{"SLACK_TOKEN", "SLACK_COOKIE_D", "SLACK_COOKIE", "SLACK_WORKSPACE_URL"} {
 		t.Setenv(env, "")
 	}

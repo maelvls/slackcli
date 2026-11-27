@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"github.com/maelvls/slackcli/internal/jsonx"
 	"github.com/maelvls/slackcli/internal/slack/channels"
@@ -71,6 +72,8 @@ type ListOptions struct {
 	CountsOnly bool
 	// Cursor is ListResult.NextCursor from the previous call.
 	Cursor string
+	// Names gives the names of the channels; nil looks each one up.
+	Names *channels.Names
 }
 
 // Counts is the number of saved items per state, as Slack reports them
@@ -234,7 +237,7 @@ paging:
 		slackCursor, offset = next, 0
 	}
 
-	result.Items, result.Warnings, err = hydrate(ctx, client, raw, opts.MaxBodyChars)
+	result.Items, result.Warnings, err = hydrate(ctx, client, raw, opts.MaxBodyChars, opts.Names)
 	if err != nil {
 		return ListResult{}, err
 	}
@@ -280,7 +283,7 @@ func unixSeconds(v any) int64 {
 
 // hydrate turns raw saved items into Items, resolving each channel name
 // once and fetching each message, with bounded concurrency.
-func hydrate(ctx context.Context, client *slackapi.Client, raw []map[string]any, maxBodyChars int) ([]Item, []string, error) {
+func hydrate(ctx context.Context, client *slackapi.Client, raw []map[string]any, maxBodyChars int, cache *channels.Names) ([]Item, []string, error) {
 	if maxBodyChars == 0 {
 		maxBodyChars = DefaultMaxBodyChars
 	}
@@ -316,19 +319,28 @@ func hydrate(ctx context.Context, client *slackapi.Client, raw []map[string]any,
 			}
 		})
 	}
+	// staleNames counts the channels whose lookup was rate limited but
+	// which a stale cached name was found for.
+	var staleNames atomic.Int32
+	stale := func(id string) {
+		if *names[id] = cache.Stale(client, id); *names[id] != "" {
+			staleNames.Add(1)
+		}
+	}
 	for _, id := range channelIDs {
 		run(func() {
 			if namesLimited.Closed() {
+				stale(id)
 				return
 			}
-			name, err := channels.LookupName(ctx, client, id)
+			name, err := cache.Lookup(ctx, client, id)
 			switch {
 			case err == nil:
 				*names[id] = name
 			case enrich.MustAbort(ctx, err):
 				cancel(fmt.Errorf("looking up the name of %s: %w", id, err))
-			default:
-				namesLimited.Failed(err)
+			case namesLimited.Failed(err):
+				stale(id)
 			}
 		})
 	}
@@ -365,7 +377,8 @@ func hydrate(ctx context.Context, client *slackapi.Client, raw []map[string]any,
 			`%d of %d saved messages were not fetched (%v): they are listed with "message_error": %q; %s`,
 			n, len(items), enrich.Cause(err), enrich.RateLimitedCode, enrich.Hint()))
 	}
-	if n, err := namesLimited.Skipped(); n > 0 {
+	if n, err := namesLimited.Skipped(); n > int(staleNames.Load()) {
+		n -= int(staleNames.Load())
 		warnings = append(warnings, fmt.Sprintf(
 			"the names of %d of %d channels were not looked up (%v): their items come with the channel ID only; %s",
 			n, len(channelIDs), enrich.Cause(err), enrich.Hint()))

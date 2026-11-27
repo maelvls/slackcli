@@ -191,6 +191,27 @@ func TestWatch(t *testing.T) {
 	}
 }
 
+// The names of the channels are cached on disk: the next watch takes them
+// from there, and prints the same lines.
+func TestWatchCachesChannelNames(t *testing.T) {
+	h := newHarness(t)
+	first := h.run(4)
+	again := h.run(4)
+	if !reflect.DeepEqual(again, first) {
+		t.Errorf("from the cache:\n%s\nlooked up:\n%s", strings.Join(again, "\n"), strings.Join(first, "\n"))
+	}
+	// Only the channel Slack gives no name for is asked for again.
+	infos := 0
+	for _, c := range h.calls {
+		if c == "conversations.info" {
+			infos++
+		}
+	}
+	if infos != 1 {
+		t.Errorf("API calls = %v, want a single conversations.info", h.calls)
+	}
+}
+
 func TestWatchTextAndFilters(t *testing.T) {
 	h := newHarness(t)
 

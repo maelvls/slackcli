@@ -8,6 +8,7 @@ import (
 
 	"github.com/maelvls/slackcli/internal/clictx"
 	"github.com/maelvls/slackcli/internal/cmd/cmdutil"
+	"github.com/maelvls/slackcli/internal/slack/channels"
 	"github.com/maelvls/slackcli/internal/slack/unreads"
 )
 
@@ -17,6 +18,7 @@ func New(rt *clictx.Context) *cobra.Command {
 		workspace                 string
 		maxMessages, maxBodyChars int
 		countsOnly, includeSystem bool
+		refreshNames              bool
 	)
 	cmd := &cobra.Command{
 		Use:   "unreads",
@@ -25,7 +27,7 @@ func New(rt *clictx.Context) *cobra.Command {
 
 Prints JSON:
   channels  conversations with unreads, most mentions first, each with:
-    channel_id, channel_name
+    channel_id, channel_name     (names cached for 24h)
     channel_type                 channel, dm or mpim
     unread_count                 number of unread messages, hidden system
                                  messages included. Slack only says that a
@@ -84,6 +86,7 @@ To see who is waiting for an answer rather than what is unread, use
 			}
 			ctx := cmd.Context()
 			ws := rt.EffectiveWorkspace(workspace)
+			names := channels.NewNames(channels.NamesOptions{ForceRefresh: refreshNames})
 			payload, err := clictx.WithAutoRefresh(ctx, rt, func() (unreads.Result, error) {
 				r, err := rt.Client(ctx, ws)
 				if err != nil {
@@ -94,6 +97,7 @@ To see who is waiting for an answer rather than what is unread, use
 					MaxMessages:   maxMessages,
 					MaxBodyChars:  maxBodyChars,
 					IncludeSystem: includeSystem,
+					Names:         names,
 				})
 			})
 			if err != nil {
@@ -110,5 +114,6 @@ To see who is waiting for an answer rather than what is unread, use
 	cmd.Flags().IntVar(&maxMessages, "max-messages", unreads.DefaultMaxMessages, fmt.Sprintf("Max unread messages to fetch per conversation, oldest unread first, hidden system messages included (1-%d)", unreads.MaxMessagesLimit))
 	cmdutil.AddMaxBodyCharsFlag(cmd, &maxBodyChars)
 	cmd.Flags().BoolVar(&includeSystem, "include-system", false, "Include system messages (joins, leaves, topic changes, etc.) in messages instead of only counting them in system_messages_hidden")
+	cmd.Flags().BoolVar(&refreshNames, "refresh-names", false, "Look the conversation names up again instead of using the 24-hour cache")
 	return cmd
 }

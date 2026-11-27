@@ -61,7 +61,8 @@ func newList(rt *clictx.Context) *cobra.Command {
 
 Prints {ok, drafts: [{id, text, destinations: [{channel_id, channel_name,
 thread_ts, broadcast}], last_updated_ts, date_created, date_scheduled,
-file_ids}], count}. "drafts" is [] when there are none.
+file_ids}], count}. "drafts" is [] when there are none. Channel names are
+cached for 24h (--refresh-names looks them up again).
 
 ` + browserAuthNote,
 		Args: cobra.NoArgs,
@@ -79,6 +80,7 @@ file_ids}], count}. "drafts" is [] when there are none.
 	clictx.AddWorkspaceFlag(cmd, &opts.workspace)
 	cmd.Flags().IntVar(&opts.limit, "limit", 0, "Max drafts to return (positive integer; default: all that Slack returns)")
 	cmd.Flags().BoolVar(&opts.all, "all", false, "Include sent/inactive drafts")
+	cmd.Flags().BoolVar(&opts.refreshNames, "refresh-names", false, "Look the channel names up again instead of using the 24-hour cache")
 	return cmd
 }
 

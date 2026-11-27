@@ -37,7 +37,9 @@ type Waiter struct {
 	// kinds holds the kind of conversation (KindDM, KindMPIM or
 	// "channel") of the channels whose events did not say.
 	kinds map[string]string
-	// names holds the channel names looked up.
+	// names holds the channel names looked up, for as long as the Waiter
+	// lives: the on-disk cache (Options.Names) is only asked the first
+	// time a channel is seen.
 	names map[string]string
 }
 
@@ -215,12 +217,15 @@ func (w *Waiter) name(ctx context.Context, channelID string) (string, error) {
 	if name, ok := w.names[channelID]; ok {
 		return name, nil
 	}
-	name, err := channels.LookupName(ctx, w.f.client, channelID)
-	if enrich.MustAbort(ctx, err) {
+	name, err := w.opts.Names.Lookup(ctx, w.f.client, channelID)
+	switch {
+	case enrich.MustAbort(ctx, err):
 		return "", err
-	}
-	if err == nil {
+	case err == nil:
 		w.names[channelID] = name
+	case enrich.IsRateLimit(err):
+		// Better a stale name than none; it is looked up again next time.
+		name = w.opts.Names.Stale(w.f.client, channelID)
 	}
 	return name, nil
 }

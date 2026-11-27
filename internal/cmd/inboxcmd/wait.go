@@ -14,6 +14,7 @@ import (
 
 	"github.com/maelvls/slackcli/internal/clictx"
 	"github.com/maelvls/slackcli/internal/cmd/cmdutil"
+	"github.com/maelvls/slackcli/internal/slack/channels"
 	"github.com/maelvls/slackcli/internal/slack/inbox"
 	"github.com/maelvls/slackcli/internal/slack/messages"
 	"github.com/maelvls/slackcli/internal/slack/rtm"
@@ -184,7 +185,10 @@ like "inbox", search (for --after): not the token of a Slack app.`,
 			}
 			return runWait(cmd.Context(), rt, waitArgs{
 				workspace: workspace, cursor: cursor, catchUpFirst: catchUpFirst, timeout: timeout,
-				opts: inbox.Options{MaxBodyChars: maxBodyChars, MaxConversations: maxConversations, NoThreads: noThreads},
+				opts: inbox.Options{
+					MaxBodyChars: maxBodyChars, MaxConversations: maxConversations, NoThreads: noThreads,
+					Names: channels.NewNames(channels.NamesOptions{}),
+				},
 			})
 		},
 	}

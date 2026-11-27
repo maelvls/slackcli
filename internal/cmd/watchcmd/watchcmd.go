@@ -77,7 +77,7 @@ DMs), thread replies included, whether you read it or not, and your own
 messages too. It runs until interrupted (Ctrl-C) or for --for.
 
 Prints one JSON object per message (one per line, unless on a terminal):
-  channel_id, channel_name
+  channel_id, channel_name (names cached for 24h)
   channel_type  channel, dm or mpim, when Slack says
   ts, time      time is ts as a local date and time
   author        {user_id, bot_id, name}
@@ -132,6 +132,7 @@ and classic tokens, not with the token of a Slack app.`,
 					maxBodyChars: maxBodyChars, includeSystem: includeSystem, text: text,
 					channelNames: map[string]string{}, userNames: map[string]string{},
 					unnamedUntil: map[string]time.Time{},
+					names:        channels.NewNames(channels.NamesOptions{}),
 				}
 				if err := w.resolveFilter(ctx, only); err != nil {
 					return struct{}{}, err
@@ -190,8 +191,11 @@ type watcher struct {
 	only []string
 
 	// Names already looked up, by ID. They are kept for the run: a
-	// renamed channel keeps its old name until the next one.
+	// renamed channel keeps its old name until the next one. The first
+	// time a channel is seen, its name is taken from names, the on-disk
+	// cache, when it holds a fresh one.
 	channelNames, userNames map[string]string
+	names                   *channels.Names
 	// namesPausedUntil is when names may be looked up again after Slack
 	// rate limited a lookup.
 	namesPausedUntil time.Time
@@ -245,7 +249,12 @@ func (w *watcher) handle(ctx context.Context, raw map[string]any) error {
 	}
 
 	name, err := w.name(ctx, w.channelNames, ev.ChannelID, func() (string, error) {
-		return channels.LookupName(ctx, w.client, ev.ChannelID)
+		name, err := w.names.Lookup(ctx, w.client, ev.ChannelID)
+		if enrich.IsRateLimit(err) {
+			// Better a stale name than none.
+			name = w.names.Stale(w.client, ev.ChannelID)
+		}
+		return name, err
 	})
 	if err != nil {
 		return err

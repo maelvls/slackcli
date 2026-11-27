@@ -16,6 +16,7 @@ import (
 	"github.com/maelvls/slackcli/internal/auth"
 	"github.com/maelvls/slackcli/internal/clictx"
 	"github.com/maelvls/slackcli/internal/slackapi"
+	"github.com/maelvls/slackcli/internal/testenv"
 )
 
 type call struct {
@@ -37,6 +38,9 @@ type harness struct {
 
 func newHarness(t *testing.T, serve func(method string, params map[string]any) map[string]any) *harness {
 	t.Helper()
+	// The channel names are cached on disk: never in the real cache, and
+	// never from one test to the next.
+	testenv.Isolate(t)
 	for _, env := range []string{"SLACK_TOKEN", "SLACK_COOKIE_D", "SLACK_COOKIE", "SLACK_WORKSPACE_URL"} {
 		t.Setenv(env, "")
 	}
@@ -324,3 +328,40 @@ func TestUnreadsErrors(t *testing.T) {
 
 // localTime is the "time" of a message posted at that Unix time.
 func localTime(sec int64) string { return time.Unix(sec, 0).Format(time.RFC3339) }
+
+// An agent polls unreads: the names of the conversations come from the
+// cache on the next runs, which print the same bytes, until
+// --refresh-names.
+func TestUnreadsCachesNames(t *testing.T) {
+	h := newHarness(t, serveUnreads)
+	for _, args := range [][]string{{"--counts-only"}, nil} {
+		if _, err := h.run(args...); err != nil {
+			t.Fatal(err)
+		}
+		first := h.stdout.String()
+		if !strings.Contains(first, `"channel_name":"general"`) || !strings.Contains(first, `"channel_name":"alice"`) {
+			t.Fatalf("output = %s", first)
+		}
+		if _, err := h.run(args...); err != nil {
+			t.Fatal(err)
+		}
+		if again := h.stdout.String(); again != first {
+			t.Errorf("unreads %v from the cache:\n%s\nlooked up:\n%s", args, again, first)
+		}
+		// (Without --counts-only, users.info is still asked for the
+		// authors of the messages, whom this fake Slack gives no ID: the
+		// user cache does not keep them.)
+		if n := len(h.only("conversations.info")); n != 0 {
+			t.Errorf("unreads %v: %d conversations.info calls on the second run", args, n)
+		}
+		if n := len(h.only("users.info")); args != nil && n != 0 {
+			t.Errorf("unreads %v: %d users.info calls on the second run", args, n)
+		}
+	}
+	if _, err := h.run("--counts-only", "--refresh-names"); err != nil {
+		t.Fatal(err)
+	}
+	if n := len(h.only("conversations.info")); n != 2 {
+		t.Errorf("%d conversations.info calls with --refresh-names, want 2", n)
+	}
+}

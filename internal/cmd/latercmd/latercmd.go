@@ -11,6 +11,7 @@ import (
 	"github.com/maelvls/slackcli/internal/appinfo"
 	"github.com/maelvls/slackcli/internal/clictx"
 	"github.com/maelvls/slackcli/internal/cmd/cmdutil"
+	"github.com/maelvls/slackcli/internal/slack/channels"
 	"github.com/maelvls/slackcli/internal/slack/later"
 	"github.com/maelvls/slackcli/internal/slackapi"
 )
@@ -65,7 +66,7 @@ func newListCommand(rt *clictx.Context) *cobra.Command {
 	var (
 		workspace, state, cursor string
 		limit, maxBodyChars      int
-		countsOnly               bool
+		countsOnly, refreshNames bool
 	)
 	cmd := &cobra.Command{
 		Use:   "list",
@@ -76,9 +77,10 @@ Prints JSON:
   counts       saved items per state (in_progress, archived, completed, total),
                as Slack counts them
   items        the saved messages in the requested state, each with
-               channel_id, channel_name, ts, state, date_saved,
-               date_completed, date_due (the reminder; Unix seconds) and
-               message (author, content as Markdown, thread_ts, reply_count).
+               channel_id, channel_name (cached for 24h), ts, state,
+               date_saved, date_completed, date_due (the reminder; Unix
+               seconds) and message (author, content as Markdown, thread_ts,
+               reply_count).
                When the message itself cannot be read (deleted, channel no
                longer visible), message is absent and message_error says why.
                [] when there are none; absent with --counts-only.
@@ -97,6 +99,7 @@ Prints JSON:
 			}
 			ctx := cmd.Context()
 			ws := rt.EffectiveWorkspace(workspace)
+			names := channels.NewNames(channels.NamesOptions{ForceRefresh: refreshNames})
 			payload, err := clictx.WithAutoRefresh(ctx, rt, func() (later.ListResult, error) {
 				r, err := rt.Client(ctx, ws)
 				if err != nil {
@@ -108,6 +111,7 @@ Prints JSON:
 					MaxBodyChars: maxBodyChars,
 					CountsOnly:   countsOnly,
 					Cursor:       cursor,
+					Names:        names,
 				})
 			})
 			if err != nil {
@@ -128,6 +132,7 @@ Prints JSON:
 	cmd.Flags().StringVar(&cursor, "cursor", "", "Continue a listing: the next_cursor value of the previous page (keep the same --state)")
 	cmdutil.AddMaxBodyCharsFlag(cmd, &maxBodyChars)
 	cmd.Flags().BoolVar(&countsOnly, "counts-only", false, "Only show counts per state: no items, no message content")
+	cmd.Flags().BoolVar(&refreshNames, "refresh-names", false, "Look the channel names up again instead of using the 24-hour cache")
 	return cmd
 }
 

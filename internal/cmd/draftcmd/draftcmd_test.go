@@ -23,6 +23,7 @@ import (
 	"github.com/maelvls/slackcli/internal/clictx"
 	"github.com/maelvls/slackcli/internal/slack/enrich"
 	"github.com/maelvls/slackcli/internal/slackapi"
+	"github.com/maelvls/slackcli/internal/testenv"
 )
 
 const workspaceURL = "https://workspace.slack.com"
@@ -45,6 +46,8 @@ type harness struct {
 	drafts []any
 	// channelInfo is what conversations.info returns, by channel ID.
 	channelInfo map[string]map[string]any
+	// users is what users.info returns, by user ID.
+	users map[string]map[string]any
 	// failOnce makes the first call to that method fail with invalid_auth.
 	failOnce string
 	// failWith makes every call to a method fail with that error code.
@@ -63,6 +66,9 @@ type harness struct {
 
 func newHarness(t *testing.T) *harness {
 	t.Helper()
+	// The channel names are cached on disk: never in the real cache, and
+	// never from one test to the next.
+	testenv.Isolate(t)
 	for _, env := range []string{"SLACK_TOKEN", "SLACK_COOKIE_D", "SLACK_COOKIE", "SLACK_WORKSPACE_URL"} {
 		t.Setenv(env, "")
 	}
@@ -104,6 +110,10 @@ func newHarness(t *testing.T) *harness {
 		case "conversations.info":
 			if info := h.channelInfo[params["channel"].(string)]; info != nil {
 				return map[string]any{"ok": true, "channel": info}, nil
+			}
+		case "users.info":
+			if user := h.users[params["user"].(string)]; user != nil {
+				return map[string]any{"ok": true, "user": user}, nil
 			}
 		case "conversations.history":
 			return map[string]any{"ok": true, "messages": []any{
@@ -1025,6 +1035,78 @@ func TestListChannelNameLookupFailures(t *testing.T) {
 	wantJSON(t, h.stdout.String(), `{"ok": true, "count": 1, "drafts": [
 		{"id": "Dr123", "last_updated_ts": "1700000000.5", "destinations": [{"channel_id": "C11111111"}]}]}`)
 	if got := warnings.List(); len(got) != 1 || !strings.Contains(got[0], "the names of 1 of 1 channels were not looked up") {
+		t.Errorf("warnings = %q", got)
+	}
+}
+
+// The names of the channels and DMs of the drafts are cached: listing the
+// drafts again asks Slack for the drafts only, and prints the same bytes.
+func TestListCachesChannelNames(t *testing.T) {
+	h := newHarness(t)
+	h.drafts = []any{
+		draft(nil),
+		draft(map[string]any{"id": "Dr456", "destinations": []any{map[string]any{"channel_id": "D22222222"}}}),
+	}
+	h.channelInfo = map[string]map[string]any{
+		"C11111111": {"id": "C11111111", "name": "general"},
+		"D22222222": {"id": "D22222222", "is_im": true, "user": "U0ALICE001"},
+	}
+	h.users = map[string]map[string]any{"U0ALICE001": {"id": "U0ALICE001", "name": "alice", "profile": map[string]any{"display_name": "ali"}}}
+
+	first := h.mustRun("list")
+	if !strings.Contains(first, `"channel_name":"general"`) || !strings.Contains(first, `"channel_name":"ali"`) {
+		t.Fatalf("output = %s", first)
+	}
+	h.calls = nil
+	if again := h.mustRun("list"); again != first {
+		t.Errorf("from the cache:\n%s\nlooked up:\n%s", again, first)
+	}
+	if got := h.methods(); !reflect.DeepEqual(got, []string{"drafts.list"}) {
+		t.Errorf("second list: calls %v, want drafts.list only", got)
+	}
+
+	// --refresh-names looks them up again, and what it finds is cached.
+	h.channelInfo["C11111111"]["name"] = "renamed"
+	h.calls = nil
+	if out := h.mustRun("list", "--refresh-names"); !strings.Contains(out, `"channel_name":"renamed"`) {
+		t.Errorf("output = %s", out)
+	}
+	if n := len(h.callsTo("conversations.info")); n != 2 {
+		t.Errorf("%d conversations.info calls with --refresh-names, want 2", n)
+	}
+	h.calls = nil
+	if out := h.mustRun("list"); !strings.Contains(out, `"channel_name":"renamed"`) || len(h.calls) != 1 {
+		t.Errorf("after the refresh: %s, calls %v", out, h.methods())
+	}
+}
+
+// When Slack rate limits the lookups, a name cached earlier, however old,
+// is printed rather than none, and no warning is given for it.
+func TestListRateLimitedNamesUseTheCache(t *testing.T) {
+	h := newHarness(t)
+	h.drafts = []any{draft(nil)}
+	h.channelInfo = map[string]map[string]any{"C11111111": {"id": "C11111111", "name": "general"}}
+	want := h.mustRun("list")
+
+	limited := func(_ context.Context, method string, _ map[string]any) (map[string]any, error) {
+		if method == "conversations.info" {
+			return nil, &slackapi.RateLimitError{Method: method, RetryAfter: time.Minute}
+		}
+		return map[string]any{"ok": true, "drafts": []any{draft(nil)}}, nil
+	}
+	h.rt.ClientOptions = []slackapi.Option{slackapi.WithHandler(limited)}
+	cmd := New(h.rt)
+	cmd.SilenceUsage, cmd.SilenceErrors = true, true
+	cmd.SetArgs([]string{"list", "--refresh-names"})
+	h.stdout.Reset()
+	ctx, warnings := enrich.Collect(context.Background())
+	if err := cmd.ExecuteContext(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if got := h.stdout.String(); got != want {
+		t.Errorf("output = %s, want %s", got, want)
+	}
+	if got := warnings.List(); len(got) != 0 {
 		t.Errorf("warnings = %q", got)
 	}
 }

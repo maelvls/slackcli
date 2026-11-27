@@ -52,6 +52,10 @@ const (
 type Options struct {
 	// CacheDir overrides where the user cache lives (tests).
 	CacheDir string
+	// Names gives the names of the conversations; nil looks each one up.
+	// Where the read cursor comes from conversations.info (users.counts),
+	// the call is made anyway and only feeds the cache.
+	Names *channels.Names
 	// CountsOnly skips fetching the unread messages.
 	CountsOnly bool
 	// MaxMessages is the number of unread messages fetched per
@@ -162,8 +166,8 @@ var errNotLookedUp = errors.New("not looked up")
 // and, unless opts.CountsOnly, its unread messages.
 //
 // It makes one client.counts call, then per unread conversation one or
-// two calls for its name and one for its messages, at most
-// fetchConcurrency at a time. A conversation whose messages cannot be
+// two calls for its name (none when opts.Names has it cached) and one for
+// its messages, at most fetchConcurrency at a time. A conversation whose messages cannot be
 // read is still listed, with Channel.MessagesError set.
 //
 // On an Enterprise Grid where client.counts answers team_is_restricted
@@ -253,20 +257,40 @@ func Fetch(ctx context.Context, client *slackapi.Client, opts Options) (Result, 
 			}
 		})
 	}
+	// staleNames counts the conversations whose lookup was rate limited
+	// but which a stale cached name was found for.
+	var staleNames atomic.Int32
+	stale := func(e entry, ch *Channel) {
+		if ch.ChannelName = opts.Names.Stale(client, e.id); ch.ChannelName != "" {
+			staleNames.Add(1)
+		}
+	}
 	// lookup fills the name of ch; the read cursor it returns is only
 	// known when the error is nil or info.LastRead is set.
 	lookup := func(e entry, ch *Channel) (channels.Info, error) {
 		if namesLimited.Closed() {
+			stale(e, ch)
 			return channels.Info{}, errNotLookedUp
 		}
-		info, err := channels.Lookup(ctx, client, e.id)
+		var info channels.Info
+		var err error
+		if viaUsersCounts {
+			// The call is needed for the read cursor: only a name that
+			// is nothing more is taken from the cache.
+			info, err = channels.Lookup(ctx, client, e.id)
+			if err == nil {
+				opts.Names.Remember(client, e.id, info.Name)
+			}
+		} else {
+			info.Name, err = opts.Names.Lookup(ctx, client, e.id)
+		}
 		ch.ChannelName = info.Name
 		switch {
 		case err == nil:
 		case enrich.MustAbort(ctx, err):
 			cancel(fmt.Errorf("looking up the name of %s: %w", e.id, err))
-		default:
-			namesLimited.Failed(err)
+		case namesLimited.Failed(err):
+			stale(e, ch)
 		}
 		return info, err
 	}
@@ -339,7 +363,8 @@ func Fetch(ctx context.Context, client *slackapi.Client, opts Options) (Result, 
 			`the unread messages of %d of %d conversations were not fetched, as how far they were read could not be looked up (%v): they are listed with "messages_error": %q; %s`,
 			n, len(entries), enrich.Cause(err), enrich.RateLimitedCode, enrich.Hint()))
 	}
-	if n, err := namesLimited.Skipped(); n > 0 {
+	if n, err := namesLimited.Skipped(); n > int(staleNames.Load()) {
+		n -= int(staleNames.Load())
 		result.Warnings = append(result.Warnings, fmt.Sprintf(
 			"the names of %d of %d conversations were not looked up (%v): they are listed by ID only; %s",
 			n, len(entries), enrich.Cause(err), enrich.Hint()))
