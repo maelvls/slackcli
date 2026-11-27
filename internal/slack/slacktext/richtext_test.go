@@ -80,6 +80,36 @@ func TestParseInlineElements(t *testing.T) {
 			{"type":"text","text":"). Or "},
 			{"type":"link","url":"http://x.test/?q=1&r=2"},
 			{"type":"text","text":", ok"}]`},
+		{"Markdown link", "See [the docs](https://example.com/docs).", `[
+			{"type":"text","text":"See "},
+			{"type":"link","url":"https://example.com/docs","text":"the docs"},
+			{"type":"text","text":"."}]`},
+		{"several Markdown links", "[a](https://a.test) and [b](http://b.test/x?y=1&z=2)", `[
+			{"type":"link","url":"https://a.test","text":"a"},
+			{"type":"text","text":" and "},
+			{"type":"link","url":"http://b.test/x?y=1&z=2","text":"b"}]`},
+		{"Markdown link in a code span", "run `[a](https://a.test)` now", `[
+			{"type":"text","text":"run "},
+			{"type":"text","text":"[a](https://a.test)","style":{"code":true}},
+			{"type":"text","text":" now"}]`},
+		{"Markdown link to a URL with parentheses", "see [Go](https://en.wikipedia.org/wiki/Go_(game)) ok", `[
+			{"type":"text","text":"see "},
+			{"type":"link","url":"https://en.wikipedia.org/wiki/Go_(game)","text":"Go"},
+			{"type":"text","text":" ok"}]`},
+		{"Markdown link with brackets in its label", "[[PR] fix _it_](https://a.test)", `[{"type":"link","url":"https://a.test","text":"[PR] fix _it_"}]`},
+		{"Markdown link with a styled label", "[*bold*](https://a.test) [`code`](https://b.test) _[it](https://c.test)_", `[
+			{"type":"link","url":"https://a.test","text":"bold","style":{"bold":true}},
+			{"type":"text","text":" "},
+			{"type":"link","url":"https://b.test","text":"code","style":{"code":true}},
+			{"type":"text","text":" "},
+			{"type":"link","url":"https://c.test","text":"it","style":{"italic":true}}]`},
+		{"Markdown links to non-http targets stay text", "[a](#top) [b](mailto:x@y.z) [c](./f.md)", `[{"type":"text","text":"[a](#top) [b](mailto:x@y.z) [c](./f.md)"}]`},
+		{"Markdown link with a title or no label keeps its bare URL", "[d](https://a.test \"t\") [](https://e.test)", `[
+			{"type":"text","text":"[d]("},
+			{"type":"link","url":"https://a.test"},
+			{"type":"text","text":" \"t\") []("},
+			{"type":"link","url":"https://e.test"},
+			{"type":"text","text":")"}]`},
 		{"styled bare URL", "*https://example.com*", `[{"type":"link","url":"https://example.com","style":{"bold":true}}]`},
 		{"URL with a mention-like path", "https://medium.com/@channel/post-1 https://www.youtube.com/@UNBOXTHERAPY", `[
 			{"type":"link","url":"https://medium.com/@channel/post-1"},
@@ -245,10 +275,10 @@ func TestTextToRichTextBlocks(t *testing.T) {
 				{"type":"rich_text_section","elements":[{"type":"emoji","name":"rocket"},{"type":"text","text":" launch sequence"}]},
 				{"type":"rich_text_section","elements":[{"type":"text","text":"discuss in "},{"type":"channel","channel_id":"C0AHR9XAT8B"}]},
 				{"type":"rich_text_section","elements":[{"type":"emoji","name":"white_check_mark"},{"type":"text","text":" all clear"}]}]}]`},
-		{"Slack links and CommonMark links stay distinct", "- Review <https://example.com/pull/42|PR #42>\n- Review [PR #43](https://example.com/pull/43)", false, `[
+		{"Slack links and Markdown links are both links", "- Review <https://example.com/pull/42|PR #42>\n- Review [PR #43](https://example.com/pull/43)", false, `[
 			{"type":"rich_text_list","style":"bullet","elements":[
 				{"type":"rich_text_section","elements":[{"type":"text","text":"Review "},{"type":"link","url":"https://example.com/pull/42","text":"PR #42"}]},
-				{"type":"rich_text_section","elements":[{"type":"text","text":"Review [PR #43]("},{"type":"link","url":"https://example.com/pull/43"},{"type":"text","text":")"}]}]}]`},
+				{"type":"rich_text_section","elements":[{"type":"text","text":"Review "},{"type":"link","url":"https://example.com/pull/43","text":"PR #43"}]}]}]`},
 		{"code block after a list", "- Item\n```\ncode here\n```", false, `[
 			{"type":"rich_text_list","style":"bullet","elements":[` + item("Item") + `]},
 			{"type":"rich_text_preformatted","elements":[{"type":"text","text":"code here"}]}]`},
@@ -349,6 +379,10 @@ func TestTextToRichTextBlocks(t *testing.T) {
 				{"type":"rich_text_section","elements":[{"type":"text","text":"at "},{"type":"date","timestamp":1392734382,"format":"{time}","fallback":"noon"},{"type":"text","text":" "},{"type":"emoji","name":"wave","skin_tone":2}]}]}]`},
 		{"code block alone, inline mode", "```\ncode\n```", true, `[
 			{"type":"rich_text_preformatted","elements":[{"type":"text","text":"code"}]}]`},
+		{"Markdown link alone, inline mode", "See [the docs](https://example.com/docs).", true, `[
+			{"type":"rich_text_section","elements":[{"type":"text","text":"See "},{"type":"link","url":"https://example.com/docs","text":"the docs"},{"type":"text","text":".\n"}]}]`},
+		{"Markdown link in a code block, inline mode", "```\n[x](https://example.com)\n```", true, `[
+			{"type":"rich_text_preformatted","elements":[{"type":"text","text":"[x](https://example.com)"}]}]`},
 		{"quote alone, inline mode", "> *quoted*", true, `[
 			{"type":"rich_text_quote","elements":[{"type":"text","text":"quoted","style":{"bold":true}}]}]`},
 	}
