@@ -856,12 +856,39 @@ func TestHelpContracts(t *testing.T) {
 }
 
 // Uploads can outlast the command timeout, and being killed between the
-// upload and drafts.create would orphan the uploaded files.
-func TestCommandsThatUploadHaveNoTimeout(t *testing.T) {
+// upload and drafts.create would orphan the uploaded files: with --attach,
+// create and update stop the command timeout. Without it they keep it, so
+// that a stalled call cannot hang the agent.
+func TestOnlyCommandsThatUploadStopTheTimeout(t *testing.T) {
 	cmd := New(newHarness(t).rt)
-	for name, want := range map[string]bool{"create": true, "update": true, "list": false, "delete": false} {
-		if got := clictx.HasNoTimeout(findCommand(t, cmd, name)); got != want {
-			t.Errorf("draft %s: exempt from the command timeout = %v, want %v", name, got, want)
+	for _, name := range []string{"create", "update", "list", "delete"} {
+		if clictx.HasNoTimeout(findCommand(t, cmd, name)) {
+			t.Errorf("draft %s: always exempt from the command timeout", name)
+		}
+	}
+	for _, tc := range []struct {
+		args func(t *testing.T) []string
+		want bool
+	}{
+		{func(*testing.T) []string { return []string{"create", "C11111111", "hello"} }, false},
+		{func(t *testing.T) []string {
+			return []string{"create", "C11111111", "hello", "--attach", writeFile(t, "a.png", "x")}
+		}, true},
+		{func(*testing.T) []string { return []string{"update", "Dr123", "revised"} }, false},
+		{func(t *testing.T) []string {
+			return []string{"update", "Dr123", "revised", "--attach", writeFile(t, "a.png", "x")}
+		}, true},
+	} {
+		h := newHarness(t)
+		h.drafts = []any{map[string]any{"id": "Dr123", "last_updated_ts": "1700000000.1", "destinations": []any{map[string]any{"channel_id": "C11111111"}}}}
+		var stopped bool
+		h.rt.SetWatchdogCanceller(func() { stopped = true })
+		args := tc.args(t)
+		if _, err := h.run(args...); err != nil {
+			t.Fatalf("draft %s: %v", strings.Join(args, " "), err)
+		}
+		if stopped != tc.want {
+			t.Errorf("draft %s: command timeout stopped = %v, want %v", strings.Join(args, " "), stopped, tc.want)
 		}
 	}
 }

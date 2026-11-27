@@ -192,7 +192,7 @@ func TestResolveUserIDBySearch(t *testing.T) {
 
 		// Emails have their own lookup.
 		rec = directory{lookupErr: "missing_scope", pages: [][]map[string]any{{member("U00000004A", "al", "profile", profile("email", "al@example.com"))}}}.recorder()
-		if got, err := ResolveUserID(ctx, rec.client(), "al@example.com"); err != nil || got != "U00000004A" {
+		if got, err := ResolveUserID(ctx, rec.userTokenClient(), "al@example.com"); err != nil || got != "U00000004A" {
 			t.Errorf("email: got %q, %v", got, err)
 		}
 		if len(rec.only("search.messages")) != 0 {
@@ -251,7 +251,7 @@ func TestResolveUserIDs(t *testing.T) {
 	}
 	inputs := []string{"U00000009A", "@alice", "@bob", "carol", "@ghost", "dave@example.com", "nobody@example.com", " ", "Sam", "BOB"}
 	rec := dir.recorder()
-	got, err := ResolveUserIDs(ctx, rec.client(), inputs)
+	got, err := ResolveUserIDs(ctx, rec.userTokenClient(), inputs)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -324,7 +324,7 @@ func TestScanErrorLeavesOutDeactivatedMembersAlreadyFound(t *testing.T) {
 		}
 		return serve(method, params)
 	}
-	_, err := ResolveUserIDs(context.Background(), rec.client(), []string{"gone@example.com", "@ghost"})
+	_, err := ResolveUserIDs(context.Background(), rec.userTokenClient(), []string{"gone@example.com", "@ghost"})
 	var rl *slackapi.RateLimitError
 	if !errors.As(err, &rl) {
 		t.Fatalf("err = %v, want a rate limit error", err)

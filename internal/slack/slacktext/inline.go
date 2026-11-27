@@ -28,10 +28,10 @@ func (s inlineStyle) apply(el map[string]any) map[string]any {
 
 // ParseInlineElements parses the inline formatting a user types into Slack
 // rich text inline elements: `*bold*`, `_italic_`, `~strike~`, backtick-quoted code,
-// `:emoji:` (see below), `<url|label>`, `<url>`,
-// bare http(s) URLs, `<@U123>`, `<#C123>`, `<!subteam^S123>`, `<!here>`,
+// `:emoji:` (see below), `<url|label>`, `<url>`, Markdown links
+// `[label](https://...)` (see [markdownLinkAt]), bare http(s) URLs, `<@U123>`, `<#C123>`, `<!subteam^S123>`, `<!here>`,
 // `<!date^...>`, and the bare `@U123ABCDE`, `@here`, `@channel` and
-// `@everyone` (see [bareMentionAt]). Everything else, CommonMark syntax
+// `@everyone` (see [bareMentionAt]). Everything else, other CommonMark syntax
 // included, is kept as literal text.
 //
 // Every syntactically valid shortcode becomes an emoji element (a single
@@ -150,6 +150,16 @@ func (p *inlineParser) elementAt(text string, i, elementEnd int, style inlineSty
 		}
 		p.parse(content, inner)
 		return end
+
+	case '[':
+		// A Markdown link, which Slack would show as literal brackets.
+		link, ok := markdownLinkAt(text, i)
+		if !ok {
+			return i
+		}
+		flush(i)
+		p.out = append(p.out, link.element(style))
+		return link.end
 
 	case '<':
 		end := strings.IndexAny(rest[1:], ">\n")

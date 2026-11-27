@@ -29,13 +29,24 @@ type recorder struct {
 	serve func(method string, params map[string]any) (map[string]any, error)
 }
 
+// client is a client with browser credentials (xoxc), as imported from
+// Slack Desktop, whose calls r serves and records.
 func (r *recorder) client() *slackapi.Client {
-	return slackapi.NewFake(func(_ context.Context, method string, params map[string]any) (map[string]any, error) {
-		r.mu.Lock()
-		r.calls = append(r.calls, call{method, params})
-		r.mu.Unlock()
-		return r.serve(method, params)
-	})
+	return slackapi.NewFake(r.handle)
+}
+
+// userTokenClient is a client with a user token (xoxp), whose calls r
+// serves and records: unlike browser credentials, it looks emails up with
+// users.lookupByEmail.
+func (r *recorder) userTokenClient() *slackapi.Client {
+	return slackapi.New(slackapi.Auth{Type: slackapi.AuthStandard, Token: "xoxp-test"}, "https://test.slack.com", slackapi.WithHandler(r.handle))
+}
+
+func (r *recorder) handle(_ context.Context, method string, params map[string]any) (map[string]any, error) {
+	r.mu.Lock()
+	r.calls = append(r.calls, call{method, params})
+	r.mu.Unlock()
+	return r.serve(method, params)
 }
 
 func (r *recorder) methods() []string {
@@ -273,7 +284,7 @@ func TestResolveUserID(t *testing.T) {
 
 	t.Run("email via users.lookupByEmail", func(t *testing.T) {
 		rec := directory{byEmail: map[string]map[string]any{"alice@example.com": member("U03EMAIL00", "alice")}}.recorder()
-		got, err := ResolveUserID(ctx, rec.client(), "alice@example.com")
+		got, err := ResolveUserID(ctx, rec.userTokenClient(), "alice@example.com")
 		if err != nil || got != "U03EMAIL00" {
 			t.Fatalf("got %q, %v", got, err)
 		}
@@ -288,7 +299,7 @@ func TestResolveUserID(t *testing.T) {
 			lookupErr: "missing_scope",
 			pages:     [][]map[string]any{{member("U04FALLBAC", "alice", "profile", profile("email", "Alice@Example.com"))}},
 		}.recorder()
-		got, err := ResolveUserID(ctx, rec.client(), "alice@example.com")
+		got, err := ResolveUserID(ctx, rec.userTokenClient(), "alice@example.com")
 		if err != nil || got != "U04FALLBAC" {
 			t.Fatalf("got %q, %v", got, err)
 		}
@@ -306,7 +317,7 @@ func TestResolveUserID(t *testing.T) {
 			{gone},
 			{member("U06NEVER00", "never-reached")},
 		}}.recorder()
-		got, err := ResolveUserID(ctx, rec.client(), "gone@example.com")
+		got, err := ResolveUserID(ctx, rec.userTokenClient(), "gone@example.com")
 		if err != nil || got != "U05GONE000" {
 			t.Fatalf("got %q, %v, want the deactivated member", got, err)
 		}
@@ -315,12 +326,12 @@ func TestResolveUserID(t *testing.T) {
 		if !reflect.DeepEqual(rec.methods(), []string{"users.lookupByEmail", "users.list", "users.list"}) {
 			t.Errorf("methods = %v", rec.methods())
 		}
-		if user, err := GetUser(ctx, rec.client(), "gone@example.com"); err != nil || user.ID != "U05GONE000" || user.Deleted == nil || !*user.Deleted {
+		if user, err := GetUser(ctx, rec.userTokenClient(), "gone@example.com"); err != nil || user.ID != "U05GONE000" || user.Deleted == nil || !*user.Deleted {
 			t.Errorf("GetUser = %+v, %v", user, err)
 		}
 
 		rec = directory{pages: [][]map[string]any{{member("U02HANDLE0", "alice")}}}.recorder()
-		_, err = ResolveUserID(ctx, rec.client(), "nobody@example.com")
+		_, err = ResolveUserID(ctx, rec.userTokenClient(), "nobody@example.com")
 		var nf *NotFoundError
 		if !errors.As(err, &nf) || nf.Input != "nobody@example.com" {
 			t.Errorf("err = %v", err)
@@ -332,7 +343,7 @@ func TestResolveUserID(t *testing.T) {
 
 	t.Run("an email unknown to lookupByEmail in a workspace too large to scan", func(t *testing.T) {
 		rec := hugeWorkspace(directory{})
-		_, err := ResolveUserID(ctx, rec.client(), "gone@example.com")
+		_, err := ResolveUserID(ctx, rec.userTokenClient(), "gone@example.com")
 		var rl *slackapi.RateLimitError
 		var nf *NotFoundError
 		if !errors.As(err, &rl) || errors.As(err, &nf) {
@@ -441,7 +452,7 @@ func TestResolveUserID(t *testing.T) {
 
 	t.Run("errors that must not be mistaken for not-found", func(t *testing.T) {
 		rec := directory{lookupErr: "invalid_auth"}.recorder()
-		if _, err := ResolveUserID(ctx, rec.client(), "alice@example.com"); !slackapi.IsAuthError(err) {
+		if _, err := ResolveUserID(ctx, rec.userTokenClient(), "alice@example.com"); !slackapi.IsAuthError(err) {
 			t.Errorf("err = %v", err)
 		}
 		if !reflect.DeepEqual(rec.methods(), []string{"users.lookupByEmail"}) {
@@ -487,7 +498,7 @@ func TestGetUser(t *testing.T) {
 	}
 	for _, tt := range tests {
 		rec := dir.recorder()
-		got, err := GetUser(ctx, rec.client(), tt.input)
+		got, err := GetUser(ctx, rec.userTokenClient(), tt.input)
 		if err != nil {
 			t.Fatalf("GetUser(%q): %v", tt.input, err)
 		}
@@ -547,7 +558,7 @@ func TestGetDMChannelForUsers(t *testing.T) {
 		dir := dir
 		dir.openChannel = "G00000001A"
 		rec := dir.recorder()
-		got, err := GetDMChannelForUsers(ctx, rec.client(), []string{"@bob", " ", "U00000009A", "carol@example.com", "@alice", "bob", "U00000009A"})
+		got, err := GetDMChannelForUsers(ctx, rec.userTokenClient(), []string{"@bob", " ", "U00000009A", "carol@example.com", "@alice", "bob", "U00000009A"})
 		if err != nil {
 			t.Fatal(err)
 		}

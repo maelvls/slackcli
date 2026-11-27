@@ -105,12 +105,20 @@ must come after "--".
 Prints {ok, draft: {id, text, destinations, last_updated_ts, date_created,
 file_ids}}.
 
-The command does not time out, because --attach uploads can be long. If the
-draft cannot be created, the files uploaded for it are deleted.
+With --attach the command does not time out, because uploads can be long
+(an upload that makes no progress still fails). If the draft cannot be
+created, the files uploaded for it are deleted.
 
 ` + browserAuthNote,
 		Args: cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if len(opts.attach) > 0 {
+				// An upload may take longer than the command timeout, and
+				// timing out between the upload and drafts.create would
+				// orphan the uploaded files. The upload has its own stall
+				// timeout.
+				rt.DisableTimeout()
+			}
 			out, err := create(cmd.Context(), rt, args[0], args[1], opts)
 			if err != nil {
 				return err
@@ -122,10 +130,8 @@ draft cannot be created, the files uploaded for it are deleted.
 	cmd.Flags().StringVar(&opts.threadTS, "thread-ts", "", "Thread root ts to draft a reply into, for channel and user-ID targets; redundant with a message URL target, which already says which thread and which it must not contradict")
 	cmd.Flags().BoolVar(&opts.broadcast, "broadcast", false, "Also send the thread reply to the channel when posted (requires thread context; not for DMs)")
 	cmd.Flags().StringArrayVar(&opts.attach, "attach", nil, "Attach a local file to the draft (repeatable)")
-	// <text> may start with "- ". No command timeout: an upload may take
-	// longer, and timing out between the upload and drafts.create would
-	// orphan the uploaded files.
-	return clictx.NoTimeout(cmdutil.AllowDashText(cmd))
+	// <text> may start with "- ".
+	return cmdutil.AllowDashText(cmd)
 }
 
 func newUpdate(rt *clictx.Context) *cobra.Command {
@@ -153,8 +159,9 @@ schedule or the extra recipients.
 Prints {ok, draft: {id, text, destinations, last_updated_ts, date_created,
 file_ids}}.
 
-The command does not time out, because --attach uploads can be long. If the
-draft cannot be updated, the files newly uploaded for it are deleted.
+With --attach the command does not time out, because uploads can be long
+(an upload that makes no progress still fails). If the draft cannot be
+updated, the files newly uploaded for it are deleted.
 
 ` + browserAuthNote,
 		Args: cobra.ExactArgs(2),
@@ -165,6 +172,9 @@ draft cannot be updated, the files newly uploaded for it are deleted.
 				opts.broadcast = &off
 			case cmd.Flags().Changed("broadcast"):
 				opts.broadcast = &broadcast
+			}
+			if len(opts.attach) > 0 {
+				rt.DisableTimeout() // see newCreate
 			}
 			out, err := update(cmd.Context(), rt, args[0], args[1], opts)
 			if err != nil {
@@ -182,8 +192,8 @@ draft cannot be updated, the files newly uploaded for it are deleted.
 	cmd.Flags().StringArrayVar(&opts.attach, "attach", nil, "Attach one more local file to the draft, in addition to the files it already has (repeatable)")
 	cmd.Flags().StringVar(&opts.lastUpdatedTS, "last-updated-ts", "",
 		"The draft's last_updated_ts as you last read it: the update is refused if the draft changed since (default: the current value, i.e. no conflict detection)")
-	// <text> may start with "- ". No command timeout: see newCreate.
-	return clictx.NoTimeout(cmdutil.AllowDashText(cmd))
+	// <text> may start with "- ".
+	return cmdutil.AllowDashText(cmd)
 }
 
 func newDelete(rt *clictx.Context) *cobra.Command {

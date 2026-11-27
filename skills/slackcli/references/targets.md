@@ -33,7 +33,7 @@ Other argument kinds:
 
 - `<canvas>`: a canvas URL (`https://<workspace>.slack.com/docs/T.../F...`), a channel-canvas URL (`https://<workspace>.slack.com/canvas/C...`) or a canvas ID (`F...`).
 - `<trigger>` for `workflow preview/run`: a trigger ID (`Ft...`, from `workflow list`) or a shortcut URL (`https://slack.com/shortcuts/Ft.../...`). `workflow get` also takes a workflow ID (`Wf...`). `workflow run` requires `--channel`.
-- Users (`user get`, `--user`, `--users`): a user ID, an email, `@handle`/`handle`; `user get`, `user dm-open` and `search --user` also take an exact display name. Handles and names scan the directory: prefer IDs or emails.
+- Users (`user get`, `--user`, `--users`): a user ID, an email, `@handle`/`handle`; `user get`, `user dm-open` and `search --user` also take an exact display name. Handles and names scan the directory: prefer IDs or emails. An email is one lookup, browser credentials included (Slack's people search, confirmed with `users.info`); when several members match it, the error lists their IDs: pick one, never guess.
 
 ## Workspaces
 

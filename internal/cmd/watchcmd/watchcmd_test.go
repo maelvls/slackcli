@@ -484,3 +484,117 @@ func TestWatchReportsTheGapOfACredentialRefresh(t *testing.T) {
 		t.Errorf("stderr does not report the gap of the refresh:\n%s", got)
 	}
 }
+
+// A first connection that Slack rate limits, or that fails on Slack's
+// side, is tried again (and said on stderr) instead of ending the watch.
+func TestWatchRetriesTheFirstConnection(t *testing.T) {
+	for _, env := range []string{"SLACK_TOKEN", "SLACK_COOKIE_D", "SLACK_COOKIE", "SLACK_WORKSPACE_URL"} {
+		t.Setenv(env, "")
+	}
+	testenv.Isolate(t)
+	streamOptions = rtm.Options{PingInterval: 10 * time.Millisecond, ReadTimeout: time.Second, Backoff: func(int) time.Duration { return time.Millisecond }}
+	t.Cleanup(func() { streamOptions = rtm.Options{} })
+	server := httptest.NewServer(websocket.Handler(func(ws *websocket.Conn) {
+		_ = websocket.Message.Send(ws, `{"type":"hello"}`)
+		_ = websocket.Message.Send(ws, `{"type":"message","channel":"C000000001","user":"U000000001","text":"hi","ts":"1700000001.000100"}`)
+		_, _ = io.Copy(io.Discard, ws)
+	}))
+	t.Cleanup(server.Close)
+	store := &auth.Store{Path: filepath.Join(t.TempDir(), "credentials.json")}
+	if err := store.Upsert(auth.Workspace{
+		URL:  "https://acme.slack.com",
+		Auth: slackapi.Auth{Type: slackapi.AuthBrowser, XoxcToken: "xoxc-test", XoxdCookie: "xoxd-test"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	newRT := func(stdout, stderr io.Writer, connect func(n int32) (map[string]any, error)) *clictx.Context {
+		var connects atomic.Int32
+		return &clictx.Context{
+			Store: store, Stdout: stdout, Stderr: stderr,
+			ClientOptions: []slackapi.Option{
+				slackapi.WithLoopbackWorkspaceForTesting(),
+				slackapi.WithHandler(func(_ context.Context, method string, _ map[string]any) (map[string]any, error) {
+					if method != "rtm.connect" {
+						return map[string]any{"ok": false, "error": "unknown_method"}, nil
+					}
+					return connect(connects.Add(1))
+				}),
+			},
+		}
+	}
+	run := func(ctx context.Context, rt *clictx.Context) error {
+		cmd := New(rt)
+		cmd.SetArgs(nil)
+		cmd.SetOut(io.Discard)
+		cmd.SetErr(io.Discard)
+		return cmd.ExecuteContext(ctx)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	var stderr bytes.Buffer
+	rt := newRT(&lineWriter{want: 1, done: cancel}, &stderr, func(n int32) (map[string]any, error) {
+		switch n {
+		case 1:
+			return nil, &slackapi.RateLimitError{Method: "rtm.connect", RetryAfter: 20 * time.Millisecond}
+		case 2:
+			return map[string]any{"ok": false, "error": "ratelimited"}, nil
+		}
+		return map[string]any{"url": "ws" + strings.TrimPrefix(server.URL, "http")}, nil
+	})
+	if err := run(ctx, rt); err != nil {
+		t.Fatalf("watch: %v", err)
+	}
+	if got := stderr.String(); strings.Count(got, "Cannot connect to Slack yet") != 2 || !strings.Contains(got, "Connected to") {
+		t.Errorf("stderr:\n%s", got)
+	}
+
+	// A token that cannot use the real-time API is not tried again.
+	var calls atomic.Int32
+	rt = newRT(io.Discard, io.Discard, func(int32) (map[string]any, error) {
+		calls.Add(1)
+		return map[string]any{"ok": false, "error": "not_allowed_token_type"}, nil
+	})
+	ctx, cancel = context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := run(ctx, rt); !slackapi.IsErrorCode(err, "not_allowed_token_type") || calls.Load() != 1 {
+		t.Errorf("watch = %v after %d calls", err, calls.Load())
+	}
+}
+
+// A --for that runs out before any connection was ready is an error, not
+// a quiet watch: nothing was listened to.
+func TestWatchForThatNeverConnectedFails(t *testing.T) {
+	for _, env := range []string{"SLACK_TOKEN", "SLACK_COOKIE_D", "SLACK_COOKIE", "SLACK_WORKSPACE_URL"} {
+		t.Setenv(env, "")
+	}
+	testenv.Isolate(t)
+	streamOptions = rtm.Options{PingInterval: 10 * time.Millisecond, ReadTimeout: time.Second, Backoff: func(int) time.Duration { return 5 * time.Millisecond }}
+	t.Cleanup(func() { streamOptions = rtm.Options{} })
+	store := &auth.Store{Path: filepath.Join(t.TempDir(), "credentials.json")}
+	if err := store.Upsert(auth.Workspace{
+		URL:  "https://acme.slack.com",
+		Auth: slackapi.Auth{Type: slackapi.AuthBrowser, XoxcToken: "xoxc-test", XoxdCookie: "xoxd-test"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	rt := &clictx.Context{
+		Store: store, Stdout: io.Discard, Stderr: io.Discard,
+		ClientOptions: []slackapi.Option{
+			slackapi.WithLoopbackWorkspaceForTesting(),
+			slackapi.WithHandler(func(context.Context, string, map[string]any) (map[string]any, error) {
+				return map[string]any{"ok": false, "error": "internal_error"}, nil
+			}),
+		},
+	}
+	cmd := New(rt)
+	cmd.SetArgs([]string{"--for", "100ms"})
+	cmd.SetOut(io.Discard)
+	cmd.SetErr(io.Discard)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := cmd.ExecuteContext(ctx); err == nil || !strings.Contains(err.Error(), "could not connect to Slack within 100ms") {
+		t.Errorf("watch = %v", err)
+	}
+}

@@ -6,8 +6,10 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/maelvls/slackcli/internal/jsonx"
 	"github.com/maelvls/slackcli/internal/slack/enrich"
@@ -189,6 +191,13 @@ type History struct {
 	// SystemHidden is the number of system messages that were skipped
 	// while collecting Messages.
 	SystemHidden int
+	// HasMore is true when Messages stopped at the limit while older
+	// messages may be left: some of the last page that would have been
+	// returned were not taken, or Slack has more pages (which can hold
+	// only system messages, or only messages the reaction filters
+	// reject). Page back with Latest set to the ts of the oldest message
+	// (Messages[0]).
+	HasMore bool
 }
 
 // FetchChannelHistory returns the most recent messages of a channel that
@@ -204,7 +213,23 @@ func FetchChannelHistory(ctx context.Context, client *slackapi.Client, channelID
 
 	var out []Message
 	hidden := 0
+	hasMore := false
 	latest, cursor := opts.Latest, ""
+	// Given oldest alone, Slack walks forward from it: its first page is
+	// the messages right after oldest, the next cursor goes newer, and a
+	// listing cut by the limit would be the oldest messages of the range
+	// (with a gap where a page was cut). A latest in the future makes it
+	// walk back from the newest message, like without oldest.
+	if latest == "" && opts.Oldest != "" {
+		latest = strconv.FormatInt(time.Now().Add(24*time.Hour).Unix(), 10) + ".000000"
+	}
+	// keep reports whether a raw message of the history is one to return.
+	keep := func(m map[string]any) bool {
+		if !opts.IncludeSystem && IsSystem(jsonx.Str(m["subtype"])) {
+			return false
+		}
+		return !filtered || PassesReactionFilters(m, opts.WithReactions, opts.WithoutReactions)
+	}
 	for {
 		params := map[string]any{"channel": channelID, "limit": pageSize}
 		// Ask for what is missing, no more. Once system messages have
@@ -232,7 +257,7 @@ func FetchChannelHistory(ctx context.Context, client *slackapi.Client, channelID
 		if len(page) == 0 {
 			break
 		}
-		for _, m := range page {
+		for i, m := range page {
 			if !opts.IncludeSystem && IsSystem(jsonx.Str(m["subtype"])) {
 				hidden++
 				continue
@@ -242,6 +267,8 @@ func FetchChannelHistory(ctx context.Context, client *slackapi.Client, channelID
 			}
 			out = append(out, ParseMessage(channelID, m))
 			if len(out) >= limit {
+				// Full: is anything left that would have been returned?
+				hasMore = jsonx.Bool(resp["has_more"]) || slices.ContainsFunc(page[i+1:], keep)
 				break
 			}
 		}
@@ -270,7 +297,7 @@ func FetchChannelHistory(ctx context.Context, client *slackapi.Client, channelID
 	}
 	// conversations.history returns newest first.
 	sortChronologically(out)
-	return History{Messages: out, SystemHidden: hidden}, nil
+	return History{Messages: out, SystemHidden: hidden, HasMore: hasMore}, nil
 }
 
 // expandConcurrency bounds the conversations.replies calls of

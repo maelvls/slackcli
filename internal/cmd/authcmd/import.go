@@ -15,6 +15,7 @@ import (
 	"github.com/maelvls/slackcli/internal/auth"
 	"github.com/maelvls/slackcli/internal/authextract"
 	"github.com/maelvls/slackcli/internal/clictx"
+	"github.com/maelvls/slackcli/internal/cmd/cmdutil"
 )
 
 // importedWorkspace is one workspace of an import result.
@@ -124,9 +125,22 @@ func noDefaultAdvice(rt *clictx.Context) string {
 	return fmt.Sprintf(`no default workspace is set: commands need --workspace "<url-or-unique-substring>" (or SLACK_WORKSPACE_URL) until you choose one with "%s auth set-default <url>"`, appinfo.Name)
 }
 
-func printImported(rt *clictx.Context, n int, source string) error {
-	_, err := fmt.Fprintf(rt.Stdout, "Imported %d workspace token(s) from %s.\n", n, source)
-	return err
+// importSource is the "source" of an import: the application the
+// credentials came from (always set) and the files read, if any.
+type importSource struct {
+	Name string `json:"name"`
+	authextract.SourcePaths
+}
+
+// printImported prints the result of an import: {imported, source,
+// workspaces}, the same for every application imported from. "workspaces"
+// is [] when nothing was imported, so that it can be iterated.
+func printImported(rt *clictx.Context, extracted *authextract.Extracted, imported []importedWorkspace) error {
+	return cmdutil.PrintList(rt, struct {
+		Imported   int                 `json:"imported"`
+		Source     importSource        `json:"source"`
+		Workspaces []importedWorkspace `json:"workspaces"`
+	}{len(imported), importSource{extracted.Source, extracted.Paths}, imported}, "workspaces")
 }
 
 func newImportDesktop(rt *clictx.Context) *cobra.Command {
@@ -145,9 +159,9 @@ with a note in "hints". When several workspaces are imported at once and none
 was configured before, no default workspace is set: choose one with
 "auth set-default", or pass --workspace to every command.
 
-Prints {imported, source: {leveldb_path, cookies_path}, workspaces:
-[{workspace_url, workspace_name}]}: the number of workspaces imported, the
-files read and the workspaces.`,
+Prints {imported, source: {name, leveldb_path, cookies_path}, workspaces:
+[{workspace_url, workspace_name}]}: the number of workspaces imported, where
+they came from and the files read, and the workspaces ([] when none).`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			extracted, imported, err := runImport(cmd.Context(), rt, "Slack Desktop",
@@ -156,11 +170,7 @@ files read and the workspaces.`,
 			if err != nil {
 				return err
 			}
-			return rt.Print(struct {
-				Imported   int                     `json:"imported"`
-				Source     authextract.SourcePaths `json:"source"`
-				Workspaces []importedWorkspace     `json:"workspaces"`
-			}{len(imported), extracted.Paths, imported})
+			return printImported(rt, extracted, imported)
 		},
 	}
 }
@@ -176,15 +186,19 @@ Requires View → Developer → Allow JavaScript from Apple Events to be enabled
 in Chrome. The cookie is read from Chrome's cookie database, decrypted with
 the "Chrome Safe Storage" keychain item: macOS may ask for permission.
 
-Prints one line of text, not JSON: the number of workspaces imported.`,
+Prints {imported, source: {name, cookies_path?}, workspaces:
+[{workspace_url, workspace_name}]}: the number of workspaces imported, the
+browser and the cookie database read (none when the tab gave the cookie),
+and the workspaces ([] when none). A workspace saved with a standard token
+("auth add") keeps it, with a note in "hints".`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			_, imported, err := runImport(cmd.Context(), rt, "Chrome",
+			extracted, imported, err := runImport(cmd.Context(), rt, "Chrome",
 				"Open Slack in Chrome and make sure you are signed in.", rt.Chrome)
 			if err != nil {
 				return err
 			}
-			return printImported(rt, len(imported), "Chrome")
+			return printImported(rt, extracted, imported)
 		},
 	}
 }
@@ -200,15 +214,19 @@ Requires View → Developer → Allow JavaScript from Apple Events to be enabled
 in Brave. The cookie is read from Brave's cookie database, decrypted with the
 "Brave Safe Storage" keychain item: macOS may ask for permission.
 
-Prints one line of text, not JSON: the number of workspaces imported.`,
+Prints {imported, source: {name, cookies_path?}, workspaces:
+[{workspace_url, workspace_name}]}: the number of workspaces imported, the
+browser and the cookie database read (none when the tab gave the cookie),
+and the workspaces ([] when none). A workspace saved with a standard token
+("auth add") keeps it, with a note in "hints".`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			_, imported, err := runImport(cmd.Context(), rt, "Brave",
+			extracted, imported, err := runImport(cmd.Context(), rt, "Brave",
 				"Open Slack in Brave and make sure you are signed in.", rt.Brave)
 			if err != nil {
 				return err
 			}
-			return printImported(rt, len(imported), "Brave")
+			return printImported(rt, extracted, imported)
 		},
 	}
 }
@@ -221,15 +239,19 @@ func newImportFirefox(rt *clictx.Context) *cobra.Command {
 and Linux). The default profile is tried first, then the others; Firefox does
 not need to be quit, and nothing is modified.
 
-Prints one line of text, not JSON: the number of workspaces imported.`,
+Prints {imported, source: {name, profile_path, cookies_path,
+localstorage_path}, workspaces: [{workspace_url, workspace_name}]}: the
+number of workspaces imported, the profile and files read, and the
+workspaces ([] when none). A workspace saved with a standard token ("auth
+add") keeps it, with a note in "hints".`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			_, imported, err := runImport(cmd.Context(), rt, "Firefox",
+			extracted, imported, err := runImport(cmd.Context(), rt, "Firefox",
 				"Open https://app.slack.com in Firefox and make sure you are signed in.", rt.Firefox)
 			if err != nil {
 				return err
 			}
-			return printImported(rt, len(imported), "Firefox")
+			return printImported(rt, extracted, imported)
 		},
 	}
 }
