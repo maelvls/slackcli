@@ -59,6 +59,11 @@ func (e cacheEntry) fresh(now time.Time) bool {
 	return age >= 0 && age < CacheTTL
 }
 
+// future reports whether e is dated after now: the clock moved backwards.
+func (e cacheEntry) future(now time.Time) bool {
+	return time.UnixMilli(e.FetchedAt).After(now)
+}
+
 // ResolveByID returns the users with the given IDs, keyed by ID. Values
 // that are not user IDs are ignored, as are users that cannot be fetched
 // (deleted, from another workspace …): callers show the bare ID for
@@ -113,13 +118,15 @@ func ResolveByID(ctx context.Context, client *slackapi.Client, userIDs []string,
 		return nil, err
 	}
 	if skipped, rateLimit := limited.Skipped(); skipped > 0 {
-		// A stale entry beats a bare ID.
+		// A stale entry beats a bare ID, but not one dated in the future
+		// (the clock moved backwards), which is no more trusted here than
+		// as a fresh entry.
 		bare := 0
 		for _, id := range missing {
 			if _, fetched := out[id]; fetched {
 				continue
 			}
-			if e, ok := cached[id]; ok {
+			if e, ok := cached[id]; ok && !e.future(now) {
 				out[id] = e.User
 			} else {
 				bare++
@@ -226,6 +233,12 @@ func storeCache(path string, fetched map[string]CompactUser, fetchedAt time.Time
 		}
 	}
 	for id, user := range fetched {
+		// A user another invocation fetched after this batch started (a
+		// --refresh-users while this one was fetching) is kept: this
+		// batch's copy may be the older profile. On a tie, this one wins.
+		if old, ok := entries[id]; ok && old.FetchedAt > fetchedAt.UnixMilli() {
+			continue
+		}
 		entries[id] = cacheEntry{FetchedAt: fetchedAt.UnixMilli(), User: user}
 	}
 	data, err := json.MarshalIndent(cacheFile{Version: cacheVersion, Entries: entries}, "", "  ")

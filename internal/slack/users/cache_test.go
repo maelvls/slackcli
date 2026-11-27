@@ -580,3 +580,60 @@ func TestResolveByIDKeepsWhatWasCommittedMeanwhile(t *testing.T) {
 		t.Errorf("U11111111 = %+v", e)
 	}
 }
+
+// A batch that started before a --refresh-users of the same user but
+// ends after it must not win: its profile may be the older one.
+func TestResolveByIDOlderBatchDoesNotOverwriteANewerRefresh(t *testing.T) {
+	dir := t.TempDir()
+	server := func(display string) *recorder {
+		return &recorder{serve: func(_ string, params map[string]any) (map[string]any, error) {
+			id := params["user"].(string)
+			return map[string]any{"user": member(id, "handle", "profile", profile("display_name", display))}, nil
+		}}
+	}
+	// The older batch starts at t0 and writes at t0+2m; the refresh runs
+	// at t0+1m, while the batch is fetching.
+	var calls atomic.Int32
+	clock := func() time.Time {
+		if calls.Add(1) == 1 {
+			return t0
+		}
+		return t0.Add(2 * time.Minute)
+	}
+	old := server("old")
+	serve := old.serve
+	old.serve = func(method string, params map[string]any) (map[string]any, error) {
+		if _, err := ResolveByID(context.Background(), server("new").client(), []string{"U11111111"},
+			ResolveOptions{CacheDir: dir, ForceRefresh: true, Now: at(t0.Add(time.Minute))}); err != nil {
+			t.Error(err)
+		}
+		return serve(method, params)
+	}
+	if _, err := ResolveByID(context.Background(), old.client(), []string{"U11111111"}, ResolveOptions{CacheDir: dir, ForceRefresh: true, Now: clock}); err != nil {
+		t.Fatal(err)
+	}
+	e := loadCache(cachePath(dir, "https://test.slack.com"))["U11111111"]
+	if e.User.DisplayName != "new" || e.FetchedAt != t0.Add(time.Minute).UnixMilli() {
+		t.Errorf("U11111111 = %+v, want the refresh", e)
+	}
+}
+
+// A user dated in the future (the clock moved backwards) is no more
+// trusted as a stale fallback after a rate limit than as a fresh entry.
+func TestResolveByIDRateLimitedIgnoresFutureEntries(t *testing.T) {
+	dir := t.TempDir()
+	if _, err := ResolveByID(context.Background(), infoServer().client(), []string{"U11111111"}, ResolveOptions{CacheDir: dir, Now: at(t0.Add(time.Hour))}); err != nil {
+		t.Fatal(err)
+	}
+	limited := &recorder{serve: func(method string, _ map[string]any) (map[string]any, error) {
+		return nil, &slackapi.RateLimitError{Method: method, RetryAfter: time.Minute}
+	}}
+	ctx, warnings := enrich.Collect(context.Background())
+	got, err := ResolveByID(ctx, limited.client(), []string{"U11111111"}, ResolveOptions{CacheDir: dir, Now: at(t0)})
+	if err != nil || len(got) != 0 {
+		t.Errorf("got %+v, %v, want no user", got, err)
+	}
+	if list := warnings.List(); len(list) != 1 {
+		t.Errorf("warnings = %q, want the user reported missing", list)
+	}
+}
