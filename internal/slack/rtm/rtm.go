@@ -12,6 +12,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"sync"
@@ -47,6 +49,11 @@ type Options struct {
 	// OnDisconnect is called when the connection is lost and Stream is
 	// about to reconnect.
 	OnDisconnect func(err error)
+	// OnRetry is called when the first connection failed in a way that
+	// may well go away (Slack rate limiting rtm.connect, a network that
+	// is not up yet, Slack failing on its side) and Stream is about to try
+	// again after wait. RetryHint words it for a person.
+	OnRetry func(err error, wait time.Duration)
 
 	// PingInterval, ReadTimeout and Backoff (the pause before the n-th
 	// attempt to reconnect) have sound defaults; tests shorten them.
@@ -60,8 +67,10 @@ type Options struct {
 // passed on.
 //
 // A lost connection is reopened, for as long as it takes, with a growing
-// pause. The first connection must succeed, and credentials that Slack
-// rejects end the stream whenever that happens.
+// pause. Until the first connection is ready, only transient failures are
+// tried again (a rate limit, a network that is down, Slack failing on its
+// side); any other one, such as credentials or a token that Slack rejects,
+// ends the stream at once, and so do rejected credentials later on.
 func Stream(ctx context.Context, client *slackapi.Client, opts Options, handle func(event map[string]any) error) error {
 	if opts.PingInterval <= 0 {
 		opts.PingInterval = defaultPingInterval
@@ -111,23 +120,17 @@ func Stream(ctx context.Context, client *slackapi.Client, opts Options, handle f
 		switch {
 		case ctx.Err() != nil:
 			return nil
-		case !everConnected:
-			if served {
-				// The error of a read alone ("EOF") says nothing.
-				return fmt.Errorf("the real-time connection ended before Slack said it was ready: %w", err)
-			}
+		case !everConnected && served && !isNetError(err):
+			// The error of a read alone ("EOF") says nothing.
+			return fmt.Errorf("the real-time connection ended before Slack said it was ready: %w", err)
+		case !everConnected && served:
+			// A reset or a read that timed out before hello: the network,
+			// tried again like a WebSocket that could not be reached.
+			err = &unreachableError{fmt.Errorf("the real-time connection ended before Slack said it was ready: %w", err)}
+		case !everConnected && !retryable(err):
 			return err
 		case slackapi.IsAuthError(err):
 			return err
-		}
-		if lostAt.IsZero() {
-			// A connection found dead (no answer to the pings, a machine
-			// that slept) died some time after Slack was last heard, not
-			// when that was noticed.
-			lostAt = lastFrame
-		}
-		if opts.OnDisconnect != nil {
-			opts.OnDisconnect(err)
 		}
 		attempt++
 		wait := opts.Backoff(attempt)
@@ -136,6 +139,22 @@ func Stream(ctx context.Context, client *slackapi.Client, opts Options, handle f
 		var limited *slackapi.RateLimitError
 		if errors.As(err, &limited) {
 			wait = max(wait, limited.RetryAfter)
+		}
+		switch {
+		case !everConnected:
+			if opts.OnRetry != nil {
+				opts.OnRetry(err, wait)
+			}
+		default:
+			if lostAt.IsZero() {
+				// A connection found dead (no answer to the pings, a machine
+				// that slept) died some time after Slack was last heard, not
+				// when that was noticed.
+				lostAt = lastFrame
+			}
+			if opts.OnDisconnect != nil {
+				opts.OnDisconnect(err)
+			}
 		}
 		pause := time.NewTimer(wait)
 		select {
@@ -152,6 +171,53 @@ func Stream(ctx context.Context, client *slackapi.Client, opts Options, handle f
 func backoff(attempt int) time.Duration {
 	return min(time.Second<<min(attempt-1, 10), maxBackoff)
 }
+
+// retryable reports whether the first connection, which failed with err,
+// is worth trying again: Slack did not answer rtm.connect, rate limited it
+// or failed on its side, or the WebSocket could not be reached. Everything
+// else (rejected credentials, a token that cannot use the real-time API, a
+// missing scope) would fail the same way again.
+func retryable(err error) bool {
+	var unreachable *unreachableError
+	return slackapi.IsTransient(err) || errors.As(err, &unreachable)
+}
+
+// RetryHint words, for a person, that the first connection failed with err
+// and is tried again after wait.
+func RetryHint(err error, wait time.Duration) string {
+	return fmt.Sprintf("Cannot connect to Slack yet (%s): trying again in %s.", RetryReason(err), wait.Round(time.Millisecond))
+}
+
+// RetryReason words briefly why the first connection failed with err,
+// without the advice of the error itself: it is tried again anyway.
+func RetryReason(err error) string {
+	var (
+		limited *slackapi.RateLimitError
+		timeout *slackapi.TimeoutError
+	)
+	switch {
+	case errors.As(err, &limited):
+		return limited.Summary()
+	case errors.As(err, &timeout):
+		return fmt.Sprintf("Slack did not answer %s within %s", timeout.Method, timeout.Timeout)
+	}
+	return err.Error()
+}
+
+// isNetError reports whether err is a failure of the network (a reset, a
+// timeout, a DNS failure) rather than of the protocol.
+func isNetError(err error) bool {
+	var netErr net.Error
+	return errors.As(err, &netErr)
+}
+
+// unreachableError marks a WebSocket that could not be reached over the
+// network, or whose handshake failed in a way that may go away (an HTTP
+// error, a connection cut short).
+type unreachableError struct{ err error }
+
+func (e *unreachableError) Error() string { return e.err.Error() }
+func (e *unreachableError) Unwrap() error { return e.err }
 
 // handlerError marks an error of the caller's handle, as opposed to one of
 // the connection.
@@ -198,7 +264,14 @@ func dial(ctx context.Context, client *slackapi.Client) (*websocket.Conn, error)
 		if errors.As(err, &de) {
 			err = de.Err
 		}
-		return nil, fmt.Errorf("opening the real-time connection to %s: %w", u.Host, err)
+		err = fmt.Errorf("opening the real-time connection to %s: %w", u.Host, err)
+		// A handshake that Slack answered with an HTTP error (a 503
+		// during an incident) or cut short is worth trying again too.
+		if ctx.Err() == nil && (isNetError(err) || errors.Is(err, websocket.ErrBadStatus) ||
+			errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF)) {
+			err = &unreachableError{err}
+		}
+		return nil, err
 	}
 	return ws, nil
 }

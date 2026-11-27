@@ -1,12 +1,14 @@
 package inboxcmd
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"io"
 	"net/http/httptest"
 	"slices"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -39,6 +41,11 @@ func waitHarness(t *testing.T, events []string, serve func(method string, params
 		case "auth.test":
 			return map[string]any{"user_id": "U000000001", "url": "https://acme.slack.com/"}
 		case "rtm.connect":
+			if serve != nil {
+				if resp := serve(method, params); resp != nil {
+					return resp
+				}
+			}
 			return map[string]any{"url": "ws" + strings.TrimPrefix(server.URL, "http")}
 		case "users.info":
 			return map[string]any{"user": map[string]any{"id": params["user"], "name": "alice", "profile": map[string]any{"display_name": "Alice"}}}
@@ -333,5 +340,82 @@ func TestWaitCursorStaysWhenSearchFails(t *testing.T) {
 	}
 	if hints, _ := out["hints"].([]any); len(hints) == 0 || !strings.Contains(hints[0].(string), "Warning") {
 		t.Errorf("no warning: %s", h.stdout.String())
+	}
+}
+
+// lockedBuffer is a bytes.Buffer that goroutines may write to.
+type lockedBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *lockedBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *lockedBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
+// A first rtm.connect that Slack rate limits does not end the wait (an
+// agent that runs it in a loop would stop being woken up): it is tried
+// again, which is said on stderr.
+func TestWaitRetriesARateLimitedFirstConnection(t *testing.T) {
+	ts := tsAgo(-time.Minute)
+	events := []string{event(`"channel":"D000000003","channel_type":"im","user":"U000000009","text":"ping","ts":"` + ts + `"`)}
+	var connects atomic.Int32
+	h := waitHarness(t, events, func(method string, params map[string]any) map[string]any {
+		switch {
+		case method == "rtm.connect" && connects.Add(1) == 1:
+			return map[string]any{"ok": false, "error": "ratelimited"}
+		case method == "conversations.history" && params["channel"] == "D000000003":
+			return map[string]any{"messages": []any{map[string]any{"ts": ts, "user": "U000000009", "text": "ping"}}}
+		}
+		return nil
+	})
+	streamOptions.Backoff = func(int) time.Duration { return time.Millisecond }
+	stderr := &lockedBuffer{}
+	h.rt.Stderr = stderr
+	out := h.runWait(t)
+	if items := out["items"].([]any); len(items) != 1 || out["after"] != ts || connects.Load() != 2 {
+		t.Fatalf("printed %s after %d connections", h.stdout.String(), connects.Load())
+	}
+	if got := stderr.String(); !strings.Contains(got, "Cannot connect to Slack yet") || !strings.Contains(got, "rate limited") {
+		t.Errorf("stderr:\n%s", got)
+	}
+}
+
+// A token that cannot use the real-time API ends the wait at once.
+func TestWaitFailsAtOnceWhenTheFirstConnectionIsRefused(t *testing.T) {
+	h := waitHarness(t, nil, func(method string, _ map[string]any) map[string]any {
+		if method == "rtm.connect" {
+			return map[string]any{"ok": false, "error": "not_allowed_token_type"}
+		}
+		return nil
+	})
+	streamOptions.Backoff = func(int) time.Duration { return time.Millisecond }
+	err := h.run("wait", "--timeout", "5s") // not hanging if tried again
+	if !slackapi.IsErrorCode(err, "not_allowed_token_type") || h.count("rtm.connect") != 1 {
+		t.Errorf("inbox wait = %v after %d connections", err, h.count("rtm.connect"))
+	}
+}
+
+// A --timeout that runs out before any connection was ready is an error,
+// not timed_out: nothing was listened to.
+func TestWaitTimeoutThatNeverConnectedFails(t *testing.T) {
+	h := waitHarness(t, nil, func(method string, _ map[string]any) map[string]any {
+		if method == "rtm.connect" {
+			return map[string]any{"ok": false, "error": "internal_error"}
+		}
+		return nil
+	})
+	streamOptions.Backoff = func(int) time.Duration { return 5 * time.Millisecond }
+	err := h.run("wait", "--timeout", "100ms")
+	if err == nil || !strings.Contains(err.Error(), "could not connect to Slack within 100ms") || h.stdout.Len() != 0 {
+		t.Errorf("inbox wait = %v, stdout %q", err, h.stdout.String())
 	}
 }
