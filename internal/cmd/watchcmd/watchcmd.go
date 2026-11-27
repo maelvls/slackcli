@@ -151,6 +151,7 @@ and classic tokens, not with the token of a Slack app.`,
 					rt.Hintf("Connected to %s: waiting for messages.", cmp.Or(r.WorkspaceURL, "Slack"))
 				}
 				opts.OnDisconnect = func(err error) { rt.Hintf("Connection lost (%v): reconnecting.", err) }
+				opts.OnRetry = func(err error, wait time.Duration) { rt.Hintf("%s", rtm.RetryHint(err, wait)) }
 				err = rtm.Stream(ctx, r.Client, opts, func(raw map[string]any) error { return w.handle(ctx, raw) })
 				if err != nil && connected && downSince.IsZero() {
 					// Without the monotonic reading, which stops while

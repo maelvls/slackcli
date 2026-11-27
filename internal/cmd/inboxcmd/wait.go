@@ -336,6 +336,7 @@ func runWait(parent context.Context, rt *clictx.Context, a waitArgs) error {
 			catchUp(w, 0)
 		}
 		opts.OnDisconnect = func(err error) { rt.Hintf("Connection lost (%v): reconnecting.", err) }
+		opts.OnRetry = func(err error, wait time.Duration) { rt.Hintf("%s", rtm.RetryHint(err, wait)) }
 		err = rtm.Stream(stream, r.Client, opts, func(raw map[string]any) error {
 			item, err := w.Message(ctx, raw)
 			switch {
