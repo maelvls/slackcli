@@ -3,6 +3,7 @@ package trace
 import (
 	"bytes"
 	"errors"
+	"regexp"
 	"slices"
 	"strings"
 	"sync"
@@ -89,7 +90,9 @@ func TestSafeNote(t *testing.T) {
 	Reset(&out)
 	t.Cleanup(func() { Reset(nil) })
 	Begin("download", "").EndErr(errors.New(`Get "https://files.slack.com/files-pri/T1-F2/secret-plan.pdf?t=xoxe-1": EOF`))
-	if got := out.String(); strings.Contains(got, "secret-plan") || strings.Contains(got, "xoxe-1") || !strings.Contains(got, `download: 0s, failed: Get "…": EOF`) {
+	// Whatever the span lasted: a timer can make even this one 1ms long.
+	want := regexp.MustCompile(`^\[slackcli \+\S+\] download: \S+, failed: Get "…": EOF\n$`)
+	if got := out.String(); strings.Contains(got, "secret-plan") || strings.Contains(got, "xoxe-1") || !want.MatchString(got) {
 		t.Errorf("trace = %q", got)
 	}
 }
