@@ -56,7 +56,7 @@ slackcli
 ├── user      list | search | get | dm-open
 ├── later     list | save | complete | archive | reopen | remove | remind
 ├── unreads
-├── inbox
+├── inbox     wait
 ├── watch
 ├── canvas    create | get | edit
 ├── workflow  list | preview | get | run
@@ -106,6 +106,16 @@ slackcli inbox --no-threads --max-body-chars 120
 Items are newest first. `count` and `first_ts` cover the messages from others since your last one there; `ts`, `author`, `text` and `permalink` describe the newest. `thread_ts` is absent for the top level of a DM. `truncated` means there was more to look at than was: more candidates than `--max-conversations` (60), in which case raise it, or more matches than the 200 read from each of the three searches behind the inbox, or a conversation with more than 1000 messages in the window (its item may undercount, or be answered already): for these two only a shorter `--since` helps.
 
 A thread is found through your own posts in it, searched back to two days before `--since`: a thread whose last post of yours is older than that is not listed, however recent its replies, unless one of them mentions you.
+
+To be woken up when something new lands there instead of asking again, `inbox wait` stays connected to Slack's real-time API (one WebSocket, like `watch`), judges each message by the same rules as it arrives, and exits with the items once there is one (after one more search, at least 15 s after it connected, for what Slack's search index had not caught up with yet):
+
+```bash
+slackcli inbox wait                                  # from now on
+slackcli inbox wait --after 1794222538.567359        # what came since, too
+slackcli inbox wait --after "$after" --timeout 2h
+```
+
+It prints `inbox`'s fields plus `after`, the `--after` to pass to the next run (the newest item's `ts`) so that nothing is missed between two runs, and `timed_out: true` with no items when `--timeout` runs out; both exit 0. With `--after`, what came before the command started, and what came while the connection was down, is looked for through the search behind `inbox`. A channel message that neither mentions you nor replies in a thread you posted in costs no API call.
 
 ## Letting a human review
 
