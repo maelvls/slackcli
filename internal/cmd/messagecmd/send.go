@@ -75,7 +75,8 @@ workspace: the message is sent all the same.
 that looks like a flag ("-1", "--force") must come after "--":
   %[2]s message send <target> -- "-1"
 
-With --attach the command does not time out: uploads can be long.
+With --attach the command does not time out: uploads can be long (an upload
+that makes no progress still fails).
 
 In safe mode (--safe-mode or %[1]s=1) nothing is posted: the
 compose editor opens with the text for a human to review and send. --attach,

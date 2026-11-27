@@ -21,6 +21,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/maelvls/slackcli/internal/appinfo"
@@ -295,9 +296,22 @@ func postBytes(ctx context.Context, client *slackapi.Client, uploadURL string, b
 	if u.Scheme != "https" {
 		return fmt.Errorf("refusing to upload over %q: Slack returned a non-HTTPS upload URL", u.Scheme)
 	}
+	// The upload has no overall time limit (a large file on a slow link
+	// takes as long as it takes), but it must not hang forever on a
+	// connection that went dead: a half-open TCP connection, a captive
+	// portal, a laptop put to sleep. The watchdog cancels the request when
+	// no byte of the file was taken for idle, and, once all of it was
+	// taken, when no answer came idle after the last one.
+	idle := stallTimeout()
+	ctx, cancel := context.WithCancelCause(ctx)
+	defer cancel(nil)
+	w := &stallWatch{r: body, idle: idle, size: size}
+	w.timer = time.AfterFunc(idle, func() { cancel(errStalled) })
+	defer w.timer.Stop()
+
 	// NopCloser: the transport closes request bodies, and the caller owns
 	// the file.
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, uploadURL, io.NopCloser(body))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, uploadURL, io.NopCloser(w))
 	if err != nil {
 		return err
 	}
@@ -315,6 +329,9 @@ func postBytes(ctx context.Context, client *slackapi.Client, uploadURL string, b
 	hc.Transport = audit.Transport(hc.Transport, "files.upload")
 	hc.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
 	resp, err := hc.Do(req)
+	if err != nil && errors.Is(context.Cause(ctx), errStalled) {
+		return w.stalledError(u.Host)
+	}
 	if err != nil {
 		// *url.Error embeds the full pre-signed URL; keep it out of
 		// messages that end up in agent transcripts.
@@ -333,6 +350,8 @@ func postBytes(ctx context.Context, client *slackapi.Client, uploadURL string, b
 		}
 		return fmt.Errorf("sending file bytes to %s: it answered with a redirect (HTTP %d) to %s, which was not followed: the contents of a file are only sent to the upload URL Slack reserved. Nothing was uploaded: run the command again", u.Host, resp.StatusCode, target)
 	}
+	// The answer came: the rest (a short body) gets one more idle period.
+	w.timer.Reset(idle)
 	snippet, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
 		msg := fmt.Sprintf("sending file bytes to %s failed with HTTP %d", u.Host, resp.StatusCode)
@@ -342,6 +361,50 @@ func postBytes(ctx context.Context, client *slackapi.Client, uploadURL string, b
 		return errors.New(msg)
 	}
 	return nil
+}
+
+// errStalled is the cause of the cancellation of an upload whose
+// connection made no progress for the stall timeout.
+var errStalled = errors.New("upload stalled")
+
+// stallTimeout is how long an upload may go without progress: the time
+// limit of one Slack request (slackapi.APITimeout). A variable for tests.
+var stallTimeout = slackapi.APITimeout
+
+// stallWatch passes the bytes of a file on to the transport, and pushes
+// back the stall watchdog (timer) each time some are taken.
+type stallWatch struct {
+	r     io.Reader
+	idle  time.Duration
+	size  int64
+	timer *time.Timer
+	// sent is the number of bytes handed to the transport. The transport
+	// may read the body from a goroutine of its own.
+	sent atomic.Int64
+}
+
+func (w *stallWatch) Read(p []byte) (int, error) {
+	n, err := w.r.Read(p)
+	if n > 0 {
+		w.sent.Add(int64(n))
+		w.timer.Reset(w.idle)
+	}
+	return n, err
+}
+
+// stalledError says that the upload to host stalled, where, and what to
+// do about it.
+func (w *stallWatch) stalledError(host string) error {
+	sent := w.sent.Load()
+	where := fmt.Sprintf("after %s of %s were sent", humanSize(sent), humanSize(w.size))
+	if sent >= w.size {
+		where = fmt.Sprintf("all %s were sent but %s never answered", humanSize(w.size), host)
+	}
+	return fmt.Errorf("sending file bytes to %s: the upload stalled: no progress for %s (%s). "+
+		"The connection is probably dead (network change, sleep, captive portal, VPN): "+
+		"check the network and run the command again; nothing was posted. "+
+		"%s sets how long to wait (in milliseconds)",
+		host, w.idle, where, appinfo.EnvName("API_TIMEOUT_MS"))
 }
 
 func describe(files []File) string {
