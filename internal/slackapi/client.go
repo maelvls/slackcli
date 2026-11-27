@@ -485,7 +485,7 @@ func (c *Client) callOnce(ctx context.Context, method string, params map[string]
 		_ = json.Unmarshal(body, &data)
 		code, _ := data["error"].(string)
 		switch {
-		case code == RateLimitedCode && data["ok"] != true:
+		case IsRateLimitCode(code) && data["ok"] != true:
 			// Retried below like an HTTP 429, and logged like one.
 			rec.markRateLimited(parseRetryAfter(header.Get("Retry-After")))
 			rec.done(status, data, code)
