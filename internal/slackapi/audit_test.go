@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"os"
@@ -113,6 +114,48 @@ func TestEachAttemptIsAudited(t *testing.T) {
 		t.Errorf("second line = %+v", e)
 	}
 	if e := got[2]; e.Method != "conversations.info" || e.Status != 200 || e.OK == nil || *e.OK || e.Error != "channel_not_found" || e.Attempt != 1 {
+		t.Errorf("third line = %+v", e)
+	}
+}
+
+// A rate limit that Slack answers with an HTTP 200 and the "ratelimited"
+// code is logged like an HTTP 429: rate limited, with the wait it asked
+// for. So is one that a fake handler answers in the body.
+func TestRateLimitCodeIsAuditedAsRateLimited(t *testing.T) {
+	path := auditLog(t)
+	t.Setenv("SLACKCLI_RATE_LIMIT_MAX_WAIT_MS", "30000")
+	calls := 0
+	c := browserClient(t, func(w http.ResponseWriter, _ *http.Request) {
+		calls++
+		if calls == 1 {
+			w.Header().Set("Retry-After", "7")
+			_, _ = io.WriteString(w, `{"ok":false,"error":"ratelimited"}`)
+			return
+		}
+		_, _ = io.WriteString(w, `{"ok":true}`)
+	}, WithSleep(func(context.Context, time.Duration) error { return nil }))
+	if _, err := c.API(context.Background(), "conversations.history", nil); err != nil {
+		t.Fatal(err)
+	}
+	fake := NewFake(func(context.Context, string, map[string]any) (map[string]any, error) {
+		return map[string]any{"ok": false, "error": "ratelimited"}, nil
+	})
+	var limited *RateLimitError
+	if _, err := fake.API(context.Background(), "auth.test", nil); !errors.As(err, &limited) {
+		t.Fatalf("err = %v, want a rate limit", err)
+	}
+
+	got := auditEntries(t, path)
+	if len(got) != 3 {
+		t.Fatalf("%d lines, want 3: %+v", len(got), got)
+	}
+	if e := got[0]; e.Status != 200 || !e.RateLimited || e.RetryAfterS != 7 || e.Attempt != 1 || e.Error != "ratelimited" {
+		t.Errorf("first line = %+v", e)
+	}
+	if e := got[1]; e.Status != 200 || e.RateLimited || e.RetryAfterS != 0 || e.Attempt != 2 || e.Error != "" {
+		t.Errorf("second line = %+v", e)
+	}
+	if e := got[2]; e.Method != "auth.test" || !e.RateLimited || e.RetryAfterS != limited.RetryAfter.Seconds() || e.Error != "ratelimited" {
 		t.Errorf("third line = %+v", e)
 	}
 }

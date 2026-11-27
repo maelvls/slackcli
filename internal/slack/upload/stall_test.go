@@ -1,14 +1,19 @@
 package upload
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/maelvls/slackcli/internal/audit"
 	"github.com/maelvls/slackcli/internal/slackapi"
 )
 
@@ -93,6 +98,36 @@ func TestUploadFailsWhenTheBodyStops(t *testing.T) {
 	}
 	if elapsed := time.Since(start); elapsed > 5*time.Second {
 		t.Errorf("failed after %s, want about the stall timeout", elapsed)
+	}
+}
+
+// A stalled upload is a "timeout" in the audit log, not "cancelled": the
+// watchdog cancels it, but no one interrupted the command.
+func TestStalledUploadIsAuditedAsTimeout(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "audit.jsonl")
+	t.Setenv("SLACKCLI_AUDIT_LOG", path)
+	withStallTimeout(t, 200*time.Millisecond)
+	srv, client := byteServer(t, func(w http.ResponseWriter, r *http.Request, done <-chan struct{}) {
+		_, _ = io.Copy(io.Discard, r.Body)
+		select {
+		case <-done:
+		case <-r.Context().Done():
+		}
+	})
+	content := strings.Repeat("x", 10_000)
+	if err := postBytes(context.Background(), client, srv.URL+"/f", strings.NewReader(content), int64(len(content))); err == nil {
+		t.Fatal("no error")
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var e audit.Entry
+	if err := json.Unmarshal(bytes.TrimSpace(raw), &e); err != nil {
+		t.Fatalf("want one line: %v\n%s", err, raw)
+	}
+	if e.Method != "files.upload" || e.Error != "timeout" {
+		t.Errorf("line = %+v, want files.upload failed with \"timeout\"", e)
 	}
 }
 

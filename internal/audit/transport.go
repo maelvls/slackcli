@@ -48,8 +48,15 @@ func (t *transport) RoundTrip(req *http.Request) (*http.Response, error) {
 }
 
 // ErrorClass names the way a request that got no answer failed:
-// "cancelled", "timeout" or "network".
+// "cancelled", "timeout" or "network". A request whose context was
+// cancelled because of a timeout, given as the cause of the cancellation
+// (context.WithCancelCause, as a stall watchdog does), is a "timeout": the
+// cause is one when it is or wraps context.DeadlineExceeded, or has a
+// Timeout method that returns true.
 func ErrorClass(ctx context.Context, err error) string {
+	if ctx.Err() != nil && isTimeout(context.Cause(ctx)) {
+		return "timeout"
+	}
 	var ne interface{ Timeout() bool }
 	switch {
 	case ctx.Err() == context.Canceled || errors.Is(err, context.Canceled):
@@ -58,4 +65,10 @@ func ErrorClass(ctx context.Context, err error) string {
 		return "timeout"
 	}
 	return "network"
+}
+
+// isTimeout tells whether err (the cause of a cancellation) is a timeout.
+func isTimeout(err error) bool {
+	var ne interface{ Timeout() bool }
+	return errors.Is(err, context.DeadlineExceeded) || (errors.As(err, &ne) && ne.Timeout())
 }
