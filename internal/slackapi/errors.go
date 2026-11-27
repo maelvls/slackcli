@@ -196,7 +196,7 @@ func (e *HTTPStatusError) Error() string {
 
 // transientCodes are the error codes Slack answers when the failure is its
 // own and momentary.
-var transientCodes = []string{"ratelimited", "internal_error", "fatal_error", "service_unavailable", "request_timeout"}
+var transientCodes = []string{RateLimitedCode, "internal_error", "fatal_error", "service_unavailable", "request_timeout"}
 
 // IsTransient reports whether err says nothing about what was asked: Slack
 // did not answer (TimeoutError, NetworkError), is rate limiting the call
@@ -232,12 +232,29 @@ func IsAuthError(err error) bool {
 	return IsErrorCode(err, "invalid_auth", "token_expired", "not_authed", "account_inactive", "token_revoked")
 }
 
-// RateLimitError is returned on HTTP 429 when the wait Slack asks for
-// exceeds what the caller allows.
+// RateLimitedCode is the error code Slack answers a rate-limited call
+// with, in the body of an HTTP 429 or, for some methods, of an HTTP 200.
+const RateLimitedCode = "ratelimited"
+
+// RateLimitError is returned when Slack rate limits a call, by an HTTP 429
+// or by the "ratelimited" error code, and the wait Slack asks for exceeds
+// what the caller allows.
 type RateLimitError struct {
 	Method     string
 	RetryAfter time.Duration
 	MaxWait    time.Duration
+	// API is the answer when it came with the "ratelimited" error code
+	// (nil for an HTTP 429 without one). Unwrap returns it, so that
+	// ErrorCode and IsErrorCode see the code.
+	API *APIError
+}
+
+// Unwrap returns the *APIError of the "ratelimited" code, if any.
+func (e *RateLimitError) Unwrap() error {
+	if e.API == nil {
+		return nil
+	}
+	return e.API
 }
 
 // Error says what was limited and for how long (Summary), and how to have
