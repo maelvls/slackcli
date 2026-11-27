@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"runtime"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -365,6 +366,9 @@ func TestNamesFileTolerance(t *testing.T) {
 		"wrong types":      `{"version": 1, "entries": {"C0GENERAL1": "nope"}}`,
 		"empty file":       ``,
 		"not a channel ID": fmt.Sprintf(`{"version": 1, "entries": {"../x": {"fetched_at": %d, "name": "x"}}}`, fresh),
+		// Whose DM would it be?
+		"DM without identity": fmt.Sprintf(`{"version": 1, "entries": {"D0DM000001": {"fetched_at": %d, "name": "x"}}}`, fresh),
+		"DM with a bad key":   fmt.Sprintf(`{"version": 1, "entries": {"D0DM000001@xoxc-secret": {"fetched_at": %d, "name": "x"}}}`, fresh),
 	}
 	for name, content := range tests {
 		t.Run(name, func(t *testing.T) {
@@ -744,5 +748,64 @@ func TestNamesPolicyEverywhere(t *testing.T) {
 				t.Errorf("written again = %v, want %v", written, st.usable)
 			}
 		})
+	}
+}
+
+// The name of a DM is the other member's, as the caller sees it: two
+// identities of the same workspace (a saved session and a SLACK_TOKEN of
+// someone else) share a DM under one ID and must each see their own
+// name. The names of channels do not depend on who asks, and are shared.
+func TestNamesOfDMsAreKeptPerIdentity(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	identity := func(token, other string) (*slackapi.Client, *recorder) {
+		rec := &recorder{serve: func(method string, params map[string]any) (map[string]any, error) {
+			switch method {
+			case "conversations.info":
+				if params["channel"] == "D0SHARED01" {
+					return map[string]any{"channel": map[string]any{"id": "D0SHARED01", "is_im": true, "user": other}}, nil
+				}
+				return map[string]any{"channel": map[string]any{"id": params["channel"], "name": "general"}}, nil
+			case "users.info":
+				return map[string]any{"user": map[string]any{"id": other, "name": other}}, nil
+			}
+			return nil, fmt.Errorf("unexpected method %s", method)
+		}}
+		client := slackapi.New(slackapi.Auth{Type: slackapi.AuthBrowser, XoxcToken: token, XoxdCookie: "xoxd-test"}, "https://test.slack.com",
+			slackapi.WithHandler(func(_ context.Context, method string, params map[string]any) (map[string]any, error) {
+				rec.calls = append(rec.calls, call{method, params})
+				return rec.serve(method, params)
+			}))
+		return client, rec
+	}
+	alice, _ := identity("xoxc-alice", "bob")
+	if got, err := NewNames(NamesOptions{CacheDir: dir, Now: at(t0)}).Lookup(ctx, alice, "D0SHARED01"); err != nil || got != "bob" {
+		t.Fatalf("alice's DM = %q, %v", got, err)
+	}
+	if _, err := NewNames(NamesOptions{CacheDir: dir, Now: at(t0)}).Lookup(ctx, alice, "C0GENERAL1"); err != nil {
+		t.Fatal(err)
+	}
+
+	bob, rec := identity("xoxc-bob", "alice")
+	names := NewNames(NamesOptions{CacheDir: dir, Now: at(t0)})
+	if got, err := names.Lookup(ctx, bob, "D0SHARED01"); err != nil || got != "alice" {
+		t.Errorf("bob's DM = %q, %v, want alice", got, err)
+	}
+	if got := names.Stale(bob, "D0SHARED01"); got != "alice" {
+		t.Errorf("bob's stale DM name = %q, want alice", got)
+	}
+	// The channel name is shared: no call for it.
+	rec.calls = nil
+	if got, _ := names.Lookup(ctx, bob, "C0GENERAL1"); got != "general" || len(rec.calls) != 0 {
+		t.Errorf("channel name %q after %d calls, want it from alice's lookup", got, len(rec.calls))
+	}
+	// Alice still gets hers.
+	if got, _ := NewNames(NamesOptions{CacheDir: dir, Now: at(t0)}).Lookup(ctx, alice, "D0SHARED01"); got != "bob" {
+		t.Errorf("alice's DM = %q, want bob", got)
+	}
+	// Nothing derived from the tokens but a short key is written.
+	data, _ := os.ReadFile(namesFile(t, dir))
+	if strings.Contains(string(data), "xoxc") {
+		t.Errorf("the cache file holds a token: %s", data)
 	}
 }

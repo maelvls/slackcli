@@ -3,8 +3,11 @@ package channels
 import (
 	"cmp"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -103,9 +106,10 @@ func (n *Names) Lookup(ctx context.Context, client *slackapi.Client, channelID s
 		return LookupName(ctx, client, channelID)
 	}
 	n.open(client)
-	if !n.opts.ForceRefresh {
+	key := cacheKey(client, channelID)
+	if !n.opts.ForceRefresh && key != "" {
 		n.mu.Lock()
-		e, ok := n.entries[channelID]
+		e, ok := n.entries[key]
 		n.mu.Unlock()
 		if ok && namesPolicy.State(e.FetchedAt, n.now()) == cachefile.Fresh {
 			return e.Name, nil
@@ -140,10 +144,11 @@ func (n *Names) Stale(client *slackapi.Client, channelID string) string {
 		return ""
 	}
 	n.open(client)
+	key := cacheKey(client, channelID)
 	n.mu.Lock()
-	e, ok := n.entries[channelID]
+	e, ok := n.entries[key]
 	n.mu.Unlock()
-	if !ok || namesPolicy.State(e.FetchedAt, n.now()) == cachefile.Discard {
+	if !ok || key == "" || namesPolicy.State(e.FetchedAt, n.now()) == cachefile.Discard {
 		return ""
 	}
 	return e.Name
@@ -162,7 +167,8 @@ func (n *Names) Stale(client *slackapi.Client, channelID string) string {
 // (cachefile.Lock), so that the entries other invocations add meanwhile
 // are kept.
 func (n *Names) Remember(client *slackapi.Client, channelID, name string, fetchedAt time.Time) {
-	if n == nil || name == "" || !slackid.IsChannelID(channelID) {
+	key := cacheKey(client, channelID)
+	if n == nil || name == "" || key == "" {
 		return
 	}
 	n.open(client)
@@ -181,8 +187,8 @@ func (n *Names) Remember(client *slackapi.Client, channelID, name string, fetche
 	now := n.now()
 	cachefile.Prune(namesPolicy, n.entries, now, cachefile.Stale)
 	cachefile.Prune(namesPolicy, n.fetched, now, cachefile.Stale)
-	cachefile.Merge(namesPolicy, n.entries, channelID, e, now)
-	cachefile.Merge(namesPolicy, n.fetched, channelID, e, now)
+	cachefile.Merge(namesPolicy, n.entries, key, e, now)
+	cachefile.Merge(namesPolicy, n.fetched, key, e, now)
 	if n.path == "" {
 		return
 	}
@@ -203,6 +209,44 @@ func (n *Names) Remember(client *slackapi.Client, channelID, name string, fetche
 		return
 	}
 	cachefile.Write(n.path, append(data, '\n'))
+}
+
+// cacheKey returns the key of the name of a conversation in the cache, ""
+// when it is not to be cached.
+//
+// The name of a channel or group DM is the same for whoever asks, so its
+// key is its ID, shared by every identity of the workspace. That of a DM
+// (D…) is the other member's, as the caller sees it: two identities of
+// one workspace (a saved session and the SLACK_TOKEN of someone else)
+// that share a DM see different names under one ID. Its key is the ID
+// followed by "@" and a fingerprint of the caller's token, the only thing
+// the client knows of who it is without a call (auth.test): the first 8
+// bytes of its SHA-256, in hex. That is a key, not a secret: it cannot
+// help recover a token of that length, and the token itself is never
+// written. A new token (credentials imported again) starts the DM names
+// afresh. Without a token, a DM name is not cached.
+func cacheKey(client *slackapi.Client, channelID string) string {
+	if !slackid.IsChannelID(channelID) {
+		return ""
+	}
+	if !strings.HasPrefix(channelID, "D") {
+		return channelID
+	}
+	if client == nil || client.Auth().BearerToken() == "" {
+		return ""
+	}
+	sum := sha256.Sum256([]byte(client.Auth().BearerToken()))
+	return channelID + "@" + hex.EncodeToString(sum[:8])
+}
+
+// validKey reports whether a key read from the file is one cacheKey makes.
+func validKey(key string) bool {
+	id, fingerprint, isDM := strings.Cut(key, "@")
+	if !isDM {
+		return slackid.IsChannelID(id) && !strings.HasPrefix(id, "D")
+	}
+	_, err := hex.DecodeString(fingerprint)
+	return strings.HasPrefix(id, "D") && slackid.IsChannelID(id) && len(fingerprint) == 16 && err == nil
 }
 
 // open reads the cache file of the workspace, once.
@@ -243,7 +287,7 @@ func loadNames(path string) map[string]nameEntry {
 		return entries
 	}
 	for id, e := range file.Entries {
-		if slackid.IsChannelID(id) && e.FetchedAt > 0 && e.Name != "" {
+		if validKey(id) && e.FetchedAt > 0 && e.Name != "" {
 			entries[id] = e
 		}
 	}

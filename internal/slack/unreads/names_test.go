@@ -110,7 +110,9 @@ func TestFetchRateLimitedNamesUseStaleEntries(t *testing.T) {
 	// Two days ago: expired.
 	old := channels.NewNames(channels.NamesOptions{CacheDir: dir, WorkspaceURL: "https://test.slack.com", Now: clock(t0.Add(-48 * time.Hour))})
 	old.Remember(nil, "C0GENERAL1", "general", old.Now())
-	old.Remember(nil, "D0DM000001", "user-U0ALICE001", old.Now())
+	// The name of a DM is kept for the identity that looked it up: the
+	// same credentials as the client below (NewFake).
+	old.Remember(slackapi.NewFake(nil), "D0DM000001", "user-U0ALICE001", old.Now())
 
 	inner := ws.recorder()
 	client := slackapi.NewFake(func(_ context.Context, method string, params map[string]any) (map[string]any, error) {
