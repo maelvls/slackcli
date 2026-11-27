@@ -29,8 +29,10 @@ test:
 # files (keychain on macOS, DPAPI on Windows, flock on Unix).
 check: fmt-check vet test-race cross-build
 
+# gofmt exits 2 with nothing on stdout when it cannot parse a file: check its
+# status before the list. Its errors go to stderr, so they still show.
 fmt-check:
-	@out="$$(gofmt -l .)"; if [ -n "$$out" ]; then echo "not gofmt-ed:"; echo "$$out"; exit 1; fi
+	@out="$$(gofmt -l .)" || exit 1; if [ -n "$$out" ]; then echo "not gofmt-ed:"; echo "$$out"; exit 1; fi
 
 vet:
 	go vet ./...
