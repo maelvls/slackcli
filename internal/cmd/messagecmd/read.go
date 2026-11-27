@@ -61,7 +61,7 @@ type listResult struct {
 	// leaves, topic changes …) left out of a channel's history.
 	SystemMessagesHidden int `json:"system_messages_hidden,omitempty"`
 	// HasMore says that a channel's history stopped at --limit while
-	// older messages were left, with a hint on how to get them.
+	// older messages may be left, with a hint on how to get them.
 	HasMore         bool                         `json:"has_more,omitempty"`
 	ReferencedUsers map[string]users.CompactUser `json:"referenced_users"`
 	// oldestTS is the ts of the oldest top-level message listed: the
@@ -429,7 +429,7 @@ func (c *command) listHistory(ctx context.Context, target cmdutil.Target, opts l
 			next = append(next, "--oldest "+oldest)
 		}
 		next = append(next, "--latest "+result.oldestTS)
-		c.rt.ResultHintf("Only the newest %d top-level messages in %s are listed (has_more): older ones are left. Messages are oldest first: for older messages, repeat with %s (--latest is exclusive). Raising --limit (now %d, max %d) returns more at once.",
+		c.rt.ResultHintf("Only the newest %d top-level messages in %s are listed (has_more): older ones may be left. Messages are oldest first: for older messages, repeat with %s (--latest is exclusive). Raising --limit (now %d, max %d) returns more at once.",
 			limit, describeRange(oldest, latest), strings.Join(next, " "), limit, messages.MaxHistoryLimit)
 	case len(result.Messages) > 0:
 	case result.SystemMessagesHidden > 0:

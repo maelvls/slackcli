@@ -683,7 +683,7 @@ func TestListHistoryHasMore(t *testing.T) {
 	if got["has_more"] != true || len(got["messages"].([]any)) != 2 {
 		t.Errorf("printed %s, want has_more and 2 messages", h.stdout)
 	}
-	want := []any{"Only the newest 2 top-level messages in the channel after 1770076800 (2026-02-03T00:00:00Z) are listed (has_more): older ones are left. Messages are oldest first: for older messages, repeat with --oldest 1770076800 --latest 1770160000.000001 (--latest is exclusive). Raising --limit (now 2, max 1000) returns more at once."}
+	want := []any{"Only the newest 2 top-level messages in the channel after 1770076800 (2026-02-03T00:00:00Z) are listed (has_more): older ones may be left. Messages are oldest first: for older messages, repeat with --oldest 1770076800 --latest 1770160000.000001 (--latest is exclusive). Raising --limit (now 2, max 1000) returns more at once."}
 	if !reflect.DeepEqual(got["hints"], want) {
 		t.Errorf("hints = %q\nwant %q", got["hints"], want)
 	}

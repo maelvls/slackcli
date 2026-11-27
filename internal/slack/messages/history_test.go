@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -284,5 +285,31 @@ func TestFetchChannelHistoryHasMore(t *testing.T) {
 				t.Errorf("messages = %v, HasMore = %v; want %v, %v", got, h.HasMore, tc.want, tc.more)
 			}
 		})
+	}
+}
+
+// Given oldest alone, Slack answers with the messages right after it, not
+// the newest ones: a latest in the future is sent too, so that a listing
+// cut by the limit is the newest messages, as with no bounds at all.
+func TestFetchChannelHistoryOldestAloneWalksBackFromNow(t *testing.T) {
+	rec := &recorder{serve: func(string, map[string]any) (map[string]any, error) {
+		return map[string]any{"messages": anys(raw("5.000000", "five"))}, nil
+	}}
+	if _, err := FetchChannelHistory(context.Background(), rec.client(), "C12345678", HistoryOptions{Oldest: "1.000000"}); err != nil {
+		t.Fatal(err)
+	}
+	now := strconv.FormatInt(time.Now().Unix(), 10)
+	p := rec.calls[0].params
+	if latest, _ := p["latest"].(string); CompareTS(latest, now) <= 0 || p["oldest"] != "1.000000" {
+		t.Errorf("params = %v, want oldest 1.000000 and a latest after now (%s)", p, now)
+	}
+
+	// Both bounds given: sent as they are.
+	rec.calls = nil
+	if _, err := FetchChannelHistory(context.Background(), rec.client(), "C12345678", HistoryOptions{Oldest: "1.000000", Latest: "9.000000"}); err != nil {
+		t.Fatal(err)
+	}
+	if p := rec.calls[0].params; p["latest"] != "9.000000" {
+		t.Errorf("params = %v, want latest 9.000000", p)
 	}
 }

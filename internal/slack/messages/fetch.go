@@ -6,8 +6,10 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/maelvls/slackcli/internal/jsonx"
 	"github.com/maelvls/slackcli/internal/slack/enrich"
@@ -190,9 +192,11 @@ type History struct {
 	// while collecting Messages.
 	SystemHidden int
 	// HasMore is true when Messages stopped at the limit while older
-	// messages matching the options were left: those of the last page
-	// that were not taken, or more pages according to Slack. Page back
-	// with Latest set to the ts of the oldest message (Messages[0]).
+	// messages may be left: some of the last page that would have been
+	// returned were not taken, or Slack has more pages (which can hold
+	// only system messages, or only messages the reaction filters
+	// reject). Page back with Latest set to the ts of the oldest message
+	// (Messages[0]).
 	HasMore bool
 }
 
@@ -211,6 +215,14 @@ func FetchChannelHistory(ctx context.Context, client *slackapi.Client, channelID
 	hidden := 0
 	hasMore := false
 	latest, cursor := opts.Latest, ""
+	// Given oldest alone, Slack walks forward from it: its first page is
+	// the messages right after oldest, the next cursor goes newer, and a
+	// listing cut by the limit would be the oldest messages of the range
+	// (with a gap where a page was cut). A latest in the future makes it
+	// walk back from the newest message, like without oldest.
+	if latest == "" && opts.Oldest != "" {
+		latest = strconv.FormatInt(time.Now().Add(24*time.Hour).Unix(), 10) + ".000000"
+	}
 	// keep reports whether a raw message of the history is one to return.
 	keep := func(m map[string]any) bool {
 		if !opts.IncludeSystem && IsSystem(jsonx.Str(m["subtype"])) {
