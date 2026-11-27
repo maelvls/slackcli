@@ -292,7 +292,7 @@ func CheckLegacyAPITimeout() error {
 	return nil
 }
 
-// RateLimitMaxWait is how long the client is willing to sleep on HTTP 429
+// RateLimitMaxWait is how long the client is willing to sleep on a rate limit
 // before retrying (SLACKCLI_RATE_LIMIT_MAX_WAIT_MS; default 0 = fail fast).
 func RateLimitMaxWait() time.Duration {
 	return appinfo.EnvDurationMS("RATE_LIMIT_MAX_WAIT_MS", 0, true)
@@ -302,7 +302,9 @@ func RateLimitMaxWait() time.Duration {
 // are dropped; strings are sent as-is; bools and numbers are stringified;
 // everything else (maps, slices, structs) is JSON-encoded.
 //
-// A response with ok=false is returned as an *APIError.
+// A response with ok=false is returned as an *APIError, except a rate
+// limit: an HTTP 429 or the "ratelimited" error code is a *RateLimitError
+// (which wraps the *APIError of the code).
 func (c *Client) API(ctx context.Context, method string, params map[string]any) (map[string]any, error) {
 	return c.call(ctx, method, params, false)
 }
@@ -402,6 +404,12 @@ func (c *Client) callOnce(ctx context.Context, method string, params map[string]
 		if resp == nil {
 			resp = map[string]any{"ok": true}
 		}
+		if code, _ := resp["error"].(string); code == RateLimitedCode && resp["ok"] != true {
+			// The rate limit a handler answers in the body, as Slack
+			// may: the same error as an HTTP 429 (see the loop below).
+			rec.done(0, resp, code)
+			return nil, &RateLimitError{Method: method, RetryAfter: parseRetryAfter(""), MaxWait: RateLimitMaxWait(), API: newAPIError(method, resp)}
+		}
 		if ok, present := resp["ok"]; present && ok != true {
 			apiErr := newAPIError(method, resp)
 			rec.done(0, resp, apiErr.Code)
@@ -454,13 +462,7 @@ func (c *Client) callOnce(ctx context.Context, method string, params map[string]
 			maxWait := RateLimitMaxWait()
 			span.Fail(fmt.Sprintf("HTTP 429, Retry-After %s", retryAfter))
 			rec.rateLimited(retryAfter)
-			if attempt >= maxRateLimitRetry || retryAfter > maxWait || RateLimitRetryDisabled(ctx) {
-				return nil, &RateLimitError{Method: method, RetryAfter: retryAfter, MaxWait: maxWait}
-			}
-			wait := trace.Begin("rate-limit wait", method)
-			err := c.sleep(ctx, retryAfter)
-			wait.EndErr(err)
-			if err != nil {
+			if err := c.retryRateLimited(ctx, method, attempt, retryAfter, maxWait, nil); err != nil {
 				return nil, err
 			}
 			continue
@@ -485,6 +487,19 @@ func (c *Client) callOnce(ctx context.Context, method string, params map[string]
 			rec.done(status, data, code)
 		}
 		switch {
+		case code == RateLimitedCode && data["ok"] != true:
+			// Some methods answer a rate limit with an HTTP 200 (or
+			// another status) and this code instead of an HTTP 429: it is
+			// the same refusal, waited for and retried the same way.
+			retryAfter := parseRetryAfter(header.Get("Retry-After"))
+			maxWait := RateLimitMaxWait()
+			span.Fail(fmt.Sprintf("HTTP %d, %s, Retry-After %s", status, code, retryAfter))
+			apiErr := newAPIError(method, data)
+			apiErr.Status = status
+			if err := c.retryRateLimited(ctx, method, attempt, retryAfter, maxWait, apiErr); err != nil {
+				return nil, err
+			}
+			continue
 		case status < 200 || status > 299:
 			if code != "" {
 				span.Fail(fmt.Sprintf("HTTP %d, %s", status, code))
@@ -509,6 +524,22 @@ func (c *Client) callOnce(ctx context.Context, method string, params map[string]
 		span.End(fmt.Sprintf("HTTP %d", status))
 		return data, nil
 	}
+}
+
+// retryRateLimited is what to do with an attempt that Slack rate limited
+// and asked to retry after retryAfter: it waits, and returns nil for the
+// call to be made again, unless the wait exceeds maxWait, the attempts
+// are used up or ctx asks not to retry (WithoutRateLimitRetry). It then
+// returns the *RateLimitError to fail the call with, which wraps apiErr
+// when the rate limit came as an error code (nil for an HTTP 429).
+func (c *Client) retryRateLimited(ctx context.Context, method string, attempt int, retryAfter, maxWait time.Duration, apiErr *APIError) error {
+	if attempt >= maxRateLimitRetry || retryAfter > maxWait || RateLimitRetryDisabled(ctx) {
+		return &RateLimitError{Method: method, RetryAfter: retryAfter, MaxWait: maxWait, API: apiErr}
+	}
+	wait := trace.Begin("rate-limit wait", method)
+	err := c.sleep(ctx, retryAfter)
+	wait.EndErr(err)
+	return err
 }
 
 // auditCall is the line of the audit log of one attempt of a call; done

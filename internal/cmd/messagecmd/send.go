@@ -78,6 +78,10 @@ that looks like a flag ("-1", "--force") must come after "--":
 With --attach the command does not time out: uploads can be long (an upload
 that makes no progress still fails).
 
+--schedule and --schedule-in use chat.scheduleMessage, which Slack documents
+for app tokens (xoxb-/xoxp-) only: when Slack refuses it to a browser
+session, nothing is sent and the error says what to do instead.
+
 In safe mode (--safe-mode or %[1]s=1) nothing is posted: the
 compose editor opens with the text for a human to review and send. --attach,
 --blocks, --schedule, --schedule-in and --reply-broadcast are refused in safe
@@ -280,6 +284,9 @@ func (c *command) sendToChannel(ctx context.Context, loc cmdutil.Located, m outg
 		params := m.chatParams(loc.ChannelID)
 		params["post_at"] = m.postAt
 		resp, err := loc.Client.API(ctx, "chat.scheduleMessage", params)
+		if slackapi.IsErrorCode(err, "not_allowed_token_type") && loc.Client.Auth().IsBrowser() {
+			return sendResult{}, explainScheduleRefused(err)
+		}
 		if err != nil {
 			return sendResult{}, explainSendError(err, loc.ChannelID)
 		}
@@ -315,6 +322,17 @@ func (c *command) sendToChannel(ctx context.Context, loc cmdutil.Located, m outg
 		result.Files = uploaded
 	}
 	return result, nil
+}
+
+// explainScheduleRefused replaces Slack's refusal of chat.scheduleMessage
+// to a browser session with what can be done instead. The Slack client
+// schedules a message as a draft with a send time (drafts.create with
+// date_scheduled); that is not done here, because nobody has checked yet
+// what Slack does with such a draft written by another client.
+func explainScheduleRefused(err error) error {
+	return fmt.Errorf(`nothing was sent or scheduled: Slack refuses chat.scheduleMessage, which --schedule and --schedule-in use, to a browser session (the default credentials). `+
+		`To schedule the message, leave it as a draft with "%[1]s message draft create <target> <text>" and schedule the draft in the Slack client (the arrow next to Send), `+
+		`or schedule it with an app token that has chat:write (SLACK_TOKEN=xoxp-…): %[2]w`, appinfo.Name, err)
 }
 
 // explainSendError adds what to do about the Slack errors an agent is

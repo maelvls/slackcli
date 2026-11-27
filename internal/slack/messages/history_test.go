@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -227,5 +228,88 @@ func TestToCompactTimeAndReplyCount(t *testing.T) {
 	reply := ToCompact(Message{ChannelID: "C1", TS: "1770165200.000100", ThreadTS: "1770165109.628379"}, CompactOptions{Location: time.UTC})
 	if reply.Time != "2026-02-04T00:33:20Z" || reply.ReplyCount != 0 {
 		t.Errorf("reply = %+v", reply)
+	}
+}
+
+// HasMore says when the limit cut the history short, so that a reader of
+// "the messages since Monday" knows it did not get all of them.
+func TestFetchChannelHistoryHasMore(t *testing.T) {
+	// Newest first, as Slack answers.
+	all := []map[string]any{
+		raw("5.000000", "five"),
+		raw("4.000000", "<@U1> has joined the channel", "subtype", "channel_join"),
+		raw("3.000000", "three"),
+		raw("2.000000", "two"),
+		raw("1.000000", "<@U2> has joined the channel", "subtype", "channel_join"),
+	}
+	// paged answers like Slack: as many as asked for, and has_more.
+	paged := func(_ string, params map[string]any) (map[string]any, error) {
+		limit := params["limit"].(int)
+		start := 0
+		if latest, _ := params["latest"].(string); latest != "" {
+			for start < len(all) && CompareTS(all[start]["ts"].(string), latest) >= 0 {
+				start++
+			}
+		}
+		end := min(start+limit, len(all))
+		return map[string]any{"messages": anys(all[start:end]...), "has_more": end < len(all)}, nil
+	}
+	// fixed answers with these messages, whatever is asked, and no more.
+	fixed := func(msgs ...map[string]any) func(string, map[string]any) (map[string]any, error) {
+		return func(string, map[string]any) (map[string]any, error) {
+			return map[string]any{"messages": anys(msgs...)}, nil
+		}
+	}
+	for _, tc := range []struct {
+		name  string
+		serve func(string, map[string]any) (map[string]any, error)
+		opts  HistoryOptions
+		want  []string
+		more  bool
+	}{
+		{"cut by the limit, Slack says more", paged, HistoryOptions{Limit: 1}, []string{"5.000000"}, true},
+		{"cut by the limit, left on the page", fixed(all...), HistoryOptions{Limit: 2}, []string{"3.000000", "5.000000"}, true},
+		{"complete", paged, HistoryOptions{Limit: 10}, []string{"2.000000", "3.000000", "5.000000"}, false},
+		{"exactly the limit, nothing left", fixed(all...), HistoryOptions{Limit: 3}, []string{"2.000000", "3.000000", "5.000000"}, false},
+		// What is left on the page is a join, which would not be listed.
+		{"only system messages left", fixed(all[2:]...), HistoryOptions{Limit: 2}, []string{"2.000000", "3.000000"}, false},
+		{"system messages left, listed", fixed(all[2:]...), HistoryOptions{Limit: 2, IncludeSystem: true}, []string{"2.000000", "3.000000"}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := &recorder{serve: tc.serve}
+			h, err := FetchChannelHistory(context.Background(), rec.client(), "C12345678", tc.opts)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := tsList(h.Messages); !reflect.DeepEqual(got, tc.want) || h.HasMore != tc.more {
+				t.Errorf("messages = %v, HasMore = %v; want %v, %v", got, h.HasMore, tc.want, tc.more)
+			}
+		})
+	}
+}
+
+// Given oldest alone, Slack answers with the messages right after it, not
+// the newest ones: a latest in the future is sent too, so that a listing
+// cut by the limit is the newest messages, as with no bounds at all.
+func TestFetchChannelHistoryOldestAloneWalksBackFromNow(t *testing.T) {
+	rec := &recorder{serve: func(string, map[string]any) (map[string]any, error) {
+		return map[string]any{"messages": anys(raw("5.000000", "five"))}, nil
+	}}
+	if _, err := FetchChannelHistory(context.Background(), rec.client(), "C12345678", HistoryOptions{Oldest: "1.000000"}); err != nil {
+		t.Fatal(err)
+	}
+	now := strconv.FormatInt(time.Now().Unix(), 10)
+	p := rec.calls[0].params
+	if latest, _ := p["latest"].(string); CompareTS(latest, now) <= 0 || p["oldest"] != "1.000000" {
+		t.Errorf("params = %v, want oldest 1.000000 and a latest after now (%s)", p, now)
+	}
+
+	// Both bounds given: sent as they are.
+	rec.calls = nil
+	if _, err := FetchChannelHistory(context.Background(), rec.client(), "C12345678", HistoryOptions{Oldest: "1.000000", Latest: "9.000000"}); err != nil {
+		t.Fatal(err)
+	}
+	if p := rec.calls[0].params; p["latest"] != "9.000000" {
+		t.Errorf("params = %v, want latest 9.000000", p)
 	}
 }

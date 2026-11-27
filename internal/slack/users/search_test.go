@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/maelvls/slackcli/internal/slack/enrich"
 	"github.com/maelvls/slackcli/internal/slackapi"
 )
 
@@ -345,7 +346,7 @@ func TestSearchUsersFailures(t *testing.T) {
 			for _, m := range methods {
 				name, nth, _ := strings.Cut(m, "#")
 				if n, _ := strconv.Atoi(nth); name == method && seen[method] > n {
-					return nil, &slackapi.APIError{Method: method, Code: "ratelimited"}
+					return map[string]any{"ok": false, "error": "ratelimited"}, nil
 				}
 			}
 			return serve(method, params)
@@ -353,7 +354,7 @@ func TestSearchUsersFailures(t *testing.T) {
 		return rec
 	}
 	rec = coded("users.lookupByEmail")
-	if _, err := SearchUsers(ctx, tokenClient(rec, "xoxp-test"), "jane@example.com", 0); err == nil || !strings.Contains(err.Error(), "ratelimited") ||
+	if _, err := SearchUsers(ctx, tokenClient(rec, "xoxp-test"), "jane@example.com", 0); !enrich.IsRateLimit(err) || !slackapi.IsErrorCode(err, "ratelimited") ||
 		!reflect.DeepEqual(rec.methods(), slices.Repeat([]string{"users.lookupByEmail"}, emailLookupAttempts)) {
 		t.Errorf("ratelimited email lookup: error = %v, calls = %v", err, rec.methods())
 	}

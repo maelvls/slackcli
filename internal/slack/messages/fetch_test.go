@@ -670,6 +670,8 @@ func TestFetchMessageErrors(t *testing.T) {
 		"rate limit": func(method string) (map[string]any, error) {
 			return nil, &slackapi.RateLimitError{Method: method, RetryAfter: time.Minute}
 		},
+		// The rate limit some methods answer in the body of an HTTP 200.
+		"ratelimited code": func(string) (map[string]any, error) { return apiError("ratelimited"), nil },
 	}
 	for name, fail := range fatal {
 		for _, hint := range []string{"", tsOf(1)} {
@@ -821,13 +823,29 @@ func TestFetchFailsWhenFileLookupHitsExpiredCredentials(t *testing.T) {
 // files.info is an enrichment: being rate limited must not lose the
 // messages, and must not be hammered further.
 func TestFetchKeepsMessagesWhenFileLookupIsRateLimited(t *testing.T) {
+	for name, limit := range rateLimits {
+		t.Run(name, func(t *testing.T) { testFetchKeepsMessagesWhenFileLookupIsRateLimited(t, limit) })
+	}
+}
+
+// rateLimits are the two ways Slack rate limits a call: an HTTP 429 (which
+// the client gives as a *slackapi.RateLimitError) and the "ratelimited"
+// code in the body of an HTTP 200. A command must take both the same way.
+var rateLimits = map[string]func(method string) (map[string]any, error){
+	"HTTP 429": func(method string) (map[string]any, error) {
+		return nil, &slackapi.RateLimitError{Method: method, RetryAfter: time.Minute}
+	},
+	"ratelimited code": func(string) (map[string]any, error) { return apiError("ratelimited"), nil },
+}
+
+func testFetchKeepsMessagesWhenFileLookupIsRateLimited(t *testing.T, limit func(string) (map[string]any, error)) {
 	var files []map[string]any
 	for i := range 20 {
 		files = append(files, map[string]any{"id": fmt.Sprintf("F%d", i), "name": "kept"})
 	}
 	rec := &recorder{serve: func(method string, _ map[string]any) (map[string]any, error) {
 		if method == "files.info" {
-			return nil, &slackapi.RateLimitError{Method: method, RetryAfter: time.Minute}
+			return limit(method)
 		}
 		return map[string]any{"messages": anys(raw(tsOf(5), "hi", "files", anys(files...)))}, nil
 	}}

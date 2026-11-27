@@ -669,47 +669,53 @@ func TestListDegradesWhenRateLimited(t *testing.T) {
 		items = append(items, saved(fmt.Sprintf("C%d", i), "1.1", "in_progress", 100))
 	}
 	for _, limited := range []string{"conversations.history", "conversations.replies", "conversations.info"} {
-		t.Run(limited, func(t *testing.T) {
-			var mu sync.Mutex
-			calls := map[string]int{}
-			client := slackapi.NewFake(func(_ context.Context, method string, params map[string]any) (map[string]any, error) {
-				mu.Lock()
-				calls[method]++
-				mu.Unlock()
-				switch {
-				case method == "saved.list":
-					return savedList([4]float64{30, 0, 0, 30}, items...), nil
-				case method == limited:
-					return nil, &slackapi.RateLimitError{Method: method, RetryAfter: time.Minute}
-				case method == "conversations.info":
-					return map[string]any{"channel": map[string]any{"name": "name-" + params["channel"].(string)}}, nil
-				case method == "conversations.history" && limited == "conversations.replies":
-					return map[string]any{"messages": []any{}}, nil // not a top-level message
+		// An HTTP 429, or the "ratelimited" code in the body of an HTTP
+		// 200: the same rate limit.
+		for _, coded := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s, ratelimited code: %v", limited, coded), func(t *testing.T) {
+				var mu sync.Mutex
+				calls := map[string]int{}
+				client := slackapi.NewFake(func(_ context.Context, method string, params map[string]any) (map[string]any, error) {
+					mu.Lock()
+					calls[method]++
+					mu.Unlock()
+					switch {
+					case method == "saved.list":
+						return savedList([4]float64{30, 0, 0, 30}, items...), nil
+					case method == limited && coded:
+						return apiError("ratelimited"), nil
+					case method == limited:
+						return nil, &slackapi.RateLimitError{Method: method, RetryAfter: time.Minute}
+					case method == "conversations.info":
+						return map[string]any{"channel": map[string]any{"name": "name-" + params["channel"].(string)}}, nil
+					case method == "conversations.history" && limited == "conversations.replies":
+						return map[string]any{"messages": []any{}}, nil // not a top-level message
+					}
+					return map[string]any{"messages": []any{map[string]any{"ts": "1.1", "text": "hello"}}}, nil
+				})
+				res, err := List(context.Background(), client, ListOptions{Limit: 30})
+				if err != nil {
+					t.Fatalf("err = %v, want the items without what was rate limited", err)
 				}
-				return map[string]any{"messages": []any{map[string]any{"ts": "1.1", "text": "hello"}}}, nil
-			})
-			res, err := List(context.Background(), client, ListOptions{Limit: 30})
-			if err != nil {
-				t.Fatalf("err = %v, want the items without what was rate limited", err)
-			}
-			if len(res.Items) != 30 || res.Counts == nil || res.Counts.Total != 30 {
-				t.Fatalf("result = %+v", res)
-			}
-			if n := calls[limited]; n > hydrateConcurrency {
-				t.Errorf("%d %s calls after being rate limited, want at most %d", n, limited, hydrateConcurrency)
-			}
-			if len(res.Warnings) != 1 || !strings.Contains(res.Warnings[0], "30 of 30") || !strings.Contains(res.Warnings[0], "rate limited") {
-				t.Errorf("warnings = %q", res.Warnings)
-			}
-			for _, it := range res.Items {
-				if limited == "conversations.info" {
-					if it.ChannelName != "" || it.MessageError != "" || it.Message == nil {
+				if len(res.Items) != 30 || res.Counts == nil || res.Counts.Total != 30 {
+					t.Fatalf("result = %+v", res)
+				}
+				if n := calls[limited]; n > hydrateConcurrency {
+					t.Errorf("%d %s calls after being rate limited, want at most %d", n, limited, hydrateConcurrency)
+				}
+				if len(res.Warnings) != 1 || !strings.Contains(res.Warnings[0], "30 of 30") || !strings.Contains(res.Warnings[0], "rate limited") {
+					t.Errorf("warnings = %q", res.Warnings)
+				}
+				for _, it := range res.Items {
+					if limited == "conversations.info" {
+						if it.ChannelName != "" || it.MessageError != "" || it.Message == nil {
+							t.Fatalf("item = %+v", it)
+						}
+					} else if it.MessageError != "ratelimited" || it.Message != nil || it.ChannelName != "name-"+it.ChannelID {
 						t.Fatalf("item = %+v", it)
 					}
-				} else if it.MessageError != "ratelimited" || it.Message != nil || it.ChannelName != "name-"+it.ChannelID {
-					t.Fatalf("item = %+v", it)
 				}
-			}
-		})
+			})
+		}
 	}
 }

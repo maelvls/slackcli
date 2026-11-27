@@ -32,7 +32,7 @@ import (
 // RateLimitedCode is what per-item error fields (`messages_error`,
 // `message_error`) hold for a lookup skipped because of a rate limit. It
 // is the error code Slack itself uses.
-const RateLimitedCode = "ratelimited"
+const RateLimitedCode = slackapi.RateLimitedCode
 
 // MustAbort reports whether err, returned by an optional lookup, must fail
 // the whole command: the command was cancelled, or the credentials are no
@@ -57,10 +57,14 @@ func MustAbortRequired(ctx context.Context, err error) bool {
 	return MustAbort(ctx, err) || IsRateLimit(err)
 }
 
-// IsRateLimit reports whether err is Slack refusing a call for now.
+// IsRateLimit reports whether err is Slack refusing a call for now: an
+// HTTP 429, or the "ratelimited" error code that some methods answer in
+// the body of an HTTP 200. The client returns both as a
+// *slackapi.RateLimitError; the code is also recognised on its own, for an
+// *slackapi.APIError that did not come from the client.
 func IsRateLimit(err error) bool {
 	var rl *slackapi.RateLimitError
-	return errors.As(err, &rl)
+	return errors.As(err, &rl) || slackapi.IsErrorCode(err, RateLimitedCode)
 }
 
 // Gate stops one kind of optional lookup for the rest of an invocation
@@ -118,6 +122,10 @@ func Cause(err error) string {
 	var rl *slackapi.RateLimitError
 	if errors.As(err, &rl) {
 		return rl.Summary()
+	}
+	var api *slackapi.APIError
+	if errors.As(err, &api) && api.Code == RateLimitedCode {
+		return fmt.Sprintf("Slack API call %s was rate limited", api.Method)
 	}
 	if err == nil {
 		return ""

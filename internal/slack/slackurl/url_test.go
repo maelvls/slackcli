@@ -183,23 +183,10 @@ func TestURLWithoutCidIsTheSameMessage(t *testing.T) {
 	}
 }
 
-func TestIsTSAndIsSlackURL(t *testing.T) {
+func TestIsTS(t *testing.T) {
 	for s, want := range map[string]bool{"1770165109.628379": true, "1770165109": false, "1770165109.62": false, "abc.def": false} {
 		if IsTS(s) != want {
 			t.Errorf("IsTS(%q) = %v", s, !want)
-		}
-	}
-	for s, want := range map[string]bool{
-		"https://acme.slack.com/archives/C1": true, "https://acme.slack.com": true,
-		"https://acme.slack-gov.com": true,
-		// As slackapi.IsWorkspaceHost: the apex domain and a trailing
-		// dot are Slack too, file hosts and look-alikes are not.
-		"https://slack.com": true, "https://acme.slack.com./archives/C1": true,
-		"https://files.slack-edge.com": false, "https://evilslack.com": false, "https://slack.com.evil.example": false,
-		"http://acme.slack.com": false, "https://example.com": false, "general": false,
-	} {
-		if IsSlackURL(s) != want {
-			t.Errorf("IsSlackURL(%q) = %v", s, !want)
 		}
 	}
 }

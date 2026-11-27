@@ -22,7 +22,7 @@ func TestEditPlainText(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			h := newHarness(t)
 			got := h.mustRun(append([]string{"edit"}, tt.args...)...)
-			wantJSON(t, got, `{"ok": true}`)
+			wantJSON(t, got, `{"ok": true, "channel_id": "`+testChannel+`", "ts": "`+testTS+`"}`)
 			calls := h.callsTo("chat.update")
 			// Without blocks of its own, the edit sends an empty, non-nil
 			// array (DeepEqual tells it from a nil one, which would not be
@@ -177,10 +177,11 @@ func TestEditAndDeleteExplainRefusals(t *testing.T) {
 
 func TestDelete(t *testing.T) {
 	h := newHarness(t)
-	wantJSON(t, h.mustRun("delete", testURL), `{"ok": true}`)
+	wantJSON(t, h.mustRun("delete", testURL), `{"ok": true, "channel_id": "`+testChannel+`", "ts": "`+testTS+`"}`)
 	h.wantCalls(call{"chat.delete", map[string]any{"channel": testChannel, "ts": testTS}})
 
-	wantJSON(t, h.mustRun("delete", "#general", "--ts", testTS), `{"ok": true}`)
+	// A channel name is reported by its ID.
+	wantJSON(t, h.mustRun("delete", "#general", "--ts", testTS), `{"ok": true, "channel_id": "`+testChannel+`", "ts": "`+testTS+`"}`)
 	if got := h.callsTo("chat.delete"); len(got) != 1 || !reflect.DeepEqual(got[0].params, map[string]any{"channel": testChannel, "ts": testTS}) {
 		t.Errorf("chat.delete calls = %v", got)
 	}
@@ -204,7 +205,7 @@ func TestReact(t *testing.T) {
 		{[]string{"react", "remove", "#general", ":eyes:", "--ts", testTS}, "reactions.remove", map[string]any{"channel": testChannel, "timestamp": testTS, "name": "eyes"}},
 	} {
 		h := newHarness(t)
-		wantJSON(t, h.mustRun(tt.args...), `{"ok": true}`)
+		wantJSON(t, h.mustRun(tt.args...), `{"ok": true, "channel_id": "`+testChannel+`", "ts": "`+testTS+`", "name": "`+tt.wantParams["name"].(string)+`"}`)
 		calls := h.callsTo(tt.method)
 		if len(calls) != 1 || !reflect.DeepEqual(calls[0].params, tt.wantParams) {
 			t.Errorf("%v: %s calls = %v", tt.args, tt.method, calls)
@@ -230,12 +231,31 @@ func TestReactValidation(t *testing.T) {
 	}
 }
 
+// TestReactIsIdempotent: a retry after a timeout may find the first attempt
+// went through; the message is as asked, so that is success.
+func TestReactIsIdempotent(t *testing.T) {
+	h := newHarness(t)
+	reacted := map[string]bool{}
+	h.fixtures["reactions.add"] = func(p map[string]any) (map[string]any, error) {
+		if reacted[p["name"].(string)] {
+			return nil, apiError("reactions.add", "already_reacted")
+		}
+		reacted[p["name"].(string)] = true
+		return map[string]any{"ok": true}, nil
+	}
+	h.fixtures["reactions.remove"] = func(map[string]any) (map[string]any, error) { return nil, apiError("reactions.remove", "no_reaction") }
+
+	wantJSON(t, h.mustRun("react", "add", testURL, "eyes"), `{"ok": true, "channel_id": "`+testChannel+`", "ts": "`+testTS+`", "name": "eyes"}`)
+	wantJSON(t, h.mustRun("react", "add", testURL, "eyes"), `{"ok": true, "channel_id": "`+testChannel+`", "ts": "`+testTS+`", "name": "eyes", "already": true,
+		"hints": ["you had already reacted with :eyes: to this message: nothing changed"]}`)
+	wantJSON(t, h.mustRun("react", "remove", testURL, "rocket"), `{"ok": true, "channel_id": "`+testChannel+`", "ts": "`+testTS+`", "name": "rocket", "already": true,
+		"hints": ["you had no :rocket: reaction on this message: nothing changed"]}`)
+}
+
 func TestReactExplainsSlackErrors(t *testing.T) {
 	h := newHarness(t)
-	h.fixtures["reactions.add"] = func(map[string]any) (map[string]any, error) { return nil, apiError("reactions.add", "already_reacted") }
-	h.fixtures["reactions.remove"] = func(map[string]any) (map[string]any, error) { return nil, apiError("reactions.remove", "no_reaction") }
-	h.mustFail("you already reacted with :eyes:", "react", "add", testURL, "eyes")
-	h.mustFail("you have no :eyes: reaction", "react", "remove", testURL, "eyes")
+	h.fixtures["reactions.add"] = func(map[string]any) (map[string]any, error) { return nil, apiError("reactions.add", "invalid_name") }
+	h.mustFail("Slack does not know the emoji :nope:", "react", "add", testURL, "nope")
 }
 
 // Message text starting with a dash is how lists are written; the flag

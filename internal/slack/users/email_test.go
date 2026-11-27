@@ -29,7 +29,7 @@ func flakyLookup(failures int, fail func() error) (*recorder, *slackapi.Client, 
 		return serve(method, params)
 	}
 	var slept []time.Duration
-	client := slackapi.NewFake(func(ctx context.Context, method string, params map[string]any) (map[string]any, error) {
+	client := slackapi.New(slackapi.Auth{Type: slackapi.AuthStandard, Token: "xoxp-test"}, "https://test.slack.com", slackapi.WithHandler(func(ctx context.Context, method string, params map[string]any) (map[string]any, error) {
 		rec.mu.Lock()
 		rec.calls = append(rec.calls, call{method, params})
 		rec.mu.Unlock()
@@ -42,7 +42,7 @@ func flakyLookup(failures int, fail func() error) (*recorder, *slackapi.Client, 
 			return nil, errors.New(method + " was called with the client's rate-limit retries off")
 		}
 		return rec.serve(method, params)
-	}, slackapi.WithSleep(func(_ context.Context, d time.Duration) error {
+	}), slackapi.WithSleep(func(_ context.Context, d time.Duration) error {
 		slept = append(slept, d)
 		return nil
 	}))
@@ -209,7 +209,7 @@ func TestLookupByEmailRetriesTransientFailures(t *testing.T) {
 func TestRefusedEmailLookupInAHugeWorkspace(t *testing.T) {
 	ctx := context.Background()
 	rec := hugeWorkspace(directory{lookupErr: "missing_scope"})
-	_, err := ResolveUserID(ctx, rec.client(), "alice@example.com")
+	_, err := ResolveUserID(ctx, rec.userTokenClient(), "alice@example.com")
 	var rl *slackapi.RateLimitError
 	if !errors.As(err, &rl) {
 		t.Fatalf("err = %v, want it to wrap the rate limit of users.list", err)
@@ -229,7 +229,7 @@ func TestRefusedEmailLookupInAHugeWorkspace(t *testing.T) {
 	// that is what gets not_allowed_token_type, and is told so.
 	for code, browser := range map[string]bool{"missing_scope": false, "not_allowed_token_type": true} {
 		rec := hugeWorkspace(directory{lookupErr: code})
-		_, err := ResolveUserID(ctx, rec.client(), "alice@example.com")
+		_, err := ResolveUserID(ctx, rec.userTokenClient(), "alice@example.com")
 		if err == nil {
 			t.Fatalf("%s: no error", code)
 		}
@@ -250,14 +250,14 @@ func TestRefusedEmailLookupInAHugeWorkspace(t *testing.T) {
 	// With a handle next to it, the advice about emails is corrected
 	// rather than repeated.
 	rec = hugeWorkspace(directory{lookupErr: "missing_scope"})
-	_, err = ResolveUserIDs(ctx, rec.client(), []string{"alice@example.com", "Bob Builder"})
+	_, err = ResolveUserIDs(ctx, rec.userTokenClient(), []string{"alice@example.com", "Bob Builder"})
 	if err == nil || strings.Contains(err.Error(), "or the email address instead") || !strings.Contains(err.Error(), "an email address is no help here") {
 		t.Errorf("err = %v", err)
 	}
 
 	// A handle alone keeps the advice: an email would work for it.
 	rec = hugeWorkspace(directory{})
-	_, err = ResolveUserID(ctx, rec.client(), "Bob Builder")
+	_, err = ResolveUserID(ctx, rec.userTokenClient(), "Bob Builder")
 	if err == nil || !strings.Contains(err.Error(), "or the email address instead") {
 		t.Errorf("err = %v", err)
 	}
@@ -274,7 +274,7 @@ func TestOnlyARefusalOfTheEmailLookupFallsBackOnTheDirectory(t *testing.T) {
 	for _, code := range []string{"missing_scope", "not_allowed_token_type", "no_permission", "access_denied"} {
 		alice := member("U00000001A", "alice", "profile", profile("email", "alice@example.com"))
 		rec := directory{lookupErr: code, pages: [][]map[string]any{{alice}}}.recorder()
-		got, err := ResolveUserID(ctx, rec.client(), "alice@example.com")
+		got, err := ResolveUserID(ctx, rec.userTokenClient(), "alice@example.com")
 		if err != nil || got != "U00000001A" {
 			t.Errorf("%s: got %q, %v", code, got, err)
 		}
