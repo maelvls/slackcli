@@ -145,7 +145,7 @@ type Stats struct {
 	Total     int `json:"total"`
 	Processes int `json:"processes"`
 	// Errors counts the requests that failed, RateLimited those Slack
-	// answered with HTTP 429.
+	// rate limited (HTTP 429, or the "ratelimited" error code).
 	Errors      int `json:"errors"`
 	RateLimited int `json:"rate_limited"`
 	// PeakMinute is the most requests made in any 60 seconds, and when

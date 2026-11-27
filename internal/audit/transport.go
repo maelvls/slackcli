@@ -51,10 +51,12 @@ func (t *transport) RoundTrip(req *http.Request) (*http.Response, error) {
 // "cancelled", "timeout" or "network". A request whose context was
 // cancelled because of a timeout, given as the cause of the cancellation
 // (context.WithCancelCause, as a stall watchdog does), is a "timeout": the
-// cause is one when it is or wraps context.DeadlineExceeded, or has a
-// Timeout method that returns true.
+// cause is one when it is context.DeadlineExceeded itself or has a Timeout
+// method that returns true. The cause itself, not what it wraps: a request
+// cancelled because another one failed with a timeout (a fan-out cancels
+// the others with the first error) was cancelled, not timed out.
 func ErrorClass(ctx context.Context, err error) string {
-	if ctx.Err() != nil && isTimeout(context.Cause(ctx)) {
+	if ctx.Err() != nil && isTimeoutCause(context.Cause(ctx)) {
 		return "timeout"
 	}
 	var ne interface{ Timeout() bool }
@@ -67,8 +69,12 @@ func ErrorClass(ctx context.Context, err error) string {
 	return "network"
 }
 
-// isTimeout tells whether err (the cause of a cancellation) is a timeout.
-func isTimeout(err error) bool {
-	var ne interface{ Timeout() bool }
-	return errors.Is(err, context.DeadlineExceeded) || (errors.As(err, &ne) && ne.Timeout())
+// isTimeoutCause tells whether cause, that of a cancellation, is itself a
+// timeout (see ErrorClass).
+func isTimeoutCause(cause error) bool {
+	if cause == context.DeadlineExceeded {
+		return true
+	}
+	t, ok := cause.(interface{ Timeout() bool })
+	return ok && t.Timeout()
 }

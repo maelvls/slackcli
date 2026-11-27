@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"testing"
+	"time"
 )
 
 type timeoutCause struct{}
@@ -27,7 +28,11 @@ func TestErrorClassLooksAtTheCause(t *testing.T) {
 		want string
 	}{
 		{"cause with Timeout", cancelledWith(timeoutCause{}), "timeout"},
-		{"cause wrapping DeadlineExceeded", cancelledWith(fmt.Errorf("idle: %w", context.DeadlineExceeded)), "timeout"},
+		{"cause DeadlineExceeded", cancelledWith(context.DeadlineExceeded), "timeout"},
+		{"deadline", expired(t), "timeout"},
+		// A fan-out cancels the other requests with the error of the
+		// first one: they were cancelled, not timed out.
+		{"cause wrapping a timeout", cancelledWith(fmt.Errorf("calling Slack: %w", timeoutCause{})), "cancelled"},
 		{"no cause (interrupt)", cancelledWith(nil), "cancelled"},
 		{"other cause", cancelledWith(errors.New("interrupt signal received")), "cancelled"},
 		{"live context", context.Background(), "cancelled"},
@@ -36,8 +41,15 @@ func TestErrorClassLooksAtTheCause(t *testing.T) {
 			t.Errorf("%s: ErrorClass = %q, want %q", tc.name, got, tc.want)
 		}
 	}
-	// A cause on a context that is still live is not looked at.
+	// An error on a live context, with no timeout in it, is a network one.
 	if got := ErrorClass(context.Background(), errors.New("connection reset")); got != "network" {
 		t.Errorf("network error: %q", got)
 	}
+}
+
+// expired is a context whose deadline has passed.
+func expired(t *testing.T) context.Context {
+	ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	t.Cleanup(cancel)
+	return ctx
 }

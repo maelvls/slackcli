@@ -90,8 +90,9 @@ type Entry struct {
 	DurationMS int64 `json:"duration_ms"`
 	// Attempt counts the tries of one Web API call, from 1.
 	Attempt int `json:"attempt,omitempty"`
-	// RateLimited is true for an HTTP 429, and RetryAfterS is the wait
-	// Slack asked for, in seconds.
+	// RateLimited is true for a request Slack rate limited (an HTTP 429,
+	// or the "ratelimited" error code in the body of another answer), and
+	// RetryAfterS is the wait Slack asked for, in seconds.
 	RateLimited bool    `json:"rate_limited,omitempty"`
 	RetryAfterS float64 `json:"retry_after_s,omitempty"`
 }

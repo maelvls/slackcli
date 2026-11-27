@@ -373,12 +373,12 @@ func postBytes(ctx context.Context, client *slackapi.Client, uploadURL string, b
 // errStalled is the cause of the cancellation of an upload whose
 // connection made no progress for the stall timeout. It is a timeout
 // (audit.ErrorClass logs the request as one, not as cancelled).
-var errStalled error = stalledError{}
+var errStalled error = stallCause{}
 
-type stalledError struct{}
+type stallCause struct{}
 
-func (stalledError) Error() string { return "upload stalled" }
-func (stalledError) Timeout() bool { return true }
+func (stallCause) Error() string { return "upload stalled" }
+func (stallCause) Timeout() bool { return true }
 
 // stallTimeout is how long an upload may go without progress: the time
 // limit of one Slack request (slackapi.APITimeout). A variable for tests.
