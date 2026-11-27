@@ -117,6 +117,8 @@ func explain(code string) string {
 		return fmt.Sprintf("this workspace belongs to an Enterprise Grid organisation, and Slack refuses this method to the session of a workspace. The session of the organisation usually works: run the command again with --workspace <org>.enterprise.slack.com (`%[1]s auth whoami` lists the configured workspaces; `%[1]s auth import-desktop` imports the organisation along with its workspaces)", appinfo.Name)
 	case "ratelimited":
 		return fmt.Sprintf("Slack is rate limiting this method: run the command again in a minute, or set %s to wait and retry automatically", appinfo.EnvName("RATE_LIMIT_MAX_WAIT_MS"))
+	case "rate_limited":
+		return fmt.Sprintf("too many messages were sent (Slack allows about one per second to a channel), and this one was not posted or scheduled: send it again in a few seconds, or set %s to wait and retry automatically", appinfo.EnvName("RATE_LIMIT_MAX_WAIT_MS"))
 	}
 	return ""
 }
@@ -196,13 +198,14 @@ func (e *HTTPStatusError) Error() string {
 
 // transientCodes are the error codes Slack answers when the failure is its
 // own and momentary.
-var transientCodes = []string{RateLimitedCode, "internal_error", "fatal_error", "service_unavailable", "request_timeout"}
+var transientCodes = []string{RateLimitedCode, PostingRateLimitedCode, "internal_error", "fatal_error", "service_unavailable", "request_timeout"}
 
 // IsTransient reports whether err says nothing about what was asked: Slack
 // did not answer (TimeoutError, NetworkError), is rate limiting the call
-// (RateLimitError, "ratelimited"), or failed on its side (HTTP 5xx,
-// internal_error …). The same call may well succeed a moment later, so
-// such an error must not be taken for "not found" or "not allowed".
+// (RateLimitError, "ratelimited", "rate_limited"), or failed on its side
+// (HTTP 5xx, internal_error …). The same call may well succeed a moment
+// later, so such an error must not be taken for "not found" or "not
+// allowed".
 func IsTransient(err error) bool {
 	var (
 		timeout *TimeoutError
@@ -236,20 +239,35 @@ func IsAuthError(err error) bool {
 // with, in the body of an HTTP 429 or, for some methods, of an HTTP 200.
 const RateLimitedCode = "ratelimited"
 
+// PostingRateLimitedCode is the error code chat.postMessage and
+// chat.scheduleMessage answer, besides RateLimitedCode, when the app "has
+// posted too many messages": Slack allows about one message per second to
+// a channel, with short bursts. Like any ok=false answer, it means the
+// message was not posted, so it is a rate limit like the other one: the
+// client returns it as a *RateLimitError, and retries it only when
+// SLACKCLI_RATE_LIMIT_MAX_WAIT_MS allows.
+const PostingRateLimitedCode = "rate_limited"
+
+// IsRateLimitCode reports whether code is one of the error codes of a
+// rate limit (RateLimitedCode, PostingRateLimitedCode).
+func IsRateLimitCode(code string) bool {
+	return code == RateLimitedCode || code == PostingRateLimitedCode
+}
+
 // RateLimitError is returned when Slack rate limits a call, by an HTTP 429
-// or by the "ratelimited" error code, and the wait Slack asks for exceeds
-// what the caller allows.
+// or by the "ratelimited" or "rate_limited" error code, and the wait Slack
+// asks for exceeds what the caller allows.
 type RateLimitError struct {
 	Method     string
 	RetryAfter time.Duration
 	MaxWait    time.Duration
-	// API is the answer when it came with the "ratelimited" error code
+	// API is the answer when it came with one of these error codes
 	// (nil for an HTTP 429 without one). Unwrap returns it, so that
 	// ErrorCode and IsErrorCode see the code.
 	API *APIError
 }
 
-// Unwrap returns the *APIError of the "ratelimited" code, if any.
+// Unwrap returns the *APIError of the rate-limit code, if any.
 func (e *RateLimitError) Unwrap() error {
 	if e.API == nil {
 		return nil
@@ -268,5 +286,13 @@ func (e *RateLimitError) Error() string {
 // (a warning about a partial result, a longer explanation): the advice
 // must not be given twice.
 func (e *RateLimitError) Summary() string {
+	if e.API != nil && e.API.Code == PostingRateLimitedCode {
+		done := "posted"
+		if e.Method == "chat.scheduleMessage" {
+			done = "scheduled"
+		}
+		return fmt.Sprintf("Slack API call %s was refused with %s: too many messages were sent (Slack allows about one per second to a channel), and this one was not %s; send it again after %s",
+			e.Method, PostingRateLimitedCode, done, e.RetryAfter)
+	}
 	return fmt.Sprintf("Slack API call %s was rate limited; retry after %s", e.Method, e.RetryAfter)
 }

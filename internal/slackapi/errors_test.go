@@ -23,6 +23,7 @@ func TestAPIErrorExplainsWellKnownCodes(t *testing.T) {
 		"not_in_channel":    {"not a member", "join"},
 		"channel_not_found": {"private", "`" + appinfo.Name + " channel list`", "--workspace"},
 		"ratelimited":       {"again in a minute", appinfo.EnvName("RATE_LIMIT_MAX_WAIT_MS")},
+		"rate_limited":      {"too many messages", "was not posted", "send it again", appinfo.EnvName("RATE_LIMIT_MAX_WAIT_MS")},
 		// The workaround an agent does not find on its own.
 		"team_is_restricted": {"Enterprise Grid", "--workspace <org>.enterprise.slack.com", "`" + appinfo.Name + " auth whoami`", importCmd},
 	} {

@@ -177,6 +177,54 @@ func TestRateLimitedCodeIsARateLimit(t *testing.T) {
 	}
 }
 
+// chat.postMessage and chat.scheduleMessage answer "rate_limited" when the
+// app posted too many messages (about one per second to a channel): the
+// message was not posted. It is a rate limit like "ratelimited": a
+// *RateLimitError that fails fast by default and says the message was not
+// posted, and is retried only when the caller allows the wait.
+func TestPostingRateLimitedCodeIsARateLimit(t *testing.T) {
+	t.Setenv("SLACKCLI_RATE_LIMIT_MAX_WAIT_MS", "")
+	t.Setenv("AGENT_SLACK_RATE_LIMIT_MAX_WAIT_MS", "")
+	calls := 0
+	var delays []time.Duration
+	c := browserClient(t, func(w http.ResponseWriter, _ *http.Request) {
+		calls++
+		if calls <= 2 {
+			w.Header().Set("Retry-After", "2")
+			_, _ = io.WriteString(w, `{"ok":false,"error":"rate_limited"}`)
+			return
+		}
+		_, _ = io.WriteString(w, `{"ok":true,"ts":"1700000000.000100"}`)
+	}, WithSleep(func(_ context.Context, d time.Duration) error { delays = append(delays, d); return nil }))
+
+	_, err := c.API(context.Background(), "chat.postMessage", nil)
+	var rl *RateLimitError
+	if !errors.As(err, &rl) || rl.RetryAfter != 2*time.Second || !IsErrorCode(err, PostingRateLimitedCode) || !IsTransient(err) {
+		t.Fatalf("err = %v", err)
+	}
+	for _, want := range []string{"chat.postMessage", "rate_limited", "too many messages", "was not posted", "send it again after 2s", "SLACKCLI_RATE_LIMIT_MAX_WAIT_MS"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error does not say %q: %v", want, err)
+		}
+	}
+	if calls != 1 || len(delays) != 0 {
+		t.Errorf("%d calls, waited %v", calls, delays)
+	}
+
+	t.Setenv("SLACKCLI_RATE_LIMIT_MAX_WAIT_MS", "30000")
+	resp, err := c.API(context.Background(), "chat.postMessage", nil)
+	if err != nil || resp["ts"] != "1700000000.000100" || calls != 3 || len(delays) != 1 || delays[0] != 2*time.Second {
+		t.Fatalf("resp=%v err=%v calls=%d delays=%v", resp, err, calls, delays)
+	}
+
+	fake := NewFake(func(context.Context, string, map[string]any) (map[string]any, error) {
+		return map[string]any{"ok": false, "error": "rate_limited"}, nil
+	})
+	if _, err := fake.API(context.Background(), "chat.scheduleMessage", nil); !errors.As(err, &rl) || !IsErrorCode(err, PostingRateLimitedCode) || !strings.Contains(err.Error(), "was not scheduled") {
+		t.Errorf("fake: err = %v", err)
+	}
+}
+
 func TestTimeout(t *testing.T) {
 	t.Setenv("SLACKCLI_API_TIMEOUT_MS", "30")
 	// The handler hangs until the test is over. The request's context is
