@@ -353,10 +353,77 @@ func TestStreamFailsAtOnceWhenTheFirstConnectionIsRefused(t *testing.T) {
 		client := connectThen(t, &calls, &slackapi.APIError{Method: "rtm.connect", Code: code})
 		opts := fast
 		opts.OnRetry = func(err error, _ time.Duration) { t.Errorf("%s: OnRetry(%v)", code, err) }
-		err := Stream(context.Background(), client, opts, func(map[string]any) error { return nil })
+		// A deadline, so that a code tried again by mistake fails the
+		// test instead of hanging it.
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		err := Stream(ctx, client, opts, func(map[string]any) error { return nil })
+		cancel()
 		if !slackapi.IsErrorCode(err, code) || calls.Load() != 1 {
 			t.Errorf("%s: Stream = %v after %d calls", code, err, calls.Load())
 		}
+	}
+}
+
+// A handshake that Slack answers with an HTTP error (a 503 during an
+// incident) is tried again too.
+func TestStreamRetriesAFirstHandshakeThatFails(t *testing.T) {
+	var conns atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if conns.Add(1) == 1 {
+			http.Error(w, "unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		websocket.Handler(func(ws *websocket.Conn) {
+			send(ws, `{"type":"hello"}`, `{"type":"message"}`)
+			hold(ws)
+		}).ServeHTTP(w, r)
+	}))
+	t.Cleanup(server.Close)
+	client := slackapi.NewFake(func(context.Context, string, map[string]any) (map[string]any, error) {
+		return map[string]any{"ok": true, "url": "ws" + strings.TrimPrefix(server.URL, "http")}, nil
+	}, slackapi.WithLoopbackWorkspaceForTesting())
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	retries := 0
+	opts := fast
+	opts.OnRetry = func(error, time.Duration) { retries++ }
+	if err := Stream(ctx, client, opts, func(map[string]any) error { cancel(); return nil }); err != nil {
+		t.Fatalf("Stream = %v", err)
+	}
+	if retries != 1 || conns.Load() != 2 {
+		t.Errorf("retries = %d, connections = %d", retries, conns.Load())
+	}
+}
+
+// A first WebSocket that stays silent until the read times out, before
+// Slack said hello, is the network: it is tried again.
+func TestStreamRetriesAFirstConnectionSilentBeforeHello(t *testing.T) {
+	_, client := newFakeSlack(t,
+		func(ws *websocket.Conn) { hold(ws) },
+		func(ws *websocket.Conn) {
+			send(ws, `{"type":"hello"}`, `{"type":"message"}`)
+			hold(ws)
+		})
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	retries := 0
+	opts := fast
+	opts.PingInterval = time.Hour // pongs would keep the silent one alive
+	opts.OnRetry = func(error, time.Duration) { retries++ }
+	if err := Stream(ctx, client, opts, func(map[string]any) error { cancel(); return nil }); err != nil {
+		t.Fatalf("Stream = %v", err)
+	}
+	if retries != 1 {
+		t.Errorf("retries = %d, want 1", retries)
+	}
+}
+
+// The hint of a timed out rtm.connect does not carry the advice of the
+// error, which says to check before retrying.
+func TestRetryHintOfATimeout(t *testing.T) {
+	hint := RetryHint(&slackapi.TimeoutError{Method: "rtm.connect", Timeout: 30 * time.Second}, 2*time.Second)
+	if want := "Cannot connect to Slack yet (Slack did not answer rtm.connect within 30s): trying again in 2s."; hint != want {
+		t.Errorf("RetryHint = %q, want %q", hint, want)
 	}
 }
 

@@ -398,8 +398,24 @@ func TestWaitFailsAtOnceWhenTheFirstConnectionIsRefused(t *testing.T) {
 		return nil
 	})
 	streamOptions.Backoff = func(int) time.Duration { return time.Millisecond }
-	err := h.run("wait")
+	err := h.run("wait", "--timeout", "5s") // not hanging if tried again
 	if !slackapi.IsErrorCode(err, "not_allowed_token_type") || h.count("rtm.connect") != 1 {
 		t.Errorf("inbox wait = %v after %d connections", err, h.count("rtm.connect"))
+	}
+}
+
+// A --timeout that runs out before any connection was ready is an error,
+// not timed_out: nothing was listened to.
+func TestWaitTimeoutThatNeverConnectedFails(t *testing.T) {
+	h := waitHarness(t, nil, func(method string, _ map[string]any) map[string]any {
+		if method == "rtm.connect" {
+			return map[string]any{"ok": false, "error": "internal_error"}
+		}
+		return nil
+	})
+	streamOptions.Backoff = func(int) time.Duration { return 5 * time.Millisecond }
+	err := h.run("wait", "--timeout", "100ms")
+	if err == nil || !strings.Contains(err.Error(), "could not connect to Slack within 100ms") || h.stdout.Len() != 0 {
+		t.Errorf("inbox wait = %v, stdout %q", err, h.stdout.String())
 	}
 }

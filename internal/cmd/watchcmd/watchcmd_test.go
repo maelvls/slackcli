@@ -492,7 +492,45 @@ func TestWatchRetriesTheFirstConnection(t *testing.T) {
 		calls.Add(1)
 		return map[string]any{"ok": false, "error": "not_allowed_token_type"}, nil
 	})
-	if err := run(context.Background(), rt); !slackapi.IsErrorCode(err, "not_allowed_token_type") || calls.Load() != 1 {
+	ctx, cancel = context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := run(ctx, rt); !slackapi.IsErrorCode(err, "not_allowed_token_type") || calls.Load() != 1 {
 		t.Errorf("watch = %v after %d calls", err, calls.Load())
+	}
+}
+
+// A --for that runs out before any connection was ready is an error, not
+// a quiet watch: nothing was listened to.
+func TestWatchForThatNeverConnectedFails(t *testing.T) {
+	for _, env := range []string{"SLACK_TOKEN", "SLACK_COOKIE_D", "SLACK_COOKIE", "SLACK_WORKSPACE_URL"} {
+		t.Setenv(env, "")
+	}
+	testenv.Isolate(t)
+	streamOptions = rtm.Options{PingInterval: 10 * time.Millisecond, ReadTimeout: time.Second, Backoff: func(int) time.Duration { return 5 * time.Millisecond }}
+	t.Cleanup(func() { streamOptions = rtm.Options{} })
+	store := &auth.Store{Path: filepath.Join(t.TempDir(), "credentials.json")}
+	if err := store.Upsert(auth.Workspace{
+		URL:  "https://acme.slack.com",
+		Auth: slackapi.Auth{Type: slackapi.AuthBrowser, XoxcToken: "xoxc-test", XoxdCookie: "xoxd-test"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	rt := &clictx.Context{
+		Store: store, Stdout: io.Discard, Stderr: io.Discard,
+		ClientOptions: []slackapi.Option{
+			slackapi.WithLoopbackWorkspaceForTesting(),
+			slackapi.WithHandler(func(context.Context, string, map[string]any) (map[string]any, error) {
+				return map[string]any{"ok": false, "error": "internal_error"}, nil
+			}),
+		},
+	}
+	cmd := New(rt)
+	cmd.SetArgs([]string{"--for", "100ms"})
+	cmd.SetOut(io.Discard)
+	cmd.SetErr(io.Discard)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := cmd.ExecuteContext(ctx); err == nil || !strings.Contains(err.Error(), "could not connect to Slack within 100ms") {
+		t.Errorf("watch = %v", err)
 	}
 }

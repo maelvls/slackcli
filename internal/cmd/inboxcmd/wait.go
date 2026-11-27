@@ -156,6 +156,9 @@ Prints JSON:
   timed_out  true when --timeout ran out with nothing new (items is [])
 Exit codes: 0 for both, 1 on error, 130 when interrupted. It has no time
 limit unless --timeout is given, and is not cut by the command timeout.
+A rate limit or a network failure while connecting is tried again, with a
+note on stderr; if no connection was ready when --timeout runs out, it is
+an error (exit 1), not timed_out.
 
 Like "watch", it needs browser session credentials or a classic token, and
 like "inbox", search (for --after): not the token of a Slack app.`,
@@ -299,6 +302,8 @@ func runWait(parent context.Context, rt *clictx.Context, a waitArgs) error {
 		me          string
 		w           *inbox.Waiter
 		connections int
+		// lastRetry is why the first connection was last tried again.
+		lastRetry error
 	)
 	_, err := clictx.WithAutoRefresh(stream, rt, func() (struct{}, error) {
 		r, err := rt.Client(stream, ws)
@@ -336,7 +341,10 @@ func runWait(parent context.Context, rt *clictx.Context, a waitArgs) error {
 			catchUp(w, 0)
 		}
 		opts.OnDisconnect = func(err error) { rt.Hintf("Connection lost (%v): reconnecting.", err) }
-		opts.OnRetry = func(err error, wait time.Duration) { rt.Hintf("%s", rtm.RetryHint(err, wait)) }
+		opts.OnRetry = func(err error, wait time.Duration) {
+			lastRetry = err
+			rt.Hintf("%s", rtm.RetryHint(err, wait))
+		}
 		err = rtm.Stream(stream, r.Client, opts, func(raw map[string]any) error {
 			item, err := w.Message(ctx, raw)
 			switch {
@@ -405,6 +413,10 @@ func runWait(parent context.Context, rt *clictx.Context, a waitArgs) error {
 		return results.err
 	}
 	if errors.Is(context.Cause(ctx), errTimedOut) {
+		if connections == 0 && lastRetry != nil {
+			// Not "nothing new": nothing was listened to.
+			return fmt.Errorf("could not connect to Slack within %s (%s), so nothing was watched: check the network, then run the same command again", a.timeout, rtm.RetryReason(lastRetry))
+		}
 		rt.ResultHintf("Nothing new came within %s: to wait again, run the same command with --after %s.", a.timeout, a.cursor)
 		return cmdutil.PrintList(rt, waitResult{UserID: me, After: a.cursor, TimedOut: true}, "items")
 	}

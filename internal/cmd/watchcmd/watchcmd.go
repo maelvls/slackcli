@@ -122,6 +122,12 @@ and classic tokens, not with the token of a Slack app.`,
 			// with the refreshed ones knows nothing of that gap. Zero
 			// while connected, and before the first connection.
 			var downSince time.Time
+			// everConnected is whether any stream got ready; lastRetry is
+			// why the first connection was last tried again.
+			var (
+				everConnected bool
+				lastRetry     error
+			)
 			_, err := clictx.WithAutoRefresh(ctx, rt, func() (struct{}, error) {
 				r, err := rt.Client(ctx, ws)
 				if err != nil {
@@ -139,7 +145,7 @@ and classic tokens, not with the token of a Slack app.`,
 				opts := streamOptions
 				connected := false
 				opts.OnConnect = func(gap time.Duration) {
-					connected = true
+					connected, everConnected = true, true
 					if gap == 0 && !downSince.IsZero() {
 						gap = max(time.Since(downSince), time.Nanosecond)
 					}
@@ -151,7 +157,10 @@ and classic tokens, not with the token of a Slack app.`,
 					rt.Hintf("Connected to %s: waiting for messages.", cmp.Or(r.WorkspaceURL, "Slack"))
 				}
 				opts.OnDisconnect = func(err error) { rt.Hintf("Connection lost (%v): reconnecting.", err) }
-				opts.OnRetry = func(err error, wait time.Duration) { rt.Hintf("%s", rtm.RetryHint(err, wait)) }
+				opts.OnRetry = func(err error, wait time.Duration) {
+					lastRetry = err
+					rt.Hintf("%s", rtm.RetryHint(err, wait))
+				}
 				err = rtm.Stream(ctx, r.Client, opts, func(raw map[string]any) error { return w.handle(ctx, raw) })
 				if err != nil && connected && downSince.IsZero() {
 					// Without the monotonic reading, which stops while
@@ -165,6 +174,10 @@ and classic tokens, not with the token of a Slack app.`,
 			// (a channel being resolved, a name looked up, the stream)
 			// is not an error to report.
 			if ctx.Err() != nil {
+				if duration > 0 && cmd.Context().Err() == nil && !everConnected && lastRetry != nil {
+					// Not a quiet --for: nothing was listened to.
+					return fmt.Errorf("could not connect to Slack within %s (%s), so nothing was watched: check the network, then run the command again", duration, rtm.RetryReason(lastRetry))
+				}
 				return nil
 			}
 			return err
