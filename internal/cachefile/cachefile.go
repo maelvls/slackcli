@@ -7,10 +7,14 @@ package cachefile
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
+	"syscall"
+	"time"
 )
 
 // Path returns the file of the cache called name for a workspace, in dir,
@@ -59,5 +63,24 @@ func Write(path string, data []byte) {
 	if err := tmp.Close(); err != nil {
 		return
 	}
-	_ = os.Rename(tmp.Name(), path)
+	// The readers of a cache do not take its lock, and on Windows a file
+	// that is open cannot be replaced until it is closed: the rename is
+	// tried again for a short while, as for the credentials file (package
+	// auth), rather than the update dropped.
+	const attempts, pause = 50, 10 * time.Millisecond
+	err = os.Rename(tmp.Name(), path)
+	for i := 1; err != nil && i < attempts && renameBlockedByReader(err); i++ {
+		time.Sleep(pause)
+		err = os.Rename(tmp.Name(), path)
+	}
+}
+
+// renameBlockedByReader reports whether a rename failed because another
+// process or goroutine has the destination open, which only Windows minds
+// (ERROR_ACCESS_DENIED or ERROR_SHARING_VIOLATION).
+func renameBlockedByReader(err error) bool {
+	const accessDenied, sharingViolation = syscall.Errno(5), syscall.Errno(32)
+	var errno syscall.Errno
+	return runtime.GOOS == "windows" && errors.As(err, &errno) &&
+		(errno == accessDenied || errno == sharingViolation)
 }
