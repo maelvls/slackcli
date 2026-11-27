@@ -183,8 +183,10 @@ func releaseLock(lock, token string) {
 		if !lockHeld(guard, err) && !transientRefusal(err) {
 			return
 		}
-		if isStale(guard) {
-			_ = os.Remove(guard)
+		// Retried at once only when a stale guard was removed: one that
+		// cannot be (a directory that is not empty, or a file open on
+		// Windows) is waited for like any other.
+		if isStale(guard) && os.Remove(guard) == nil {
 			continue
 		}
 		if time.Now().After(deadline) {

@@ -164,6 +164,62 @@ func TestUnlockWithoutTheGuard(t *testing.T) {
 	}
 }
 
+// A stale guard that cannot be removed (here a directory that is not
+// empty) does not make the unlock spin: it waits at most lockWait, and
+// leaves its lock to go stale.
+func TestUnlockWithAStaleGuardThatCannotBeRemoved(t *testing.T) {
+	shortTimings(t)
+	path := filepath.Join(t.TempDir(), "names.json")
+	unlock := Lock(path)
+	guard := path + ".lock.takeover"
+	if err := os.MkdirAll(filepath.Join(guard, "not-empty"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().Add(-2 * lockStale)
+	if err := os.Chtimes(guard, old, old); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan struct{})
+	go func() {
+		unlock()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(lockWait + time.Second):
+		t.Fatal("the unlock did not return: it spins on the stale guard")
+	}
+	if _, err := os.Stat(path + ".lock"); err != nil {
+		t.Errorf("the lock was removed without the guard: %v", err)
+	}
+}
+
+// The same guard, or a stale lock that cannot be removed, does not make
+// Lock spin either: it gives up after lockWait.
+func TestLockWithAStaleLockThatCannotBeRemoved(t *testing.T) {
+	shortTimings(t)
+	path := filepath.Join(t.TempDir(), "names.json")
+	old := time.Now().Add(-2 * lockStale)
+	for _, dir := range []string{path + ".lock", path + ".lock.takeover"} {
+		if err := os.MkdirAll(filepath.Join(dir, "not-empty"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chtimes(dir, old, old); err != nil {
+			t.Fatal(err)
+		}
+	}
+	done := make(chan struct{})
+	go func() {
+		Lock(path)()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(lockWait + time.Second):
+		t.Fatal("Lock did not return: it spins on the stale lock")
+	}
+}
+
 // A directory that cannot be written is no reason to wait.
 func TestLockInAnUnwritableDirectory(t *testing.T) {
 	blocker := filepath.Join(t.TempDir(), "blocker")
