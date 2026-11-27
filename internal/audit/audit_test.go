@@ -126,7 +126,7 @@ func TestRecordWritesOneSafeLine(t *testing.T) {
 	}
 	wantArgs := []string{
 		"--safe-mode", "message", "send", "C0123ABCD", Placeholder,
-		"--thread-ts", "1700000000.123456", "--text", "--limit", "20",
+		"--thread-ts", Placeholder, "--text", "--limit", Placeholder,
 		"https://acme.slack.com/archives/C0123ABCD/p1700000000123456",
 		"https://files.slack.com/files-pri/T0123ABCD-F0123ABCD/" + Placeholder,
 		Placeholder, "-n",
@@ -161,7 +161,11 @@ func TestSanitizeArgsKeepsOnlyKnownFlags(t *testing.T) {
 		{[]string{"--text", "--confidential acquisition details"}, []string{"--text", Placeholder}},
 		{[]string{"--text", "--force"}, []string{"--text", Placeholder}},
 		{[]string{"-n", "-v"}, []string{"-n", Placeholder}},
-		{[]string{"-n", "20"}, []string{"-n", "20"}},
+		{[]string{"-n", "20"}, []string{"-n", Placeholder}},
+		// Message text shaped like a number or an ID.
+		{[]string{"--text", "123456"}, []string{"--text", Placeholder}},
+		{[]string{"--text", "C0123ABCD"}, []string{"--text", Placeholder}},
+		{[]string{"C0123ABCD", "--", "-1", "123456", "C0123ABCD", "1700000000.123456"}, []string{"C0123ABCD", "--", Placeholder, Placeholder, Placeholder, Placeholder}},
 		// After "--", everything is positional.
 		{[]string{"C0123ABCD", "--", "--confidential acquisition details", "--force", "-v"}, []string{"C0123ABCD", "--", Placeholder, Placeholder, Placeholder}},
 		// Dash text that is no flag of the command.

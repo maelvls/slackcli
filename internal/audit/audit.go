@@ -369,8 +369,9 @@ type FlagLookup func(name string, short bool) (known, takesValue bool)
 // host and path are kept). Every other argument, which may be a message, a
 // search query, a name or a secret, is replaced by Placeholder. So is an
 // argument that starts with a dash but is not a known flag (message text
-// such as "--> see below", or "--confidential" after "--"), and the value
-// of a flag, even one that looks like a flag. Anything that still looks
+// such as "--> see below"), the value of a flag (--text 123456, or one
+// that looks like a flag), and every argument after "--", whatever their
+// shape. Anything that still looks
 // like a token is redacted. A nil lookup knows no flag.
 func SanitizeArgs(cmd string, args []string, lookup FlagLookup) []string {
 	if lookup == nil {
@@ -386,11 +387,11 @@ func SanitizeArgs(cmd string, args []string, lookup FlagLookup) []string {
 		}
 		var kept string
 		switch {
-		case valueNext:
+		case valueNext || terminated:
+			// The value of a flag and what follows "--" may be message
+			// text of any shape, a number or an ID included.
 			valueNext = false
-			kept = safeValue(a)
-		case terminated:
-			kept = safeValue(a)
+			kept = Placeholder
 		case a == "--":
 			kept, terminated = a, true
 		case len(words) > 0 && a == words[0]:

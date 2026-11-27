@@ -513,7 +513,7 @@ func TestAuditLogKeepsOnlyTheFlagsOfTheCommand(t *testing.T) {
 	work.Flags().IntP("limit", "n", 0, "")
 	cmdutil.AllowDashText(work)
 	got := runWith(t, time.Second, one(work), "work", "C0123ABCD", "--text", "--confidential plan",
-		"- first item", "--force", "-n", "5", "--", "--secret", "-x")
+		"- first item", "--force", "-n", "5", "--", "--secret", "-1")
 	if got.code != ExitOK {
 		t.Fatalf("%+v", got)
 	}
@@ -522,7 +522,7 @@ func TestAuditLogKeepsOnlyTheFlagsOfTheCommand(t *testing.T) {
 		t.Fatalf("entries = %+v, %v", entries, err)
 	}
 	p := audit.Placeholder
-	want := strings.Join([]string{"work", "C0123ABCD", "--text", p, p, "--force", "-n", "5", "--", p, p}, " ")
+	want := strings.Join([]string{"work", "C0123ABCD", "--text", p, p, "--force", "-n", p, "--", p, p}, " ")
 	if args := strings.Join(entries[0].Args, " "); args != want {
 		t.Errorf("args = %q, want %q", args, want)
 	}
