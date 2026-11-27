@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/maelvls/slackcli/internal/appinfo"
+	"github.com/maelvls/slackcli/internal/audit"
 	"github.com/maelvls/slackcli/internal/jsonx"
 	"github.com/maelvls/slackcli/internal/slackapi"
 )
@@ -311,6 +312,7 @@ func postBytes(ctx context.Context, client *slackapi.Client, uploadURL string, b
 	// would pass for a successful upload, and cannot replay a streamed
 	// body (307, 308).
 	hc := *client.HTTPClient()
+	hc.Transport = audit.Transport(hc.Transport, "files.upload")
 	hc.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
 	resp, err := hc.Do(req)
 	if err != nil {

@@ -59,7 +59,8 @@ slackcli
 ├── inbox
 ├── watch
 ├── canvas    create | get | edit
-└── workflow  list | preview | get | run
+├── workflow  list | preview | get | run
+└── audit     path | tail | stats
 ```
 
 Most commands take a target:
@@ -186,6 +187,20 @@ $ SLACKCLI_DEBUG=1 slackcli message list general --limit 3 >/dev/null
 [slackcli +739ms] exit code 0; time spent: api users.info 258ms (2 calls), api search.messages 231ms, api conversations.history 146ms, keychain 55ms (2 calls)
 ```
 
+## Audit log
+
+Every request slackcli makes to Slack is appended, as one JSON line, to `~/.config/slackcli/audit.jsonl` (next to `credentials.json`; `$XDG_CONFIG_HOME/slackcli` when that is set): each attempt of an API call, rate-limited ones and retries included, each file download or upload request, and each opening of the `watch` WebSocket. It is there to answer, after the fact, how often Slack was called, with which methods, by which program and which command, and what failed or was rate limited.
+
+A line has `ts`, `pid`, `ppid`, the names of the parent processes (`parent`, `ancestors`; macOS and Linux), `cmd` and `args`, `kind` (`api`, `file`, `websocket`), `host`, `method`, `status`, `ok`, `error`, `duration_ms`, `attempt`, `rate_limited` and `retry_after_s`. It holds no token, cookie, message or search query: of the arguments only the flag names, Slack IDs, timestamps, numbers and Slack URLs (without their query) are kept, everything else is `…`. Of a file request only the host is kept.
+
+The file is created `0600` and moved to `audit.jsonl.1` once it reaches 20 MB. A failure to write it never fails a command. `SLACKCLI_AUDIT_LOG=<path>` writes it elsewhere and `SLACKCLI_AUDIT_LOG=off` turns it off.
+
+```console
+$ slackcli audit stats --since 1h   # totals, per method, per parent process and command, per hour, peak minute, errors
+$ slackcli audit tail -n 50 | jq -c 'select(.rate_limited)'
+$ tail -f "$(slackcli audit path | jq -r .path)"
+```
+
 ## Environment variables
 
 | Variable | Effect |
@@ -199,6 +214,7 @@ $ SLACKCLI_DEBUG=1 slackcli message list general --limit 3 >/dev/null
 | `SLACKCLI_RATE_LIMIT_MAX_WAIT_MS` | How long to wait and retry when Slack rate-limits (default 0: fail at once). |
 | `SLACKCLI_KEYCHAIN_TIMEOUT_MS` | Time limit of a macOS keychain call (default 3000). |
 | `SLACKCLI_DEBUG` | Set to 1 to trace every Slack call and wait on stderr, with durations (see [Output](#output)). |
+| `SLACKCLI_AUDIT_LOG` | Where the audit log of every request to Slack is written (default `~/.config/slackcli/audit.jsonl`); `off` turns it off (see [Audit log](#audit-log)). |
 | `CI` | When set, `message compose` sends the text without opening the editor. |
 
 ## Coming from agent-slack

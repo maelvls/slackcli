@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/maelvls/slackcli/internal/appinfo"
+	"github.com/maelvls/slackcli/internal/audit"
 	"github.com/maelvls/slackcli/internal/trace"
 )
 
@@ -381,17 +382,32 @@ func (c *Client) call(ctx context.Context, method string, params map[string]any,
 func (c *Client) callOnce(ctx context.Context, method string, params map[string]any, multi bool) (map[string]any, error) {
 	if c.handler != nil {
 		span := trace.Begin("api "+method, "")
+		rec := c.auditEntry(method, c.workspaceURL, 1)
 		resp, err := c.handler(ctx, method, params)
 		span.EndErr(err)
 		if err != nil {
+			code := ErrorCode(err)
+			var limited *RateLimitError
+			switch {
+			case errors.As(err, &limited):
+				rec.entry.RetryAfterS = limited.RetryAfter.Seconds()
+				rec.entry.RateLimited = true
+				code = "ratelimited"
+			case code == "":
+				code = audit.ErrorClass(ctx, err)
+			}
+			rec.done(0, nil, code)
 			return nil, err
 		}
 		if resp == nil {
 			resp = map[string]any{"ok": true}
 		}
 		if ok, present := resp["ok"]; present && ok != true {
-			return nil, newAPIError(method, resp)
+			apiErr := newAPIError(method, resp)
+			rec.done(0, resp, apiErr.Code)
+			return nil, apiErr
 		}
+		rec.done(0, resp, "")
 		return resp, nil
 	}
 
@@ -414,18 +430,22 @@ func (c *Client) callOnce(ctx context.Context, method string, params map[string]
 			detail = fmt.Sprintf("(attempt %d)", attempt+1)
 		}
 		span := trace.Begin("api "+method, detail)
+		rec := c.auditEntry(method, endpoint, attempt+1)
 		status, header, body, err := c.post(ctx, endpoint, fields, multi, timeout)
 		if err != nil {
 			if ctx.Err() != nil {
 				span.Fail("cancelled: " + ctx.Err().Error())
+				rec.done(0, nil, "cancelled")
 				return nil, ctx.Err()
 			}
 			var ne interface{ Timeout() bool }
 			if errors.Is(err, context.DeadlineExceeded) || (errors.As(err, &ne) && ne.Timeout()) {
 				span.Fail("no answer after " + timeout.String())
+				rec.done(0, nil, "timeout")
 				return nil, &TimeoutError{Method: method, Timeout: timeout}
 			}
 			span.Fail("network error")
+			rec.done(0, nil, "network")
 			return nil, &NetworkError{Method: method, Err: err}
 		}
 
@@ -433,6 +453,7 @@ func (c *Client) callOnce(ctx context.Context, method string, params map[string]
 			retryAfter := parseRetryAfter(header.Get("Retry-After"))
 			maxWait := RateLimitMaxWait()
 			span.Fail(fmt.Sprintf("HTTP 429, Retry-After %s", retryAfter))
+			rec.rateLimited(retryAfter)
 			if attempt >= maxRateLimitRetry || retryAfter > maxWait || RateLimitRetryDisabled(ctx) {
 				return nil, &RateLimitError{Method: method, RetryAfter: retryAfter, MaxWait: maxWait}
 			}
@@ -448,12 +469,21 @@ func (c *Client) callOnce(ctx context.Context, method string, params map[string]
 		// is returned as an error.
 		if status >= 300 && status <= 399 {
 			span.Fail(fmt.Sprintf("HTTP %d, a redirect", status))
+			rec.done(status, nil, "redirect")
 			return nil, c.redirectError(method, status, header.Get("Location"))
 		}
 
 		var data map[string]any
 		_ = json.Unmarshal(body, &data)
 		code, _ := data["error"].(string)
+		switch {
+		case data == nil && (status < 200 || status > 299):
+			rec.done(status, nil, "http_status")
+		case data == nil:
+			rec.done(status, nil, "not_json")
+		default:
+			rec.done(status, data, code)
+		}
 		switch {
 		case status < 200 || status > 299:
 			if code != "" {
@@ -479,6 +509,52 @@ func (c *Client) callOnce(ctx context.Context, method string, params map[string]
 		span.End(fmt.Sprintf("HTTP %d", status))
 		return data, nil
 	}
+}
+
+// auditCall is the line of the audit log of one attempt of a call; done
+// or rateLimited writes it.
+type auditCall struct {
+	start time.Time
+	entry audit.Entry
+}
+
+// auditEntry starts the audit line of an attempt (from 1) of a call to
+// method at target, a URL of which only the host is kept.
+func (c *Client) auditEntry(method, target string, attempt int) *auditCall {
+	host := ""
+	if u, err := url.Parse(target); err == nil {
+		host = u.Host
+	}
+	now := time.Now()
+	return &auditCall{start: now, entry: audit.Entry{
+		TS:      now.UTC().Format(time.RFC3339Nano),
+		Kind:    audit.KindAPI,
+		Host:    host,
+		Method:  method,
+		Attempt: attempt,
+	}}
+}
+
+// done writes the line of an attempt that got the HTTP status (0 when
+// there was no answer, or the call was served by a Handler), the answer
+// data (nil when it had none) and the error code (Slack's, or how the
+// request failed; "" for none).
+func (a *auditCall) done(status int, data map[string]any, code string) {
+	a.entry.DurationMS = time.Since(a.start).Milliseconds()
+	a.entry.Status = status
+	if ok, present := data["ok"].(bool); present {
+		a.entry.OK = &ok
+	}
+	a.entry.Error = code
+	audit.Record(a.entry)
+}
+
+// rateLimited writes the line of an attempt that Slack answered with HTTP
+// 429.
+func (a *auditCall) rateLimited(retryAfter time.Duration) {
+	a.entry.RateLimited = true
+	a.entry.RetryAfterS = retryAfter.Seconds()
+	a.done(http.StatusTooManyRequests, nil, "ratelimited")
 }
 
 func (c *Client) endpoint(method string) (string, error) {

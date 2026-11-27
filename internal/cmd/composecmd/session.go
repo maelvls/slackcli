@@ -11,11 +11,12 @@ import (
 	"mime"
 	"net"
 	"net/http"
-	"regexp"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/maelvls/slackcli/internal/audit"
 )
 
 // A session is one run of the editor: a loopback HTTP server that serves
@@ -637,10 +638,6 @@ func (s *session) handleSend(w http.ResponseWriter, text string) {
 	reply(w, http.StatusOK, actionResponse{OK: true, TS: sent.TS, Permalink: sent.Permalink})
 }
 
-var slackSecretRe = regexp.MustCompile(`xox[a-z]-[A-Za-z0-9%._-]+`)
-
 // redactSecrets removes anything that looks like a Slack token or cookie
 // from an error message before it is shown in the browser.
-func redactSecrets(msg string) string {
-	return slackSecretRe.ReplaceAllString(msg, "[REDACTED]")
-}
+func redactSecrets(msg string) string { return audit.RedactSecrets(msg) }
