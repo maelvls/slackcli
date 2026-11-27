@@ -1,7 +1,7 @@
 // Package cachefile holds what the on-disk caches share (the users, the
 // conversation names): one file per workspace in the cache directory,
-// readable by its owner only, and replaced atomically so that concurrent
-// invocations can share it.
+// readable by its owner only, updated under a lock (see Lock) and replaced
+// atomically, so that concurrent invocations can share it.
 package cachefile
 
 import (

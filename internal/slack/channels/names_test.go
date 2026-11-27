@@ -436,8 +436,18 @@ func TestNamesConcurrentWriters(t *testing.T) {
 	writers.Wait()
 	close(stop)
 	readers.Wait()
-	if loadNames(path)["C0SHARED01"].Name == "" {
+	// Every invocation keeps what it learnt: the read, merge and write of
+	// the file are one step across processes.
+	entries := loadNames(path)
+	if entries["C0SHARED01"].Name == "" {
 		t.Error("shared name missing from the cache")
+	}
+	for w := range 8 {
+		for i := range 10 {
+			if id := fmt.Sprintf("C1%04d%04d", w, i); entries[id].Name != "chan-"+id {
+				t.Errorf("%s lost (%d entries)", id, len(entries))
+			}
+		}
 	}
 	if left, _ := os.ReadDir(dir); len(left) != 1 {
 		t.Errorf("temporary files left behind: %v", left)
@@ -455,7 +465,7 @@ func TestNamesConcurrentWriters(t *testing.T) {
 		})
 	}
 	lookups.Wait()
-	entries := loadNames(path)
+	entries = loadNames(path)
 	for i := range 40 {
 		if id := fmt.Sprintf("C0%08d", i); entries[id].Name == "" {
 			t.Errorf("%s missing from the cache (%d entries)", id, len(entries))

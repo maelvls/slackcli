@@ -203,13 +203,15 @@ func loadCache(path string) map[string]cacheEntry {
 
 // storeCache adds fetched users to the cache file and drops expired
 // entries. It is best effort and safe against concurrent invocations: the
-// file is re-read just before being rewritten, so that entries another
-// process added meanwhile are kept, and it is replaced atomically, so
-// that a reader never sees a half-written file.
+// file is read again, merged and rewritten under its lock
+// (cachefile.Lock), so that entries another process added meanwhile are
+// kept, and it is replaced atomically, so that a reader never sees a
+// half-written file.
 func storeCache(path string, fetched map[string]CompactUser, now time.Time) {
 	if path == "" || len(fetched) == 0 {
 		return
 	}
+	defer cachefile.Lock(path)()
 	entries := loadCache(path)
 	for id, e := range entries {
 		if !e.fresh(now) {

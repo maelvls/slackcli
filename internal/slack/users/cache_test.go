@@ -445,6 +445,15 @@ func TestCacheConcurrentWriters(t *testing.T) {
 	if entries["U0SHARED00"].User.ID != "U0SHARED00" {
 		t.Errorf("shared user missing from the cache (%d entries)", len(entries))
 	}
+	// Every invocation keeps what it fetched: the read, merge and write of
+	// the file are one step across processes.
+	for w := range 8 {
+		for i := range 10 {
+			if id := fmt.Sprintf("U%04d%04d", w, i); entries[id].User.ID != id {
+				t.Errorf("%s lost (%d entries)", id, len(entries))
+			}
+		}
+	}
 	if left := cacheFiles(t, dir); len(left) != 1 {
 		t.Errorf("temporary files left behind: %v", left)
 	}

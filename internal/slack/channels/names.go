@@ -140,8 +140,9 @@ func (n *Names) Stale(client *slackapi.Client, channelID string) string {
 //
 // The file is written at once, not when the command ends, so that a
 // long-running command (watch, inbox wait) shares what it learns. It is
-// re-read just before being rewritten, so that the entries another
-// process added meanwhile are kept.
+// read again, merged and written under the lock of the file
+// (cachefile.Lock), so that the entries other invocations add meanwhile
+// are kept.
 func (n *Names) Remember(client *slackapi.Client, channelID, name string) {
 	if n == nil || name == "" || !slackid.IsChannelID(channelID) {
 		return
@@ -156,8 +157,9 @@ func (n *Names) Remember(client *slackapi.Client, channelID, name string) {
 	if n.path == "" {
 		return
 	}
-	// Holding the lock keeps two lookups of this process from writing at
-	// the same time, which would lose one of the names.
+	// n.mu keeps the lookups of this invocation from writing at the same
+	// time, the file lock those of other invocations.
+	defer cachefile.Lock(n.path)()
 	entries := loadNames(n.path)
 	for id, old := range entries {
 		if old.age(now) >= nameCacheKeep {
