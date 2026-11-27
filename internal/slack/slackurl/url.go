@@ -41,14 +41,6 @@ var (
 // IsTS reports whether s is a full Slack timestamp ("1770165109.628379").
 func IsTS(s string) bool { return tsRe.MatchString(s) }
 
-// IsSlackURL reports whether input is an https URL on a Slack workspace
-// host (slackapi.IsWorkspaceHost: slack.com, slack-gov.com and their
-// subdomains), whatever its path.
-func IsSlackURL(input string) bool {
-	u, err := url.Parse(strings.TrimSpace(input))
-	return err == nil && u.Scheme == "https" && slackapi.IsWorkspaceHost(u.Hostname())
-}
-
 // location is what a Slack URL points at: a channel, or a message in it.
 type location struct {
 	workspaceURL string
