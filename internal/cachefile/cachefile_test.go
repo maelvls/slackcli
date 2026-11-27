@@ -119,3 +119,28 @@ func TestLockInAnUnwritableDirectory(t *testing.T) {
 		t.Errorf("waited %s", d)
 	}
 }
+
+// Readers do not take the lock. On Windows a file that is open cannot be
+// replaced (access denied, sharing violation) until it is closed: the
+// write must wait a little for the reader rather than be dropped.
+func TestWriteWhileTheFileIsOpen(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "names.json")
+	Write(path, []byte("old\n"))
+	reader, err := os.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	closed := make(chan struct{})
+	time.AfterFunc(100*time.Millisecond, func() {
+		reader.Close()
+		close(closed)
+	})
+	Write(path, []byte("new\n"))
+	<-closed
+	if data, _ := os.ReadFile(path); string(data) != "new\n" {
+		t.Errorf("file = %q, want the new content", data)
+	}
+	if entries, _ := os.ReadDir(filepath.Dir(path)); len(entries) != 1 {
+		t.Errorf("files left behind: %v", entries)
+	}
+}
