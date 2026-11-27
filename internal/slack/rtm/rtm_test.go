@@ -165,7 +165,7 @@ func TestStreamReturnsTheErrorOfTheHandler(t *testing.T) {
 	}
 }
 
-func TestStreamFailsWhenTheFirstConnectionDoes(t *testing.T) {
+func TestStreamFailsWhenTheFirstConnectionCannotWork(t *testing.T) {
 	// rtm.connect refused.
 	client := slackapi.NewFake(func(context.Context, string, map[string]any) (map[string]any, error) {
 		return map[string]any{"ok": false, "error": "not_allowed_token_type"}, nil
@@ -237,6 +237,218 @@ func TestStreamWaitsForTheRateLimitBeforeReconnecting(t *testing.T) {
 	}
 	if waited < retryAfter {
 		t.Errorf("reconnected %s after a rate limit of %s", waited, retryAfter)
+	}
+}
+
+// connectThen is a client whose rtm.connect fails with the errors given,
+// one per call, then points at a WebSocket that says hello and passes
+// one message. It counts the calls.
+func connectThen(t *testing.T, calls *atomic.Int32, errs ...error) *slackapi.Client {
+	t.Helper()
+	server := httptest.NewServer(websocket.Handler(func(ws *websocket.Conn) {
+		send(ws, `{"type":"hello"}`, `{"type":"message","text":"hi"}`)
+		hold(ws)
+	}))
+	t.Cleanup(server.Close)
+	return slackapi.NewFake(func(context.Context, string, map[string]any) (map[string]any, error) {
+		if n := int(calls.Add(1)); n <= len(errs) {
+			return nil, errs[n-1]
+		}
+		return map[string]any{"ok": true, "url": "ws" + strings.TrimPrefix(server.URL, "http")}, nil
+	}, slackapi.WithLoopbackWorkspaceForTesting())
+}
+
+// A first rtm.connect that is rate limited is tried again, not before the
+// time Slack gave, instead of ending the stream.
+func TestStreamRetriesARateLimitedFirstConnection(t *testing.T) {
+	const retryAfter = 200 * time.Millisecond
+	var calls atomic.Int32
+	client := connectThen(t, &calls, &slackapi.RateLimitError{Method: "rtm.connect", RetryAfter: retryAfter})
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	var waits []time.Duration
+	var connectedAfter time.Duration
+	start := time.Now()
+	opts := fast
+	opts.OnRetry = func(err error, wait time.Duration) {
+		if !slackapi.IsTransient(err) {
+			t.Errorf("OnRetry(%v)", err)
+		}
+		if hint := RetryHint(err, wait); !strings.Contains(hint, "rate limited") || strings.Contains(hint, "RATE_LIMIT_MAX_WAIT_MS") {
+			t.Errorf("RetryHint = %q", hint)
+		}
+		waits = append(waits, wait)
+	}
+	opts.OnConnect = func(time.Duration) { connectedAfter = time.Since(start) }
+	opts.OnDisconnect = func(err error) { t.Errorf("OnDisconnect(%v) before the first connection", err) }
+	err := Stream(ctx, client, opts, func(map[string]any) error { cancel(); return nil })
+	if err != nil {
+		t.Fatalf("Stream = %v", err)
+	}
+	if len(waits) != 1 || waits[0] != retryAfter || calls.Load() != 2 {
+		t.Errorf("waits = %v, calls = %d", waits, calls.Load())
+	}
+	if connectedAfter < retryAfter {
+		t.Errorf("connected %s after a rate limit of %s", connectedAfter, retryAfter)
+	}
+}
+
+// The "ratelimited" error code, Slack failing on its side and a network
+// that is not up yet are tried again with the backoff.
+func TestStreamRetriesTransientFirstConnectionErrors(t *testing.T) {
+	var calls atomic.Int32
+	client := connectThen(t, &calls,
+		&slackapi.NetworkError{Method: "rtm.connect", Err: errors.New("dial tcp: lookup slack.com: no such host")},
+		&slackapi.APIError{Method: "rtm.connect", Code: "ratelimited"},
+		&slackapi.APIError{Method: "rtm.connect", Code: "internal_error"},
+	)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	retries := 0
+	opts := fast
+	opts.OnRetry = func(error, time.Duration) { retries++ }
+	if err := Stream(ctx, client, opts, func(map[string]any) error { cancel(); return nil }); err != nil {
+		t.Fatalf("Stream = %v", err)
+	}
+	if retries != 3 || calls.Load() != 4 {
+		t.Errorf("retries = %d, calls = %d", retries, calls.Load())
+	}
+}
+
+// A WebSocket that cannot be reached (nothing listens there any more) is
+// tried again too.
+func TestStreamRetriesAnUnreachableFirstWebSocket(t *testing.T) {
+	dead := httptest.NewServer(http.NotFoundHandler())
+	deadURL := "ws" + strings.TrimPrefix(dead.URL, "http")
+	dead.Close()
+	_, live := newFakeSlack(t, func(ws *websocket.Conn) {
+		send(ws, `{"type":"hello"}`, `{"type":"message"}`)
+		hold(ws)
+	})
+	var calls atomic.Int32
+	client := slackapi.NewFake(func(ctx context.Context, method string, params map[string]any) (map[string]any, error) {
+		if calls.Add(1) == 1 {
+			return map[string]any{"ok": true, "url": deadURL}, nil
+		}
+		return live.API(ctx, method, params)
+	}, slackapi.WithLoopbackWorkspaceForTesting())
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	retries := 0
+	opts := fast
+	opts.OnRetry = func(error, time.Duration) { retries++ }
+	if err := Stream(ctx, client, opts, func(map[string]any) error { cancel(); return nil }); err != nil {
+		t.Fatalf("Stream = %v", err)
+	}
+	if retries != 1 {
+		t.Errorf("retries = %d, want 1", retries)
+	}
+}
+
+// Credentials, token types and scopes that Slack rejects would be rejected
+// again: the first connection fails at once.
+func TestStreamFailsAtOnceWhenTheFirstConnectionIsRefused(t *testing.T) {
+	for _, code := range []string{"invalid_auth", "not_authed", "token_revoked", "missing_scope", "not_allowed_token_type"} {
+		var calls atomic.Int32
+		client := connectThen(t, &calls, &slackapi.APIError{Method: "rtm.connect", Code: code})
+		opts := fast
+		opts.OnRetry = func(err error, _ time.Duration) { t.Errorf("%s: OnRetry(%v)", code, err) }
+		// A deadline, so that a code tried again by mistake fails the
+		// test instead of hanging it.
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		err := Stream(ctx, client, opts, func(map[string]any) error { return nil })
+		cancel()
+		if !slackapi.IsErrorCode(err, code) || calls.Load() != 1 {
+			t.Errorf("%s: Stream = %v after %d calls", code, err, calls.Load())
+		}
+	}
+}
+
+// A handshake that Slack answers with an HTTP error (a 503 during an
+// incident) is tried again too.
+func TestStreamRetriesAFirstHandshakeThatFails(t *testing.T) {
+	var conns atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if conns.Add(1) == 1 {
+			http.Error(w, "unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		websocket.Handler(func(ws *websocket.Conn) {
+			send(ws, `{"type":"hello"}`, `{"type":"message"}`)
+			hold(ws)
+		}).ServeHTTP(w, r)
+	}))
+	t.Cleanup(server.Close)
+	client := slackapi.NewFake(func(context.Context, string, map[string]any) (map[string]any, error) {
+		return map[string]any{"ok": true, "url": "ws" + strings.TrimPrefix(server.URL, "http")}, nil
+	}, slackapi.WithLoopbackWorkspaceForTesting())
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	retries := 0
+	opts := fast
+	opts.OnRetry = func(error, time.Duration) { retries++ }
+	if err := Stream(ctx, client, opts, func(map[string]any) error { cancel(); return nil }); err != nil {
+		t.Fatalf("Stream = %v", err)
+	}
+	if retries != 1 || conns.Load() != 2 {
+		t.Errorf("retries = %d, connections = %d", retries, conns.Load())
+	}
+}
+
+// A first WebSocket that stays silent until the read times out, before
+// Slack said hello, is the network: it is tried again.
+func TestStreamRetriesAFirstConnectionSilentBeforeHello(t *testing.T) {
+	_, client := newFakeSlack(t,
+		func(ws *websocket.Conn) { hold(ws) },
+		func(ws *websocket.Conn) {
+			send(ws, `{"type":"hello"}`, `{"type":"message"}`)
+			hold(ws)
+		})
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	retries := 0
+	opts := fast
+	opts.PingInterval = time.Hour // pongs would keep the silent one alive
+	opts.OnRetry = func(error, time.Duration) { retries++ }
+	if err := Stream(ctx, client, opts, func(map[string]any) error { cancel(); return nil }); err != nil {
+		t.Fatalf("Stream = %v", err)
+	}
+	if retries != 1 {
+		t.Errorf("retries = %d, want 1", retries)
+	}
+}
+
+// The hint of a timed out rtm.connect does not carry the advice of the
+// error, which says to check before retrying.
+func TestRetryHintOfATimeout(t *testing.T) {
+	hint := RetryHint(&slackapi.TimeoutError{Method: "rtm.connect", Timeout: 30 * time.Second}, 2*time.Second)
+	if want := "Cannot connect to Slack yet (Slack did not answer rtm.connect within 30s): trying again in 2s."; hint != want {
+		t.Errorf("RetryHint = %q, want %q", hint, want)
+	}
+}
+
+// Being cancelled while waiting to try the first connection again ends the
+// stream without an error, and without waiting for the end of the pause.
+func TestStreamCancelledWhileWaitingToRetryTheFirstConnection(t *testing.T) {
+	var calls atomic.Int32
+	client := connectThen(t, &calls, &slackapi.RateLimitError{Method: "rtm.connect", RetryAfter: time.Hour})
+	ctx, cancel := context.WithCancel(context.Background())
+	opts := fast
+	opts.OnRetry = func(error, time.Duration) { cancel() }
+	start := time.Now()
+	if err := Stream(ctx, client, opts, nil); err != nil {
+		t.Errorf("Stream = %v, want nil once the context is done", err)
+	}
+	if d := time.Since(start); d > 5*time.Second || calls.Load() != 1 {
+		t.Errorf("returned after %s and %d calls", d, calls.Load())
+	}
+
+	// A deadline that comes during the pause ends it the same way.
+	calls.Store(0)
+	ctx, cancel = context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	if err := Stream(ctx, client, fast, nil); err != nil || calls.Load() != 1 {
+		t.Errorf("Stream = %v after %d calls", err, calls.Load())
 	}
 }
 

@@ -11,10 +11,11 @@ import (
 
 // The warnings and hints of a command are part of its result: they are
 // printed in the JSON object on stdout, as "warnings" and "hints", rather
-// than on stderr. A consumer that merges the two streams (`2>&1 | jq`,
-// which agents do all the time) then still gets JSON, and one that drops
-// stderr still gets the warnings. Stderr only gets what no JSON object
-// carried: the notes of a command that failed, or that printed text.
+// than on stderr, so that a consumer that drops or ignores stderr still
+// gets them. Stderr only gets what no JSON object carried: the notes of a
+// command that failed, or that printed text (and the notes the long-running
+// commands write while they wait, see the README). An error is not JSON,
+// so the docs tell consumers never to merge the two streams (`2>&1 | jq`).
 
 // Keys of the notes in a printed result.
 const (

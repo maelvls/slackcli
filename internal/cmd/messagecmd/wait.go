@@ -190,8 +190,9 @@ func (c *command) sleepUntil(ctx context.Context, t time.Time) error {
 // fetchAfter returns the messages after the ts after, oldest first: those
 // of the thread rootTS, and those at the top level of the conversation. A
 // page of history holds at most MaxHistoryLimit messages, the newest ones:
-// after a long wait in a busy channel, it pages back with Latest until a
-// page comes back short, so that the first answer is not left out.
+// after a long wait in a busy channel, it pages back with Latest while
+// older messages are left (HasMore), so that the first answer is not left
+// out.
 func fetchAfter(ctx context.Context, loc cmdutil.Located, rootTS, after string, includeReactions bool) ([]messages.Message, error) {
 	all, err := messages.FetchThread(ctx, loc.Client, loc.ChannelID, rootTS, includeReactions)
 	if err != nil {
@@ -209,7 +210,7 @@ func fetchAfter(ctx context.Context, loc cmdutil.Located, rootTS, after string, 
 			return nil, err
 		}
 		all = append(all, page.Messages...)
-		if len(page.Messages) < messages.MaxHistoryLimit {
+		if !page.HasMore || len(page.Messages) == 0 {
 			break
 		}
 		latest = page.Messages[0].TS

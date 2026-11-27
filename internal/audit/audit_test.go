@@ -17,6 +17,19 @@ import (
 	"github.com/maelvls/slackcli/internal/testenv"
 )
 
+// checkPerm checks the Unix permissions of a file or directory. Windows has
+// none: Go reports 0666 or 0777 there whatever the mode given at creation,
+// and the file is private through the ACLs of the user's profile.
+func checkPerm(t *testing.T, what string, info os.FileInfo, want os.FileMode) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		return
+	}
+	if perm := info.Mode().Perm(); perm != want {
+		t.Errorf("%s mode = %o, want %o", what, perm, want)
+	}
+}
+
 // useLog points the log at a fresh file below a directory that does not
 // exist yet, and returns its path.
 func useLog(t *testing.T) string {
@@ -100,12 +113,12 @@ func TestRecordWritesOneSafeLine(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if perm := info.Mode().Perm(); perm != 0o600 {
-		t.Errorf("file mode = %o, want 600", perm)
+	checkPerm(t, "file", info, 0o600)
+	dir, err := os.Stat(filepath.Dir(path))
+	if err != nil {
+		t.Fatal(err)
 	}
-	if dir, err := os.Stat(filepath.Dir(path)); err != nil || dir.Mode().Perm() != 0o700 {
-		t.Errorf("directory: %v, mode %o, want 700", err, dir.Mode().Perm())
-	}
+	checkPerm(t, "directory", dir, 0o700)
 	raw, _ := os.ReadFile(path)
 	for _, secret := range []string{"hello", "secret", "xoxc-1234", "payroll", "thread_ts", "cid="} {
 		if bytes.Contains(raw, []byte(secret)) {
@@ -283,9 +296,7 @@ func TestRotation(t *testing.T) {
 	if cur.Size() > maxSize || rot.Size() > maxSize {
 		t.Errorf("sizes %d and %d, want at most %d", cur.Size(), rot.Size(), maxSize)
 	}
-	if rot.Mode().Perm() != 0o600 {
-		t.Errorf("rotated file mode %o", rot.Mode().Perm())
-	}
+	checkPerm(t, "rotated file", rot, 0o600)
 	// Read sees the rotated part first, and the last line written last.
 	entries, skipped, err := Read(path, zeroTime)
 	if err != nil || skipped != 0 {

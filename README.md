@@ -56,7 +56,7 @@ slackcli
 ├── user      list | search | get | dm-open
 ├── later     list | save | complete | archive | reopen | remove | remind
 ├── unreads
-├── inbox
+├── inbox     wait
 ├── watch
 ├── canvas    create | get | edit
 ├── workflow  list | preview | get | run
@@ -77,7 +77,7 @@ With several workspaces saved, a channel name needs `--workspace <url-or-name>`,
 
 ```bash
 slackcli inbox                      # the last 3 days
-slackcli inbox --since 12h          # or 2d, or 2026-01-31 (UTC)
+slackcli inbox --since 12h          # or 2d, or 2026-01-31 (from 00:00 local time)
 slackcli inbox --no-threads --max-body-chars 120
 ```
 
@@ -106,6 +106,16 @@ slackcli inbox --no-threads --max-body-chars 120
 Items are newest first. `count` and `first_ts` cover the messages from others since your last one there; `ts`, `author`, `text` and `permalink` describe the newest. `thread_ts` is absent for the top level of a DM. `truncated` means there was more to look at than was: more candidates than `--max-conversations` (60), in which case raise it, or more matches than the 200 read from each of the three searches behind the inbox, or a conversation with more than 1000 messages in the window (its item may undercount, or be answered already): for these two only a shorter `--since` helps.
 
 A thread is found through your own posts in it, searched back to two days before `--since`: a thread whose last post of yours is older than that is not listed, however recent its replies, unless one of them mentions you.
+
+To be woken up when something new lands there instead of asking again, `inbox wait` stays connected to Slack's real-time API (one WebSocket, like `watch`), judges each message by the same rules as it arrives, and exits with the items once there is one (after one more search, at least 15 s after it connected, for what Slack's search index had not caught up with yet):
+
+```bash
+slackcli inbox wait                                  # from now on
+slackcli inbox wait --after 1794222538.567359        # what came since, too
+slackcli inbox wait --after "$after" --timeout 2h
+```
+
+It prints `inbox`'s fields plus `after`, the `--after` to pass to the next run (the newest item's `ts`) so that nothing is missed between two runs, and `timed_out: true` with no items when `--timeout` runs out; both exit 0. With `--after`, what came before the command started, and what came while the connection was down, is looked for through the search behind `inbox`. A channel message that neither mentions you nor replies in a thread you posted in costs no API call.
 
 ## Letting a human review
 
@@ -147,7 +157,7 @@ To use a token from a Slack app instead of your own session:
 SLACK_TOKEN=xoxb-... slackcli auth add --workspace-url https://acme.slack.com --from-env
 ```
 
-Your own session can do everything your Slack client can. An app token is limited to its scopes: it cannot use `later`, `unreads`, `watch` or `message draft` (nor, for a bot token, `inbox` and `search`), but it is the only way to run `canvas edit` and `canvas create --channel`.
+Your own session can do what your Slack client can, with one exception so far: `message send --schedule` uses `chat.scheduleMessage`, which Slack documents for app tokens only (when Slack refuses it to your session, nothing is sent and the error says what to do instead). `message scheduled list` and `cancel` work with your session: Slack refuses it `chat.scheduledMessages.list`, so they list and cancel the messages scheduled in your Slack client, which are drafts with a send time (draft IDs, `Dr…`). With an app token they only see what that token scheduled. An app token is limited to its scopes: it cannot use `later`, `unreads`, `watch` or `message draft` (nor, for a bot token, `inbox` and `search`), but it is the only way to run `canvas edit` and `canvas create --channel`.
 
 On Enterprise Grid, Slack refuses a few methods to the session of a workspace (`team_is_restricted`) and usually allows them to the session of the organisation, `https://<org>.enterprise.slack.com`, which `auth import-desktop` saves along with the workspaces. The `message draft` commands use it on their own when one of their calls is refused this way (`drafts.list` and `drafts.delete` are; `drafts.create` is not): the same call is made again with the organisation's session, once `auth.test` has confirmed that it is the organisation of that workspace and the same person. Nothing else is retried this way, and `SLACK_TOKEN` is never swapped for a saved session. For any other command that fails with `team_is_restricted`, pass `--workspace <org>.enterprise.slack.com` to run it as the organisation.
 
@@ -156,7 +166,7 @@ Saved credentials live in `~/.config/slackcli/credentials.json`. On macOS the se
 ## Output
 
 - Results are JSON on stdout, with empty fields removed: on one line, or indented when stdout is a terminal.
-- Warnings and hints are part of the result, in its `warnings` and `hints` arrays, so a successful command that prints JSON writes nothing on stderr and `slackcli … 2>&1 | jq` still parses. Stderr gets the error of a command that failed (and the warnings that came before it), the notes of the few `auth` commands that print text, the connection notes of `watch` (a stream, not one result), and, when it is a terminal, the progress of `message compose` while it waits for a human. An error is not JSON: keep stderr apart (`2>err.txt`) and check the exit code before parsing.
+- Warnings and hints are part of the result, in its `warnings` and `hints` arrays, and most successful commands write nothing on stderr. Stderr gets the error of a command that failed (and the warnings that came before it), the notes of the few `auth` commands that print text, the notes of the long-running commands while they wait (`watch`, a stream rather than one result, and `inbox wait`: connections and reconnections; `message wait`: Slack unreachable and back), and, when it is a terminal, the progress of `message compose` while it waits for a human. An error is not JSON: never `2>&1 | jq`; keep stderr apart (`2>err.txt`) and check the exit code before parsing.
 - Messages have `ts`, which identifies them, and `time`, the same instant as a local date and time.
 - A list command always prints its list, `[]` when empty, and `next_cursor` when there is more (pass it to `--cursor`).
 - Files attached to messages are downloaded to the cache directory and listed with their local `path`. A file that Slack does not host, such as a Google Docs link, is listed with `"external": true` and its `url` instead. `--no-download` (`message get`, `message list`, `search`) lists them without downloading anything.
@@ -211,8 +221,8 @@ $ tail -f "$(slackcli audit path)"
 | `SLACK_COOKIE_D` | The browser `d` cookie (`xoxd-…`), needed with an `xoxc-` token. |
 | `SLACK_WORKSPACE_URL` | Default for `--workspace`. |
 | `SLACKCLI_SAFE_MODE` | Turns safe mode on. |
-| `SLACKCLI_COMMAND_TIMEOUT_MS` | Time limit of a command (default 30000). `message compose` and uploads have none. |
-| `SLACKCLI_API_TIMEOUT_MS` | Time limit of one Slack request (default 20000). |
+| `SLACKCLI_COMMAND_TIMEOUT_MS` | Time limit of a command (default 30000). `watch`, `inbox wait`, `message wait`, `message compose` and uploads (`message send --attach`, `message draft create/update --attach`) have none. |
+| `SLACKCLI_API_TIMEOUT_MS` | Time limit of one Slack request (default 20000). An upload fails when no byte of the file is sent for that long, or when no answer comes within 2 minutes (or that long, if longer) after the last one. |
 | `SLACKCLI_RATE_LIMIT_MAX_WAIT_MS` | How long to wait and retry when Slack rate-limits (default 0: fail at once). |
 | `SLACKCLI_KEYCHAIN_TIMEOUT_MS` | Time limit of a macOS keychain call (default 3000). |
 | `SLACKCLI_DEBUG` | Set to 1 to trace every Slack call and wait on stderr, with durations (see [Output](#output)). |
@@ -228,9 +238,8 @@ The workspaces saved by agent-slack are copied over on the first run, and the ol
 ## Development
 
 ```bash
-go build ./...
-go vet ./...
-go test ./...
+make check      # what CI runs: gofmt, vet, tests with -race, linux/darwin/windows builds
+make vulncheck  # govulncheck; CI runs it weekly and when go.mod changes
 ```
 
 Tests never talk to Slack. One package per command lives in `internal/cmd`, the Slack logic in `internal/slack`, and the API client in `internal/slackapi`.

@@ -37,7 +37,8 @@ Slackbot, system messages and the DM with yourself are ignored.
 
 Prints JSON:
   user_id    you
-  since      start of the window, in UTC
+  since      start of the window, in UTC (a --since day starts at local
+             midnight, so east of UTC this reads as the evening before)
   truncated  true when there was more to look at than was looked at: more
              candidates than --max-conversations (raise it), or more
              matches than the 200 read from each search, or a
@@ -64,7 +65,9 @@ to see whether it still waits. Nothing is marked as read.
 
 The search goes back to two days before --since, for your own thread posts
 too: a thread whose last post of yours is older than that is not found,
-however recent its replies, unless one of them mentions you.`,
+however recent its replies, unless one of them mentions you.
+
+To wait until something new comes instead of asking again: "inbox wait".`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			start, err := inbox.ParseSince(since, time.Now())
@@ -74,8 +77,8 @@ however recent its replies, unless one of them mentions you.`,
 			if err := cmdutil.CheckMaxChars("--max-body-chars", maxBodyChars); err != nil {
 				return err
 			}
-			if maxConversations < 1 {
-				return fmt.Errorf("invalid --max-conversations value %d: must be a positive integer", maxConversations)
+			if err := checkMaxConversations(maxConversations); err != nil {
+				return err
 			}
 			ctx := cmd.Context()
 			ws := rt.EffectiveWorkspace(workspace)
@@ -98,9 +101,18 @@ however recent its replies, unless one of them mentions you.`,
 		},
 	}
 	clictx.AddWorkspaceFlag(cmd, &workspace)
-	cmd.Flags().StringVar(&since, "since", inbox.DefaultSince, "Start of the window: a number of days or hours (3d, 12h), or a day (2026-01-31, from 00:00 UTC)")
+	cmd.Flags().StringVar(&since, "since", inbox.DefaultSince, "Start of the window: a number of days or hours (3d, 12h), or a day (2026-01-31, from 00:00 local time)")
 	cmd.Flags().IntVar(&maxBodyChars, "max-body-chars", inbox.DefaultMaxBodyChars, "Max text characters per item (-1 for unlimited)")
 	cmd.Flags().IntVar(&maxConversations, "max-conversations", inbox.DefaultMaxConversations, "Max conversations and threads to inspect, the most recently active first; when there are more, truncated is true")
 	cmd.Flags().BoolVar(&noThreads, "no-threads", false, "Leave out the new replies in threads you posted in (kind thread)")
+	cmd.AddCommand(newWait(rt))
 	return cmd
+}
+
+// checkMaxConversations rejects a --max-conversations below 1.
+func checkMaxConversations(n int) error {
+	if n < 1 {
+		return fmt.Errorf("invalid --max-conversations value %d: must be a positive integer", n)
+	}
+	return nil
 }
