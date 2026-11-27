@@ -104,10 +104,17 @@ func (h *harness) serve(method string, params map[string]any) map[string]any {
 	case "search.modules.people":
 		// Browser credentials look an email up with the people search,
 		// whose items have no email, then users.info.
+		if params["query"] == "dan@example.com" {
+			// Dan's email Slack hides: users.info has none.
+			return map[string]any{"items": []any{map[string]any{"id": "U000000789", "username": "dan"}}}
+		}
 		return map[string]any{"items": []any{map[string]any{"id": "U000000456", "username": "carol"}}}
 	case "users.info":
 		if params["user"] == "U000000456" {
 			return map[string]any{"user": map[string]any{"id": "U000000456", "name": "carol", "profile": map[string]any{"email": "carol@example.com"}}}
+		}
+		if params["user"] == "U000000789" {
+			return map[string]any{"user": map[string]any{"id": "U000000789", "name": "dan", "profile": map[string]any{"real_name": "Dan D"}}}
 		}
 	case "search.messages":
 		return map[string]any{"messages": map[string]any{"matches": []any{map[string]any{"channel": map[string]any{"id": "C000000001", "name": "general"}}}}}
@@ -471,6 +478,26 @@ func TestInvite(t *testing.T) {
 	want := map[string]any{"channel_id": "C000000001", "invited_user_ids": []any{"U000000001", "U000000123", "U000000456"}}
 	if !reflect.DeepEqual(out, want) {
 		t.Errorf("printed %s", h.stdout)
+	}
+}
+
+// TestInviteRefusesAnUnverifiedEmailMatch: "user get" shows the one
+// member the people search finds for an email that Slack hides on that
+// member, but nobody is invited on the search's word alone.
+func TestInviteRefusesAnUnverifiedEmailMatch(t *testing.T) {
+	h := newHarness(t)
+	out, err := h.run("invite", "--channel", "C000000001", "--users", "dan@example.com")
+	if err == nil || !strings.Contains(err.Error(), "could not resolve") {
+		t.Errorf("err = %v", err)
+	}
+	if n := len(h.only("conversations.invite")); n != 0 {
+		t.Errorf("conversations.invite calls = %d, want 0", n)
+	}
+	if !reflect.DeepEqual(out["unresolved_users"], []any{"dan@example.com"}) {
+		t.Errorf("printed %s", h.stdout)
+	}
+	if w := fmt.Sprint(out["warnings"]); !strings.Contains(w, "cannot be checked") || !strings.Contains(w, "U000000789") {
+		t.Errorf("warnings = %q, want why dan is unresolved, with the candidate's ID", w)
 	}
 }
 

@@ -330,7 +330,7 @@ func postBytes(ctx context.Context, client *slackapi.Client, uploadURL string, b
 	// would pass for a successful upload, and cannot replay a streamed
 	// body (307, 308).
 	hc := *client.HTTPClient()
-	hc.Transport = audit.Transport(hc.Transport, "files.upload")
+	hc.Transport = audit.Transport(hc.Transport, "files.upload", false)
 	hc.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
 	resp, err := hc.Do(req)
 	if err != nil && errors.Is(context.Cause(ctx), errStalled) {
@@ -371,8 +371,14 @@ func postBytes(ctx context.Context, client *slackapi.Client, uploadURL string, b
 }
 
 // errStalled is the cause of the cancellation of an upload whose
-// connection made no progress for the stall timeout.
-var errStalled = errors.New("upload stalled")
+// connection made no progress for the stall timeout. It is a timeout
+// (audit.ErrorClass logs the request as one, not as cancelled).
+var errStalled error = stallCause{}
+
+type stallCause struct{}
+
+func (stallCause) Error() string { return "upload stalled" }
+func (stallCause) Timeout() bool { return true }
 
 // stallTimeout is how long an upload may go without progress: the time
 // limit of one Slack request (slackapi.APITimeout). A variable for tests.

@@ -3,6 +3,7 @@ package root
 import (
 	"errors"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -60,9 +61,11 @@ func TestWarningsAreInTheResultNotOnStderr(t *testing.T) {
 // before the timeout and while cleaning up after it, goes to stderr, once.
 func TestTimeoutFlushesTheWarnings(t *testing.T) {
 	t.Setenv(appinfo.EnvName("COMMAND_TIMEOUT_MS"), "40")
+	var warned atomic.Bool
 	build := func(rt *clictx.Context) []*cobra.Command {
 		return []*cobra.Command{{Use: "slow", RunE: func(cmd *cobra.Command, _ []string) error {
 			rt.Warnf("said before the timeout")
+			warned.Store(true)
 			<-cmd.Context().Done()
 			// The cleanup the grace period is for.
 			rt.Warnf("the uploaded file F1 could not be deleted")
@@ -70,7 +73,7 @@ func TestTimeoutFlushesTheWarnings(t *testing.T) {
 			return cmd.Context().Err()
 		}}}
 	}
-	got := runWith(t, 5*time.Second, build, "slow")
+	got := runRunner(t, runner{commands: build, grace: 5 * time.Second, elapsed: expiresOnceStarted(&warned)}, "slow")
 	if got.code != ExitTimeout || got.stdout != "" {
 		t.Fatalf("%+v", got)
 	}

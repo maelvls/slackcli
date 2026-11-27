@@ -409,12 +409,14 @@ func (c *Client) callOnce(ctx context.Context, method string, params map[string]
 		if code, _ := resp["error"].(string); IsRateLimitCode(code) && resp["ok"] != true {
 			// The rate limit a handler answers in the body, as Slack
 			// may: the same error as an HTTP 429 (see the loop below).
+			retryAfter := parseRetryAfter("")
+			rec.markRateLimited(retryAfter)
 			rec.done(0, resp, code)
-			return nil, &RateLimitError{Method: method, RetryAfter: parseRetryAfter(""), MaxWait: RateLimitMaxWait(), API: newAPIError(method, resp)}
+			return nil, &RateLimitError{Method: method, RetryAfter: retryAfter, MaxWait: RateLimitMaxWait(), API: newAPIError(method, resp)}
 		}
 		if ok, present := resp["ok"]; present && ok != true {
 			apiErr := newAPIError(method, resp)
-			rec.done(0, resp, apiErr.Code)
+			rec.done(0, resp, failureCode(apiErr.Code))
 			return nil, apiErr
 		}
 		rec.done(0, resp, "")
@@ -444,8 +446,10 @@ func (c *Client) callOnce(ctx context.Context, method string, params map[string]
 		status, header, body, err := c.post(ctx, endpoint, fields, multi, timeout)
 		if err != nil {
 			if ctx.Err() != nil {
+				// "timeout" when the caller's deadline expired,
+				// "cancelled" when it gave up.
 				span.Fail("cancelled: " + ctx.Err().Error())
-				rec.done(0, nil, "cancelled")
+				rec.done(0, nil, audit.ErrorClass(ctx, err))
 				return nil, ctx.Err()
 			}
 			var ne interface{ Timeout() bool }
@@ -481,10 +485,18 @@ func (c *Client) callOnce(ctx context.Context, method string, params map[string]
 		_ = json.Unmarshal(body, &data)
 		code, _ := data["error"].(string)
 		switch {
+		case code == RateLimitedCode && data["ok"] != true:
+			// Retried below like an HTTP 429, and logged like one.
+			rec.markRateLimited(parseRetryAfter(header.Get("Retry-After")))
+			rec.done(status, data, code)
 		case data == nil && (status < 200 || status > 299):
 			rec.done(status, nil, "http_status")
 		case data == nil:
 			rec.done(status, nil, "not_json")
+		case data["ok"] != true:
+			// An "ok" that is false, missing ({}) or not a boolean
+			// ("false"): the call fails below.
+			rec.done(status, data, failureCode(code))
 		default:
 			rec.done(status, data, code)
 		}
@@ -571,6 +583,13 @@ func (c *Client) auditEntry(method, target string, attempt int) *auditCall {
 	}}
 }
 
+// markRateLimited marks the line as that of an attempt that Slack rate
+// limited and asked to retry after retryAfter, for done to write.
+func (a *auditCall) markRateLimited(retryAfter time.Duration) {
+	a.entry.RateLimited = true
+	a.entry.RetryAfterS = retryAfter.Seconds()
+}
+
 // done writes the line of an attempt that got the HTTP status (0 when
 // there was no answer, or the call was served by a Handler), the answer
 // data (nil when it had none) and the error code (Slack's, or how the
@@ -583,6 +602,16 @@ func (a *auditCall) done(status int, data map[string]any, code string) {
 	}
 	a.entry.Error = code
 	audit.Record(a.entry)
+}
+
+// failureCode is the audit error code of an answer that was rejected
+// with Slack's code, which may be empty (an answer whose "ok" is missing,
+// or not a boolean): "not_ok" then, so that the line counts as a failure.
+func failureCode(code string) string {
+	if code == "" {
+		return "not_ok"
+	}
+	return code
 }
 
 // rateLimited writes the line of an attempt that Slack answered with HTTP

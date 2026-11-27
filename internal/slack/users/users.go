@@ -23,8 +23,13 @@ type CompactUser struct {
 	RealName    string `json:"real_name,omitempty"`
 	DisplayName string `json:"display_name,omitempty"`
 	Email       string `json:"email,omitempty"`
-	Title       string `json:"title,omitempty"`
-	TZ          string `json:"tz,omitempty"`
+	// EmailVerified is false when the user was looked up by an email
+	// address that Slack hides on this member, so that nothing confirmed
+	// the address (see GetUserOptions.AllowUnverifiedEmail); nil, and not
+	// printed, otherwise.
+	EmailVerified *bool  `json:"email_verified,omitempty"`
+	Title         string `json:"title,omitempty"`
+	TZ            string `json:"tz,omitempty"`
 	// IsBot and Deleted are nil when Slack did not say.
 	IsBot   *bool `json:"is_bot,omitempty"`
 	Deleted *bool `json:"deleted,omitempty"`
@@ -238,16 +243,33 @@ func dmChannels(ctx context.Context, client *slackapi.Client) map[string]string 
 	}
 }
 
+// GetUserOptions changes what GetUser accepts.
+type GetUserOptions struct {
+	// AllowUnverifiedEmail accepts, for an email address that browser
+	// credentials look up with Slack's people search, the one member the
+	// search finds and nobody else, when users.info hides that member's
+	// email so that the address cannot be confirmed (the lookup is
+	// otherwise an *AmbiguousError). The user is then returned with
+	// EmailVerified set to false. It is for showing a user, never for
+	// acting on one: ResolveUserID, ResolveUserIDs and
+	// GetDMChannelForUsers do not accept such a match.
+	AllowUnverifiedEmail bool
+}
+
 // GetUser returns one user, given a user ID, an email address, a
 // "@handle" or a display name (see ResolveUserID).
-func GetUser(ctx context.Context, client *slackapi.Client, input string) (CompactUser, error) {
-	found, err := lookupAll(ctx, client, []string{input})
+func GetUser(ctx context.Context, client *slackapi.Client, input string, opts GetUserOptions) (CompactUser, error) {
+	found, err := lookupAll(ctx, client, []string{input}, lookupOptions{unverifiedEmail: opts.AllowUnverifiedEmail})
 	if err != nil {
 		return CompactUser{}, err
 	}
 	// A lookup by email or by directory scan already has the whole user.
 	if found[0].raw != nil {
-		return ToCompactUser(found[0].raw), nil
+		u := ToCompactUser(found[0].raw)
+		if found[0].unverified {
+			u.EmailVerified = new(bool)
+		}
+		return u, nil
 	}
 	resp, err := client.API(ctx, "users.info", map[string]any{"user": found[0].id})
 	if err != nil {
@@ -298,7 +320,7 @@ func GetDMChannelForUsers(ctx context.Context, client *slackapi.Client, inputs [
 		return DMChannel{}, fmt.Errorf("Slack supports a maximum of %d users in a group DM (got %d)", maxGroupDMUsers, len(wanted))
 	}
 
-	found, err := lookupAll(ctx, client, wanted)
+	found, err := lookupAll(ctx, client, wanted, lookupOptions{})
 	if err != nil {
 		return DMChannel{}, err
 	}

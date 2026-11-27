@@ -100,6 +100,10 @@ var members = []any{
 	map[string]any{"id": "U000000003", "name": "bob", "real_name": "Bob B", "is_bot": false, "deleted": false},
 }
 
+// hiddenEmail is a member whose email Slack hides: users.info gives none.
+var hiddenEmail = map[string]any{"id": "U000000004", "name": "carol", "real_name": "Carol C", "is_bot": false, "deleted": false,
+	"profile": map[string]any{"title": "Maintainer"}}
+
 // serve is a three-member workspace in which the caller has a DM with
 // alice.
 func serve(method string, params map[string]any) map[string]any {
@@ -118,7 +122,19 @@ func serve(method string, params map[string]any) map[string]any {
 		return resp
 	case "conversations.list":
 		return map[string]any{"channels": []any{map[string]any{"id": "D000000001", "user": "U000000001"}}}
+	case "search.modules.people":
+		// Browser credentials look an email up with the people search,
+		// which finds carol for her address, and Slack hides her email
+		// (users.info has none), as it does for many members.
+		if params["query"] == "carol@example.com" {
+			return map[string]any{"items": []any{map[string]any{"id": hiddenEmail["id"], "username": "carol"}}}
+		}
+		// Not served otherwise: "user search" scans the directory.
+		return map[string]any{"ok": false, "error": "unknown_method"}
 	case "users.info":
+		if params["user"] == hiddenEmail["id"] {
+			return map[string]any{"user": hiddenEmail}
+		}
 		for _, m := range members {
 			if m.(map[string]any)["id"] == params["user"] {
 				return map[string]any{"user": m}
@@ -315,5 +331,43 @@ func TestHelp(t *testing.T) {
 	list, _, _ := cmd.Find([]string{"list"})
 	if got := list.Flag("limit").DefValue; got != "200" {
 		t.Errorf("--limit default = %s, want 200", got)
+	}
+}
+
+// TestGetUnverifiedEmail: the one member the people search finds for an
+// email that Slack hides on that member is printed by "user get", marked
+// as unverified, and refused by "user dm-open".
+func TestGetUnverifiedEmail(t *testing.T) {
+	h := newHarness(t)
+	out, err := h.run("get", "carol@example.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	hints := out["hints"]
+	delete(out, "hints")
+	want := map[string]any{"id": "U000000004", "name": "carol", "real_name": "Carol C", "title": "Maintainer", "is_bot": false, "deleted": false, "email_verified": false}
+	if !reflect.DeepEqual(out, want) {
+		t.Errorf("printed %s", h.stdout)
+	}
+	if hs, _ := hints.([]any); len(hs) != 1 || !strings.Contains(hs[0].(string), "Slack hides this member's email") ||
+		!strings.Contains(hs[0].(string), "people search only, not confirmed by users.info") {
+		t.Errorf("hints = %v", hints)
+	}
+
+	// A confirmed user has neither the marker nor the hint.
+	out, err = h.run("get", "U000000001")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := out["email_verified"]; ok || out["hints"] != nil {
+		t.Errorf("confirmed user: printed %s", h.stdout)
+	}
+
+	out, err = h.run("dm-open", "carol@example.com")
+	if err == nil || !strings.Contains(err.Error(), "cannot be checked") || !strings.Contains(err.Error(), "U000000004") || out != nil {
+		t.Errorf("dm-open: printed %v, err = %v", out, err)
+	}
+	if n := len(h.only("conversations.open")); n != 0 {
+		t.Errorf("dm-open: conversations.open calls = %d, want 0", n)
 	}
 }
