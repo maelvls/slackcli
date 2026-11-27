@@ -663,6 +663,15 @@ func TestParseSince(t *testing.T) {
 			t.Errorf("ParseSince(%q) = %v, %v; want %s", input, got, err, want)
 		}
 	}
+	// A day starts at midnight in now's location (the local time zone for
+	// time.Now()), not at midnight UTC.
+	paris, err := time.LoadLocation("Europe/Paris")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, err := ParseSince("2026-01-31", now.In(paris)); err != nil || got.UTC().Format(time.RFC3339) != "2026-01-30T23:00:00Z" {
+		t.Errorf("ParseSince in Paris = %v, %v; want 2026-01-30T23:00:00Z", got, err)
+	}
 	for _, input := range []string{"", "3 days", "3w", "-3d", "2026-13-45", "2026-11-07T10:00", "99999999999999999999d", "9999999999h", "200000d", "36501d", "876001h"} {
 		if _, err := ParseSince(input, now); err == nil || !strings.Contains(err.Error(), "invalid --since value") {
 			t.Errorf("ParseSince(%q) = %v, want an error", input, err)

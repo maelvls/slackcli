@@ -22,7 +22,13 @@ a @handle (the "@" is optional), or the exact display name or real name of
 a single member. A handle is found with one message search when that member
 posted in a conversation you can see (not with a bot token). Otherwise, and
 for names, the whole user directory is scanned, which is slow in large
-workspaces and fails (rate limited) in huge ones: prefer IDs or emails.`
+workspaces and fails (rate limited) in huge ones: prefer IDs or emails.
+An email is looked up in one call (users.lookupByEmail; with browser
+credentials, which may not use it, Slack's people search, each match
+confirmed by its email with users.info). Several members matching an email
+is an error that lists them. An email that no active member has is looked
+for among deactivated members in the directory, given up on after 5000
+members (unless the command timeout is off).`
 
 // New returns the "user" command.
 func New(rt *clictx.Context) *cobra.Command {

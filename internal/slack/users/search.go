@@ -81,7 +81,7 @@ func SearchUsers(ctx context.Context, client *slackapi.Client, query string, lim
 			// among active members.
 			found.IsBot, found.Deleted = nil, nil
 			return SearchResult{Users: []CompactUser{found}, Total: 1}, nil
-		case err != nil && (enrich.MustAbortRequired(ctx, err) || rateLimited(err) || slackapi.IsTransient(err)):
+		case err != nil && (enrich.MustAbortRequired(ctx, err) || slackapi.IsTransient(err)):
 			// Slack did not answer, even asked again: searching the text
 			// or scanning the directory would hide that, and spend what
 			// is left of the command's time.
@@ -197,7 +197,7 @@ func searchDirectory(ctx context.Context, client *slackapi.Client, terms []strin
 		}
 		resp, err := client.API(ctx, "users.list", params)
 		if err != nil {
-			if pages > 0 && rateLimited(err) {
+			if pages > 0 && enrich.IsRateLimit(err) {
 				result.Warnings = append(result.Warnings, fmt.Sprintf(
 					"the user directory was scanned (%s) and the scan stopped early, the rest of the members were not looked at: %v", why, err))
 				break
@@ -305,11 +305,4 @@ func foldForSearch(s string) string {
 		}
 	}
 	return b.String()
-}
-
-// rateLimited reports whether err is Slack rate limiting a call: an HTTP
-// 429 (enrich.IsRateLimit), or the "ratelimited" error code that some
-// methods answer in the body of an HTTP 200.
-func rateLimited(err error) bool {
-	return enrich.IsRateLimit(err) || slackapi.IsErrorCode(err, enrich.RateLimitedCode)
 }

@@ -127,6 +127,56 @@ func TestRateLimitFailsFastByDefault(t *testing.T) {
 	}
 }
 
+// Some methods answer a rate limit with an HTTP 200 and the "ratelimited"
+// code: it is the same *RateLimitError as an HTTP 429, which still carries
+// the code, and it is waited for and retried the same way.
+func TestRateLimitedCodeIsARateLimit(t *testing.T) {
+	t.Setenv("SLACKCLI_RATE_LIMIT_MAX_WAIT_MS", "")
+	t.Setenv("AGENT_SLACK_RATE_LIMIT_MAX_WAIT_MS", "")
+	calls := 0
+	var delays []time.Duration
+	c := browserClient(t, func(w http.ResponseWriter, _ *http.Request) {
+		calls++
+		if calls == 1 {
+			w.Header().Set("Retry-After", "3")
+		}
+		if calls <= 2 {
+			_, _ = io.WriteString(w, `{"ok":false,"error":"ratelimited"}`)
+			return
+		}
+		_, _ = io.WriteString(w, `{"ok":true}`)
+	}, WithSleep(func(_ context.Context, d time.Duration) error { delays = append(delays, d); return nil }))
+
+	// Fails fast by default, with the wait Slack asked for.
+	_, err := c.API(context.Background(), "users.list", nil)
+	var rl *RateLimitError
+	if !errors.As(err, &rl) || rl.Method != "users.list" || rl.RetryAfter != 3*time.Second || !IsErrorCode(err, RateLimitedCode) || !IsTransient(err) {
+		t.Fatalf("err = %v", err)
+	}
+	if rl.API == nil || rl.API.Status != http.StatusOK {
+		t.Errorf("API = %+v", rl.API)
+	}
+	if calls != 1 || len(delays) != 0 {
+		t.Errorf("%d calls, waited %v", calls, delays)
+	}
+
+	// Retried when the caller allows the wait: without a Retry-After, as
+	// for an HTTP 429, after 5s.
+	t.Setenv("SLACKCLI_RATE_LIMIT_MAX_WAIT_MS", "30000")
+	resp, err := c.API(context.Background(), "users.list", nil)
+	if err != nil || resp["ok"] != true || calls != 3 || len(delays) != 1 || delays[0] != 5*time.Second {
+		t.Fatalf("resp=%v err=%v calls=%d delays=%v", resp, err, calls, delays)
+	}
+
+	// The same from a handler (NewFake), which tests use.
+	fake := NewFake(func(context.Context, string, map[string]any) (map[string]any, error) {
+		return map[string]any{"ok": false, "error": "ratelimited"}, nil
+	})
+	if _, err := fake.API(context.Background(), "conversations.info", nil); !errors.As(err, &rl) || rl.Method != "conversations.info" || !IsErrorCode(err, RateLimitedCode) {
+		t.Errorf("fake: err = %v", err)
+	}
+}
+
 func TestTimeout(t *testing.T) {
 	t.Setenv("SLACKCLI_API_TIMEOUT_MS", "30")
 	// The handler hangs until the test is over. The request's context is
