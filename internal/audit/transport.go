@@ -155,8 +155,17 @@ func retryAfterSeconds(h string, now time.Time) float64 {
 }
 
 // ErrorClass names the way a request that got no answer failed:
-// "cancelled", "timeout" or "network".
+// "cancelled", "timeout" or "network". A request whose context was
+// cancelled because of a timeout, given as the cause of the cancellation
+// (context.WithCancelCause, as a stall watchdog does), is a "timeout": the
+// cause is one when it is context.DeadlineExceeded itself or has a Timeout
+// method that returns true. The cause itself, not what it wraps: a request
+// cancelled because another one failed with a timeout (a fan-out cancels
+// the others with the first error) was cancelled, not timed out.
 func ErrorClass(ctx context.Context, err error) string {
+	if ctx.Err() != nil && isTimeoutCause(context.Cause(ctx)) {
+		return "timeout"
+	}
 	var ne interface{ Timeout() bool }
 	switch {
 	case errors.Is(ctx.Err(), context.Canceled) || errors.Is(err, context.Canceled):
@@ -165,4 +174,14 @@ func ErrorClass(ctx context.Context, err error) string {
 		return "timeout"
 	}
 	return "network"
+}
+
+// isTimeoutCause tells whether cause, that of a cancellation, is itself a
+// timeout (see ErrorClass).
+func isTimeoutCause(cause error) bool {
+	if cause == context.DeadlineExceeded {
+		return true
+	}
+	t, ok := cause.(interface{ Timeout() bool })
+	return ok && t.Timeout()
 }

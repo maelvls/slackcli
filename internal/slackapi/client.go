@@ -407,8 +407,10 @@ func (c *Client) callOnce(ctx context.Context, method string, params map[string]
 		if code, _ := resp["error"].(string); code == RateLimitedCode && resp["ok"] != true {
 			// The rate limit a handler answers in the body, as Slack
 			// may: the same error as an HTTP 429 (see the loop below).
+			retryAfter := parseRetryAfter("")
+			rec.markRateLimited(retryAfter)
 			rec.done(0, resp, code)
-			return nil, &RateLimitError{Method: method, RetryAfter: parseRetryAfter(""), MaxWait: RateLimitMaxWait(), API: newAPIError(method, resp)}
+			return nil, &RateLimitError{Method: method, RetryAfter: retryAfter, MaxWait: RateLimitMaxWait(), API: newAPIError(method, resp)}
 		}
 		if ok, present := resp["ok"]; present && ok != true {
 			apiErr := newAPIError(method, resp)
@@ -481,6 +483,10 @@ func (c *Client) callOnce(ctx context.Context, method string, params map[string]
 		_ = json.Unmarshal(body, &data)
 		code, _ := data["error"].(string)
 		switch {
+		case code == RateLimitedCode && data["ok"] != true:
+			// Retried below like an HTTP 429, and logged like one.
+			rec.markRateLimited(parseRetryAfter(header.Get("Retry-After")))
+			rec.done(status, data, code)
 		case data == nil && (status < 200 || status > 299):
 			rec.done(status, nil, "http_status")
 		case data == nil:
@@ -570,6 +576,13 @@ func (c *Client) auditEntry(method, target string, attempt int) *auditCall {
 		Method:  method,
 		Attempt: attempt,
 	}}
+}
+
+// markRateLimited marks the line as that of an attempt that Slack rate
+// limited and asked to retry after retryAfter, for done to write.
+func (a *auditCall) markRateLimited(retryAfter time.Duration) {
+	a.entry.RateLimited = true
+	a.entry.RetryAfterS = retryAfter.Seconds()
 }
 
 // done writes the line of an attempt that got the HTTP status (0 when
