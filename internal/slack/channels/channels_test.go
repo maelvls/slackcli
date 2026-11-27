@@ -192,9 +192,24 @@ func TestListViaCountsDegradesWhenRateLimited(t *testing.T) {
 	for i := range 40 {
 		entries = append(entries, map[string]any{"id": fmt.Sprintf("C%09d", i)})
 	}
-	rec := countsRecorder(map[string]any{"channels": entries}, func(string) (map[string]any, error) {
-		return nil, &slackapi.RateLimitError{Method: "conversations.info", RetryAfter: time.Minute}
-	})
+	for name, limit := range map[string]func(string) (map[string]any, error){
+		"HTTP 429": func(string) (map[string]any, error) {
+			return nil, &slackapi.RateLimitError{Method: "conversations.info", RetryAfter: time.Minute}
+		},
+		// The rate limit some methods answer in the body of an HTTP 200.
+		"ratelimited code": func(string) (map[string]any, error) { return apiError("ratelimited"), nil },
+	} {
+		t.Run(name, func(t *testing.T) { testListViaCountsDegradesWhenRateLimited(t, entries, limit) })
+	}
+
+	rec := countsRecorder(map[string]any{"channels": entries}, func(string) (map[string]any, error) { return apiError("token_expired"), nil })
+	if _, err := ListViaCounts(context.Background(), rec.client(), ListOptions{Limit: 100}); !slackapi.IsAuthError(err) {
+		t.Errorf("err = %v, want an auth error so that credentials get refreshed", err)
+	}
+}
+
+func testListViaCountsDegradesWhenRateLimited(t *testing.T, entries []any, limit func(string) (map[string]any, error)) {
+	rec := countsRecorder(map[string]any{"channels": entries}, limit)
 	page, err := ListViaCounts(context.Background(), rec.client(), ListOptions{Limit: 100})
 	if err != nil {
 		t.Fatalf("err = %v, want the conversations by ID", err)
@@ -212,11 +227,6 @@ func TestListViaCountsDegradesWhenRateLimited(t *testing.T) {
 	// set: it is named once.
 	if n := strings.Count(page.Warnings[0], appinfo.EnvName("RATE_LIMIT_MAX_WAIT_MS")); n != 1 {
 		t.Errorf("the warning names the variable %d times, want once: %q", n, page.Warnings[0])
-	}
-
-	rec = countsRecorder(map[string]any{"channels": entries}, func(string) (map[string]any, error) { return apiError("token_expired"), nil })
-	if _, err := ListViaCounts(context.Background(), rec.client(), ListOptions{Limit: 100}); !slackapi.IsAuthError(err) {
-		t.Errorf("err = %v, want an auth error so that credentials get refreshed", err)
 	}
 }
 
@@ -362,6 +372,8 @@ func TestLookupNameReportsErrors(t *testing.T) {
 		"rate limit": func(method string) (map[string]any, error) {
 			return nil, &slackapi.RateLimitError{Method: method, RetryAfter: time.Minute}
 		},
+		// The rate limit some methods answer in the body of an HTTP 200.
+		"ratelimited code": func(string) (map[string]any, error) { return apiError("ratelimited"), nil },
 	}
 	for name, failure := range fail {
 		for _, failing := range []string{"conversations.info", "users.info"} {
@@ -372,7 +384,7 @@ func TestLookupNameReportsErrors(t *testing.T) {
 				return im, nil
 			}}
 			got, err := LookupName(context.Background(), rec.client(), "D123456789")
-			if got != "" || err == nil || slackapi.IsAuthError(err) != (name == "auth") || enrich.IsRateLimit(err) != (name == "rate limit") {
+			if got != "" || err == nil || slackapi.IsAuthError(err) != (name == "auth") || enrich.IsRateLimit(err) != (name != "auth") {
 				t.Errorf("%s on %s: got %q, %v", name, failing, got, err)
 			}
 			if got := ResolveName(context.Background(), rec.client(), "D123456789"); got != "D123456789" {
@@ -682,22 +694,29 @@ func TestResolveIDErrors(t *testing.T) {
 		}
 	})
 
-	t.Run("rate limit while listing", func(t *testing.T) {
-		rec := &recorder{serve: func(method string, _ map[string]any) (map[string]any, error) {
-			if method == "search.messages" {
-				return map[string]any{}, nil
+	for _, coded := range []bool{false, true} {
+		t.Run(fmt.Sprintf("rate limit while listing, ratelimited code: %v", coded), func(t *testing.T) {
+			rec := &recorder{serve: func(method string, _ map[string]any) (map[string]any, error) {
+				switch {
+				case method == "search.messages":
+					return map[string]any{}, nil
+				case coded:
+					// The rate limit some methods answer in the body
+					// of an HTTP 200.
+					return apiError("ratelimited"), nil
+				}
+				return nil, &slackapi.RateLimitError{Method: method, RetryAfter: 30 * time.Second}
+			}}
+			_, err := ResolveID(ctx, rec.client(), "general")
+			var rl *slackapi.RateLimitError
+			if !errors.As(err, &rl) {
+				t.Errorf("err = %v, want a rate limit error", err)
 			}
-			return nil, &slackapi.RateLimitError{Method: method, RetryAfter: 30 * time.Second}
-		}}
-		_, err := ResolveID(ctx, rec.client(), "general")
-		var rl *slackapi.RateLimitError
-		if !errors.As(err, &rl) {
-			t.Errorf("err = %v, want a rate limit error", err)
-		}
-		if !reflect.DeepEqual(rec.methods(), []string{"search.messages", "users.conversations"}) {
-			t.Errorf("methods = %v", rec.methods())
-		}
-	})
+			if !reflect.DeepEqual(rec.methods(), []string{"search.messages", "users.conversations"}) {
+				t.Errorf("methods = %v", rec.methods())
+			}
+		})
+	}
 
 	t.Run("a cursor that does not advance ends the scan", func(t *testing.T) {
 		rec := &recorder{serve: func(string, map[string]any) (map[string]any, error) {

@@ -500,47 +500,53 @@ func TestFetchDegradesWhenRateLimited(t *testing.T) {
 		counted = append(counted, map[string]any{"id": fmt.Sprintf("C%d", i), "has_unreads": true, "last_read": "1.000001", "mention_count": float64(i)})
 	}
 	for _, limited := range []string{"conversations.history", "conversations.info"} {
-		t.Run(limited, func(t *testing.T) {
-			var mu sync.Mutex
-			calls := map[string]int{}
-			client := slackapi.NewFake(func(_ context.Context, method string, params map[string]any) (map[string]any, error) {
-				mu.Lock()
-				calls[method]++
-				mu.Unlock()
-				switch {
-				case method == "client.counts":
-					return map[string]any{"channels": counted}, nil
-				case method == limited:
-					return nil, &slackapi.RateLimitError{Method: method, RetryAfter: time.Minute}
-				case method == "conversations.info":
-					return map[string]any{"channel": map[string]any{"name": "name-" + params["channel"].(string)}}, nil
+		// An HTTP 429, or the "ratelimited" code in the body of an HTTP
+		// 200: the same rate limit.
+		for _, coded := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s, ratelimited code: %v", limited, coded), func(t *testing.T) {
+				var mu sync.Mutex
+				calls := map[string]int{}
+				client := slackapi.NewFake(func(_ context.Context, method string, params map[string]any) (map[string]any, error) {
+					mu.Lock()
+					calls[method]++
+					mu.Unlock()
+					switch {
+					case method == "client.counts":
+						return map[string]any{"channels": counted}, nil
+					case method == limited && coded:
+						return apiError("ratelimited"), nil
+					case method == limited:
+						return nil, &slackapi.RateLimitError{Method: method, RetryAfter: time.Minute}
+					case method == "conversations.info":
+						return map[string]any{"channel": map[string]any{"name": "name-" + params["channel"].(string)}}, nil
+					}
+					return map[string]any{"messages": []any{msg("2.000001", "hello")}}, nil
+				})
+				res, err := Fetch(context.Background(), client, Options{})
+				if err != nil {
+					t.Fatalf("err = %v, want the conversations without what was rate limited", err)
 				}
-				return map[string]any{"messages": []any{msg("2.000001", "hello")}}, nil
-			})
-			res, err := Fetch(context.Background(), client, Options{})
-			if err != nil {
-				t.Fatalf("err = %v, want the conversations without what was rate limited", err)
-			}
-			if len(res.Channels) != 30 || res.Channels[0].ChannelID != "C29" || res.Channels[0].MentionCount != 29 {
-				t.Fatalf("channels = %s", dump(res))
-			}
-			// No further call of the kind that was refused.
-			if n := calls[limited]; n > fetchConcurrency {
-				t.Errorf("%d %s calls after being rate limited, want at most %d", n, limited, fetchConcurrency)
-			}
-			if len(res.Warnings) != 1 || !strings.Contains(res.Warnings[0], "30 of 30 conversations") || !strings.Contains(res.Warnings[0], "rate limited") {
-				t.Errorf("warnings = %q", res.Warnings)
-			}
-			for _, c := range res.Channels {
-				if limited == "conversations.history" {
-					if c.MessagesError != "ratelimited" || c.Messages != nil || c.ChannelName != "name-"+c.ChannelID {
+				if len(res.Channels) != 30 || res.Channels[0].ChannelID != "C29" || res.Channels[0].MentionCount != 29 {
+					t.Fatalf("channels = %s", dump(res))
+				}
+				// No further call of the kind that was refused.
+				if n := calls[limited]; n > fetchConcurrency {
+					t.Errorf("%d %s calls after being rate limited, want at most %d", n, limited, fetchConcurrency)
+				}
+				if len(res.Warnings) != 1 || !strings.Contains(res.Warnings[0], "30 of 30 conversations") || !strings.Contains(res.Warnings[0], "rate limited") {
+					t.Errorf("warnings = %q", res.Warnings)
+				}
+				for _, c := range res.Channels {
+					if limited == "conversations.history" {
+						if c.MessagesError != "ratelimited" || c.Messages != nil || c.ChannelName != "name-"+c.ChannelID {
+							t.Fatalf("channel = %+v", c)
+						}
+					} else if c.ChannelName != "" || c.MessagesError != "" || len(c.Messages) != 1 {
 						t.Fatalf("channel = %+v", c)
 					}
-				} else if c.ChannelName != "" || c.MessagesError != "" || len(c.Messages) != 1 {
-					t.Fatalf("channel = %+v", c)
 				}
-			}
-		})
+			})
+		}
 	}
 }
 
