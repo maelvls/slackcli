@@ -238,9 +238,8 @@ The workspaces saved by agent-slack are copied over on the first run, and the ol
 ## Development
 
 ```bash
-go build ./...
-go vet ./...
-go test ./...
+make check      # what CI runs: gofmt, vet, tests with -race, linux/darwin/windows builds
+make vulncheck  # govulncheck; CI runs it weekly and when go.mod changes
 ```
 
 Tests never talk to Slack. One package per command lives in `internal/cmd`, the Slack logic in `internal/slack`, and the API client in `internal/slackapi`.
