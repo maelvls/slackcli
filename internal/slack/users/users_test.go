@@ -326,7 +326,7 @@ func TestResolveUserID(t *testing.T) {
 		if !reflect.DeepEqual(rec.methods(), []string{"users.lookupByEmail", "users.list", "users.list"}) {
 			t.Errorf("methods = %v", rec.methods())
 		}
-		if user, err := GetUser(ctx, rec.userTokenClient(), "gone@example.com"); err != nil || user.ID != "U05GONE000" || user.Deleted == nil || !*user.Deleted {
+		if user, err := GetUser(ctx, rec.userTokenClient(), "gone@example.com", GetUserOptions{}); err != nil || user.ID != "U05GONE000" || user.Deleted == nil || !*user.Deleted {
 			t.Errorf("GetUser = %+v, %v", user, err)
 		}
 
@@ -498,7 +498,7 @@ func TestGetUser(t *testing.T) {
 	}
 	for _, tt := range tests {
 		rec := dir.recorder()
-		got, err := GetUser(ctx, rec.userTokenClient(), tt.input)
+		got, err := GetUser(ctx, rec.userTokenClient(), tt.input, GetUserOptions{})
 		if err != nil {
 			t.Fatalf("GetUser(%q): %v", tt.input, err)
 		}
@@ -510,18 +510,18 @@ func TestGetUser(t *testing.T) {
 		}
 	}
 
-	if _, err := GetUser(ctx, dir.recorder().client(), ""); err == nil || !strings.Contains(err.Error(), "user is empty") {
+	if _, err := GetUser(ctx, dir.recorder().client(), "", GetUserOptions{}); err == nil || !strings.Contains(err.Error(), "user is empty") {
 		t.Errorf("err = %v", err)
 	}
 	var nf *NotFoundError
-	if _, err := GetUser(ctx, dir.recorder().client(), "@nobody"); !errors.As(err, &nf) {
+	if _, err := GetUser(ctx, dir.recorder().client(), "@nobody", GetUserOptions{}); !errors.As(err, &nf) {
 		t.Errorf("err = %v", err)
 	}
-	if _, err := GetUser(ctx, dir.recorder().client(), "U0000GHOST"); !slackapi.IsErrorCode(err, "user_not_found") {
+	if _, err := GetUser(ctx, dir.recorder().client(), "U0000GHOST", GetUserOptions{}); !slackapi.IsErrorCode(err, "user_not_found") {
 		t.Errorf("err = %v", err)
 	}
 	rec := &recorder{serve: func(string, map[string]any) (map[string]any, error) { return map[string]any{}, nil }}
-	if _, err := GetUser(ctx, rec.client(), "U00000001A"); err == nil || !strings.Contains(err.Error(), "returned no user") {
+	if _, err := GetUser(ctx, rec.client(), "U00000001A", GetUserOptions{}); err == nil || !strings.Contains(err.Error(), "returned no user") {
 		t.Errorf("err = %v", err)
 	}
 }

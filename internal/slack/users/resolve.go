@@ -85,7 +85,7 @@ func (e *AmbiguousError) Error() string {
 // ones. The error is a *NotFoundError when nobody matches and an
 // *AmbiguousError when a display name designates several members.
 func ResolveUserID(ctx context.Context, client *slackapi.Client, input string) (string, error) {
-	found, err := lookupAll(ctx, client, []string{input})
+	found, err := lookupAll(ctx, client, []string{input}, lookupOptions{})
 	if err != nil {
 		return "", err
 	}
@@ -112,7 +112,7 @@ type Resolution struct {
 // leave the outcome unknown: dead credentials, cancellation, a directory
 // that cannot be scanned.
 func ResolveUserIDs(ctx context.Context, client *slackapi.Client, inputs []string) ([]Resolution, error) {
-	found, err := lookup(ctx, client, inputs)
+	found, err := lookup(ctx, client, inputs, lookupOptions{})
 	if err != nil {
 		return nil, err
 	}
@@ -130,6 +130,22 @@ type found struct {
 	id  string
 	raw map[string]any
 	err error
+	// unverified is set when the input is an email address that the
+	// member was matched to without seeing its email (see
+	// lookupOptions.unverifiedEmail).
+	unverified bool
+}
+
+// lookupOptions changes what lookup accepts. The zero value is what the
+// commands that act on a user (invite, DM, search by author) need.
+type lookupOptions struct {
+	// unverifiedEmail accepts, for an email address looked up with
+	// Slack's people search (browser credentials), the one member the
+	// search finds when users.info hides that member's email, instead
+	// of an *AmbiguousError: see lookupByPeopleSearch. The match is
+	// then the search's word only, so this is for reading (user get),
+	// never for acting on the user.
+	unverifiedEmail bool
 }
 
 // want is one user being searched for in the directory.
@@ -161,8 +177,8 @@ type want struct {
 
 // lookupAll is lookup for callers that need every input resolved: it
 // fails on the first that is not.
-func lookupAll(ctx context.Context, client *slackapi.Client, inputs []string) ([]found, error) {
-	out, err := lookup(ctx, client, inputs)
+func lookupAll(ctx context.Context, client *slackapi.Client, inputs []string, opts lookupOptions) ([]found, error) {
+	out, err := lookup(ctx, client, inputs, opts)
 	if err != nil {
 		return nil, err
 	}
@@ -178,7 +194,7 @@ func lookupAll(ctx context.Context, client *slackapi.Client, inputs []string) ([
 // the inputs that need the user directory share a single scan of it. The
 // error is for operational failures only; an input matching nobody is
 // reported in its found.err.
-func lookup(ctx context.Context, client *slackapi.Client, inputs []string) ([]found, error) {
+func lookup(ctx context.Context, client *slackapi.Client, inputs []string, opts lookupOptions) ([]found, error) {
 	out := make([]found, len(inputs))
 	var wants []*want
 	// searched remembers the outcome per handle, so that a handle given
@@ -199,12 +215,12 @@ func lookup(ctx context.Context, client *slackapi.Client, inputs []string) ([]fo
 			w.email = strings.ToLower(trimmed)
 			viaPeople := false
 			if client.Auth().IsBrowser() {
-				user, unresolved, err := lookupByPeopleSearch(ctx, client, trimmed)
+				user, unverified, unresolved, err := lookupByPeopleSearch(ctx, client, trimmed, opts.unverifiedEmail)
 				viaPeople = true
 				var infoErr *emailLookupError
 				switch {
 				case user != nil:
-					out[i] = found{id: jsonx.Str(user["id"]), raw: user}
+					out[i] = found{id: jsonx.Str(user["id"]), raw: user, unverified: unverified}
 					continue
 				case unresolved != nil:
 					out[i].err = unresolved

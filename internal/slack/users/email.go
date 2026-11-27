@@ -52,13 +52,18 @@ const peopleSearchName = "Slack's people search (search.modules.people)"
 //   - unresolved, an error for this address alone, when several have it,
 //     when users.info hides the email of the candidates (or fails for
 //     them) so that none can be confirmed, or when none of the checked
-//     candidates has it but others were left unchecked: none is picked;
+//     candidates has it but others were left unchecked: none is picked
+//     (but see the next case);
+//   - with allowUnverified, the user and unverified=true when the search
+//     found one member and nobody else, and users.info shows that member,
+//     not a bot, but hides its email: the search is then the only
+//     evidence (see GetUserOptions.AllowUnverifiedEmail);
 //   - nothing at all when no candidate has the address;
 //   - err when a call failed in a way that says nothing about the address:
 //     the search (see peopleSearchRefused for the failures that leave
 //     users.lookupByEmail to try), or users.info not answering (an
 //     *emailLookupError naming it).
-func lookupByPeopleSearch(ctx context.Context, client *slackapi.Client, email string) (user map[string]any, unresolved error, err error) {
+func lookupByPeopleSearch(ctx context.Context, client *slackapi.Client, email string, allowUnverified bool) (user map[string]any, unverified bool, unresolved error, err error) {
 	resp, err := client.API(ctx, "search.modules.people", map[string]any{
 		"module": "people",
 		"query":  email,
@@ -66,7 +71,7 @@ func lookupByPeopleSearch(ctx context.Context, client *slackapi.Client, email st
 		"page":   1,
 	})
 	if err != nil {
-		return nil, nil, err
+		return nil, false, nil, err
 	}
 	var candidates []map[string]any
 	seen := map[string]bool{}
@@ -97,11 +102,11 @@ func lookupByPeopleSearch(ctx context.Context, client *slackapi.Client, email st
 		resp, err := client.API(ctx, "users.info", map[string]any{"user": id})
 		switch {
 		case enrich.MustAbort(ctx, err):
-			return nil, nil, fmt.Errorf("looking up user %s (%s, found by %s): %w", id, email, peopleSearchName, err)
+			return nil, false, nil, fmt.Errorf("looking up user %s (%s, found by %s): %w", id, email, peopleSearchName, err)
 		case slackapi.IsTransient(err):
 			// Slack did not answer: that says nothing about the
 			// address, and the next candidate would fare no better.
-			return nil, nil, &emailLookupError{email: email, method: "users.info", tries: 1, err: err}
+			return nil, false, nil, &emailLookupError{email: email, method: "users.info", tries: 1, err: err}
 		case err != nil:
 			// This candidate cannot be checked (a member of another
 			// workspace, a refusal): it does not decide for the others.
@@ -128,13 +133,20 @@ func lookupByPeopleSearch(ctx context.Context, client *slackapi.Client, email st
 	}
 	switch {
 	case len(confirmed) == 1:
-		return confirmed[0], nil, nil
+		return confirmed[0], false, nil, nil
 	case len(confirmed) > 1:
 		amb := &AmbiguousError{Input: email, Reason: fmt.Sprintf("%d members have that email address", len(confirmed))}
 		for _, u := range confirmed {
 			amb.Matches = append(amb.Matches, ToCompactUser(u))
 		}
-		return nil, amb, nil
+		return nil, false, amb, nil
+	case allowUnverified && len(seen) == 1 && len(hidden) == 1 && !jsonx.Bool(hidden[0]["is_bot"]):
+		// The search found this member and nobody else, and users.info
+		// knows it but hides its email, as Slack does for many members
+		// of a large workspace: the search is the only evidence. A
+		// caller that only reads takes it, marked as unverified. A bot
+		// has no email to hide: its being found says nothing.
+		return hidden[0], true, nil, nil
 	case len(hidden) > 0:
 		amb := &AmbiguousError{Input: email, Reason: fmt.Sprintf(
 			"%s finds %d member(s) for that email address, but Slack does not show their email to you (users.info), so whether they have it cannot be checked",
@@ -142,20 +154,20 @@ func lookupByPeopleSearch(ctx context.Context, client *slackapi.Client, email st
 		for _, u := range hidden {
 			amb.Matches = append(amb.Matches, ToCompactUser(u))
 		}
-		return nil, amb, nil
+		return nil, false, amb, nil
 	case unchecked > 0:
-		return nil, fmt.Errorf("could not resolve user %q: %s finds %d members for that email address, too many to check: "+
+		return nil, false, fmt.Errorf("could not resolve user %q: %s finds %d members for that email address, too many to check: "+
 			"none of the first %d has it (users.info), the other %d were not checked. "+
 			"Pass the user ID (U…) instead, or check the address",
 			email, peopleSearchName, len(candidates)+unchecked, len(candidates), unchecked), nil
 	case failed != nil:
 		// %v, not %w: the code of users.info (missing_scope, …) must not
 		// pass for a refusal of the people search.
-		return nil, fmt.Errorf("could not resolve user %q: %s finds member %s for that email address, but users.info cannot show it (%v), "+
+		return nil, false, fmt.Errorf("could not resolve user %q: %s finds member %s for that email address, but users.info cannot show it (%v), "+
 			"so whether it has the address cannot be checked. Pass the user ID (U…) instead",
 			email, peopleSearchName, failedID, failed), nil
 	}
-	return nil, nil, nil
+	return nil, false, nil, nil
 }
 
 // userEmail is the email address of a Slack user object, "" when hidden.
