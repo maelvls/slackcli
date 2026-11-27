@@ -92,6 +92,14 @@ func TestParseInlineElements(t *testing.T) {
 			{"type":"text","text":"run "},
 			{"type":"text","text":"[a](https://a.test)","style":{"code":true}},
 			{"type":"text","text":" now"}]`},
+		{"code span across a Markdown link", "[a `b](https://a.test) c`", `[
+			{"type":"text","text":"[a "},
+			{"type":"text","text":"b](https://a.test) c","style":{"code":true}}]`},
+		{"Markdown image stays text", "![d](https://a.test/d.png)", `[
+			{"type":"text","text":"![d]("},
+			{"type":"link","url":"https://a.test/d.png"},
+			{"type":"text","text":")"}]`},
+		{"Markdown link with spaces in an angle-bracket target", "[x](<https://a.test/a b>)", `[{"type":"link","url":"https://a.test/a%20b","text":"x"}]`},
 		{"Markdown link to a URL with parentheses", "see [Go](https://en.wikipedia.org/wiki/Go_(game)) ok", `[
 			{"type":"text","text":"see "},
 			{"type":"link","url":"https://en.wikipedia.org/wiki/Go_(game)","text":"Go"},

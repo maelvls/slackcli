@@ -28,18 +28,21 @@ type outboundLink struct {
 //     Wikipedia URLs do ("https://en.wikipedia.org/wiki/Go_(game)"), but no
 //     whitespace: a target with a title ("(url "title")") is not a link.
 //   - "<url>" targets are accepted, the CommonMark way to write a URL with
-//     unbalanced parentheses.
+//     unbalanced parentheses; their spaces are percent-encoded.
+//   - An image, "![alt](https://...)", is not a link: it stays literal.
+//   - A link crossed by a code span ("[a `b](https://x.test) c`") or whose
+//     target holds a code span is not one either (see [linkCrossesCode]).
 //
 // When the whole label is one `*bold*`, `_italic_`, `~strike~` or code span
 // (or several nested), the link takes that style. Formatting covering only
 // part of the label is kept as literal text: a link has a single style.
 func markdownLinkAt(text string, i int) (outboundLink, bool) {
-	if i >= len(text) || text[i] != '[' {
+	if i >= len(text) || text[i] != '[' || i > 0 && text[i-1] == '!' {
 		return outboundLink{}, false
 	}
 	depth := 0
 	closeBracket := -1
-	for k := i; k < len(text) && closeBracket < 0; k++ {
+	for k := i; k < len(text) && k-i <= maxLinkLabel && closeBracket < 0; k++ {
 		switch text[k] {
 		case '\n':
 			return outboundLink{}, false
@@ -69,8 +72,45 @@ func markdownLinkAt(text string, i int) (outboundLink, bool) {
 	}
 
 	link := outboundLink{url: url, labelEnd: closeBracket, end: end}
+	if linkCrossesCode(text, i, link) {
+		return outboundLink{}, false
+	}
 	link.label, link.style, link.markers = peelLabelStyle(label)
 	return link, true
+}
+
+// maxLinkLabel and maxLinkTarget are the longest label and target, in
+// bytes, a Markdown link may have. Scanning each "[" of a long line to its
+// end would otherwise take quadratic time ("[a](" repeated).
+const (
+	maxLinkLabel  = 1000
+	maxLinkTarget = 4096
+)
+
+// linkCrossesCode reports whether a code span found from the opening
+// bracket of a link, text[i], ends past its label: "[a `b](url) c`", or
+// "[x](https://x.test/`y`)". Code may only be found inside the label
+// ("[`func`](url)"). Both [FormatOutboundText] and [ParseInlineElements]
+// pair backticks the same way, so both leave such text literal. A code span
+// cannot start before the link: both would have read it first.
+func linkCrossesCode(text string, i int, link outboundLink) bool {
+	if strings.IndexByte(text[i:link.end], '`') < 0 {
+		return false
+	}
+	lineEnd := len(text)
+	if nl := strings.IndexByte(text[link.end:], '\n'); nl >= 0 {
+		lineEnd = link.end + nl
+	}
+	crossed := false
+	off := i
+	splitCode(text[i:lineEnd], func(seg string, kind codeKind) {
+		start := off
+		off += len(seg)
+		if kind != notCode && start < link.end && off > link.labelEnd {
+			crossed = true
+		}
+	})
+	return crossed
 }
 
 // markdownLinkTarget parses the target of a Markdown link starting at
@@ -78,7 +118,7 @@ func markdownLinkAt(text string, i int) (outboundLink, bool) {
 // the index after the closing parenthesis.
 func markdownLinkTarget(text string, start int) (url string, end int, ok bool) {
 	if start < len(text) && text[start] == '<' {
-		closeAngle := strings.IndexAny(text[start+1:], "<>\n")
+		closeAngle := strings.IndexAny(text[start+1:min(len(text), start+1+maxLinkTarget)], "<>\n")
 		if closeAngle < 0 || text[start+1+closeAngle] != '>' {
 			return "", 0, false
 		}
@@ -86,10 +126,11 @@ func markdownLinkTarget(text string, start int) (url string, end int, ok bool) {
 		if after >= len(text) || text[after] != ')' {
 			return "", 0, false
 		}
-		return text[start+1 : start+1+closeAngle], after + 1, true
+		url := angleTargetSpaces.Replace(text[start+1 : start+1+closeAngle])
+		return url, after + 1, true
 	}
 	depth := 0
-	for k := start; k < len(text); k++ {
+	for k := start; k < len(text) && k-start <= maxLinkTarget; k++ {
 		switch c := text[k]; {
 		case c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '<' || c == '>':
 			return "", 0, false
@@ -136,9 +177,16 @@ func peelLabelStyle(label string) (plain string, style inlineStyle, markers stri
 	return label, style, markers
 }
 
+// angleTargetSpaces percent-encodes the spaces CommonMark allows in a
+// "<url>" link target, which neither a mrkdwn token nor a rich text link
+// may hold.
+var angleTargetSpaces = strings.NewReplacer(" ", "%20", "\t", "%09")
+
 // mrkdwnLinkEscaper makes a URL safe inside a `<url|label>` token: a `|`
-// would end the URL and a `>` the token.
-var mrkdwnLinkEscaper = strings.NewReplacer("|", "%7C", "<", "%3C", ">", "%3E")
+// would end the URL and a `>` the token. Slack decodes the entities of the
+// URL, so `&` is escaped too: the link then opens the same URL as the rich
+// text link element, which takes the URL as it is.
+var mrkdwnLinkEscaper = strings.NewReplacer("&", "&amp;", "|", "%7C", "<", "%3C", ">", "%3E")
 
 // mrkdwn returns the link as a mrkdwn `<url|label>` token, wrapped in the
 // markers of its style: `*<url|label>*`. A code style cannot apply to a

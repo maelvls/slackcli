@@ -1,6 +1,9 @@
 package slacktext
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestFormatOutboundText(t *testing.T) {
 	tests := []struct {
@@ -39,10 +42,14 @@ func TestFormatOutboundText(t *testing.T) {
 		{"unterminated backtick is text", "it`s @here", "it`s <!here>"},
 		{"NUL bytes are harmless", "a\x000\x00 & b", "a\x000\x00 &amp; b"},
 		{"Markdown link", "see [the docs](https://example.com/docs).", "see <https://example.com/docs|the docs>."},
-		{"several Markdown links", "[a](https://a.test) & [b](http://b.test/?x=1&y=2)", "<https://a.test|a> &amp; <http://b.test/?x=1&y=2|b>"},
+		{"several Markdown links", "[a](https://a.test) & [b](http://b.test/?x=1&y=2)", "<https://a.test|a> &amp; <http://b.test/?x=1&amp;y=2|b>"},
 		{"Markdown link in a code span", "run `[a](https://a.test)` now", "run `[a](https://a.test)` now"},
 		{"Markdown link in a code block", "```\n[a](https://a.test)\n```", "```\n[a](https://a.test)\n```"},
 		{"code span across a Markdown link", "[a `b](https://a.test) c`", "[a `b](https://a.test) c`"},
+		{"code span across a Markdown link target", "[x](https://a.test/`y`) z", "[x](https://a.test/`y`) z"},
+		{"Markdown link with spaces in an angle-bracket target", "[x](<https://a.test/a b>)", "<https://a.test/a%20b|x>"},
+		{"Markdown image stays text", "see ![d](https://a.test/d.png)", "see ![d](https://a.test/d.png)"},
+		{"long line of brackets", strings.Repeat("[", 5000) + "x", strings.Repeat("[", 5000) + "x"},
 		{"Markdown link to a URL with parentheses", "[Go](https://en.wikipedia.org/wiki/Go_(game))", "<https://en.wikipedia.org/wiki/Go_(game)|Go>"},
 		{"Markdown link with an angle-bracket target", "[x](<https://a.test/a)b>)", "<https://a.test/a)b|x>"},
 		{"Markdown link with brackets and entities in its label", "[[PR] a < b & c](https://a.test/p|q)", "<https://a.test/p%7Cq|[PR] a &lt; b &amp; c>"},
@@ -99,4 +106,30 @@ func TestFormatOutboundTextLeavesNonMentions(t *testing.T) {
 			assertEqual(t, FormatOutboundText(tt.in), tt.want)
 		})
 	}
+}
+
+// FuzzFormatOutboundText checks that formatting never panics, and that the
+// Markdown links it finds are well formed.
+func FuzzFormatOutboundText(f *testing.F) {
+	for _, seed := range []string{
+		"[a](https://a.test)", "[a `b](https://a.test) c`", "[[x]](<https://a.test/a b>)",
+		"![i](https://a.test)", "<@U123|x> [y](https://a.test/(z)) `[q](https://q.test)`",
+		"*[*b*](https://a.test)* & <https://x.test|[a](b)>", "[x](https://a.test/`y`) z",
+	} {
+		f.Add(seed)
+	}
+	f.Fuzz(func(t *testing.T, in string) {
+		_ = FormatOutboundText(in)
+		for i := 0; i < len(in); i++ {
+			if link, ok := markdownLinkAt(in, i); ok {
+				if link.end <= link.labelEnd || link.end > len(in) || link.label == "" {
+					t.Fatalf("bad link %+v in %q", link, in)
+				}
+				if strings.ContainsAny(link.url, " \t\n<>") {
+					t.Fatalf("URL %q of %q", link.url, in)
+				}
+			}
+		}
+		_ = ParseInlineElements(in)
+	})
 }

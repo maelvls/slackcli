@@ -6,8 +6,9 @@ import (
 )
 
 // outboundTokenRE matches the Slack tokens a user may already have
-// written, whose `<`, `>` and `&` must not be escaped.
-var outboundTokenRE = regexp.MustCompile(`<(?:@[UWB][A-Z0-9]+(?:\|[^>]*)?|#[CG][A-Z0-9]+(?:\|[^>]*)?|!subteam\^[A-Z0-9]+(?:\|[^>]*)?|!date\^[^>]+|![a-zA-Z]+(?:\|[^>]*)?|(?:https?://|mailto:)[^>]+)>`)
+// written, whose `<`, `>` and `&` must not be escaped. It is anchored: it is
+// tried at each `<` and must fail there at once, not search the rest.
+var outboundTokenRE = regexp.MustCompile(`^<(?:@[UWB][A-Z0-9]+(?:\|[^>]*)?|#[CG][A-Z0-9]+(?:\|[^>]*)?|!subteam\^[A-Z0-9]+(?:\|[^>]*)?|!date\^[^>]+|![a-zA-Z]+(?:\|[^>]*)?|(?:https?://|mailto:)[^>]+)>`)
 
 // FormatOutboundText prepares user-authored text for the `text` parameter
 // of chat.postMessage and chat.update, which is mrkdwn: literal `&`, `<` and
@@ -61,7 +62,7 @@ func FormatOutboundText(text string) string {
 			switch text[i] {
 			case '<':
 				loc := outboundTokenRE.FindStringIndex(text[i:s.end])
-				if loc == nil || loc[0] != 0 {
+				if loc == nil {
 					continue
 				}
 				writeWithMentions(&b, text, last, i)
