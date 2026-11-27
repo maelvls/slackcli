@@ -1,0 +1,37 @@
+name: govulncheck
+
+# Not run on every PR: a vulnerability published today would make any PR red
+# for a reason unrelated to its change. It runs when the dependencies change,
+# on main, and weekly so that new advisories show up without a push.
+on:
+  pull_request:
+    paths: [go.mod, go.sum]
+  push:
+    branches: [main]
+  schedule:
+    - cron: "17 6 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# As in ci.yml: a new push to a PR cancels the run it supersedes, and every
+# push to main, weekly or manual run (its run ID) finishes.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: true
+
+jobs:
+  govulncheck:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      # The latest Go release rather than the go.mod minimum: go.mod does not
+      # pin the toolchain people build with, so standard library advisories
+      # fixed in a newer patch release are not this repository's to report.
+      - uses: actions/setup-go@v7
+        with:
+          go-version: stable
+          check-latest: true
+      - run: make vulncheck
