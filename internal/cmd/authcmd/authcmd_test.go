@@ -478,6 +478,7 @@ func TestImportDesktop(t *testing.T) {
 	want := `{
   "imported": 2,
   "source": {
+    "name": "Slack Desktop",
     "leveldb_path": "/slack/leveldb",
     "cookies_path": "/slack/Cookies"
   },
@@ -521,7 +522,7 @@ func TestImportBrowsers(t *testing.T) {
 			out := h.mustRun("", tc.command)
 			want := testenv.CompactJSON(t, `{
   "imported": 2,
-  "source": {"leveldb_path": "/slack/leveldb", "cookies_path": "/slack/Cookies"},
+  "source": {"name": "`+tc.source+`", "leveldb_path": "/slack/leveldb", "cookies_path": "/slack/Cookies"},
   "workspaces": [
     {"workspace_url": "https://acme.slack.com", "workspace_name": "Acme"},
     {"workspace_url": "https://zeta.slack.com", "workspace_name": "Zeta"}
@@ -564,6 +565,24 @@ func TestImportBrowsers(t *testing.T) {
 				t.Errorf("%d workspaces stored after failed imports", n)
 			}
 		})
+	}
+}
+
+// Nothing imported (every workspace keeps its standard token) and no file
+// read (the Slack tab gave the cookie): "workspaces" is still there, [],
+// and "source" still names the browser.
+func TestImportNothingKeepsWorkspacesAndSource(t *testing.T) {
+	h := newHarness(t, nil)
+	h.mustRun("", "add", "--workspace-url", "https://acme.slack.com", "--token", "xoxb-acme")
+	h.mustRun("", "add", "--workspace-url", "https://zeta.slack.com", "--token", "xoxb-zeta")
+	h.rt.Chrome = func(context.Context) (*authextract.Extracted, error) {
+		e := extraction("Chrome")
+		e.Paths = authextract.SourcePaths{}
+		return e, nil
+	}
+	out := h.mustRun("", "import-chrome")
+	if !strings.HasPrefix(out, `{"imported":0,"source":{"name":"Chrome"},"workspaces":[],"hints":[`) {
+		t.Errorf("import-chrome printed %s", out)
 	}
 }
 

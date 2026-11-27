@@ -13,8 +13,9 @@ import (
 	"github.com/maelvls/slackcli/internal/slackapi"
 )
 
-// messageResult is the output of the commands that change one message,
-// like "channel mark" and "later": the message, by channel ID and ts.
+// messageResult is the output of "message edit" and "message delete", and
+// part of that of "react add" and "react remove": the message, by channel
+// ID and ts (the same shape as "channel mark").
 type messageResult struct {
 	OK        bool   `json:"ok"`
 	ChannelID string `json:"channel_id"`
