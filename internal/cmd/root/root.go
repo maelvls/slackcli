@@ -18,7 +18,9 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/maelvls/slackcli/internal/appinfo"
+	"github.com/maelvls/slackcli/internal/audit"
 	"github.com/maelvls/slackcli/internal/clictx"
+	"github.com/maelvls/slackcli/internal/cmd/auditcmd"
 	"github.com/maelvls/slackcli/internal/cmd/authcmd"
 	"github.com/maelvls/slackcli/internal/cmd/canvascmd"
 	"github.com/maelvls/slackcli/internal/cmd/channelcmd"
@@ -84,6 +86,7 @@ func commands(rt *clictx.Context) []*cobra.Command {
 		usercmd.New(rt),
 		channelcmd.New(rt),
 		workflowcmd.New(rt),
+		auditcmd.New(rt),
 	}
 }
 
@@ -251,6 +254,7 @@ func within(d time.Duration, f func()) {
 
 func (r runner) execute(args []string, stdout, stderr io.Writer) int {
 	trace.Reset(stderr)
+	audit.Reset()
 
 	// The watchdog bounds every command that does not wait on a human, so
 	// that an agent is never left hanging on a stuck network call. It is
@@ -361,6 +365,9 @@ func (r runner) execute(args []string, stdout, stderr io.Writer) int {
 				return err
 			}
 			ran.Store(c)
+			// The audit log names the command on each of its lines, with
+			// only what is safe to keep of its arguments.
+			audit.SetCommand(commandName(c), args)
 			// The trace names the command, not its arguments: they may
 			// hold a message or a secret.
 			if clictx.HasNoTimeout(c) {

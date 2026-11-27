@@ -12,12 +12,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"net/url"
 	"sync"
 	"time"
 
 	"golang.org/x/net/websocket"
 
+	"github.com/maelvls/slackcli/internal/audit"
 	"github.com/maelvls/slackcli/internal/jsonx"
 	"github.com/maelvls/slackcli/internal/slackapi"
 )
@@ -187,7 +189,9 @@ func dial(ctx context.Context, client *slackapi.Client) (*websocket.Conn, error)
 	config.Header = header
 	dialCtx, cancel := context.WithTimeout(ctx, slackapi.APITimeout())
 	defer cancel()
+	start := time.Now()
 	ws, err := config.DialContext(dialCtx)
+	recordDial(dialCtx, start, u.Host, err)
 	if err != nil {
 		// A DialError names the URL, which carries a token.
 		var de *websocket.DialError
@@ -197,6 +201,27 @@ func dial(ctx context.Context, client *slackapi.Client) (*websocket.Conn, error)
 		return nil, fmt.Errorf("opening the real-time connection to %s: %w", u.Host, err)
 	}
 	return ws, nil
+}
+
+// recordDial writes the audit line of the opening of the WebSocket to
+// host, started at start, which failed with err (nil for success).
+func recordDial(ctx context.Context, start time.Time, host string, err error) {
+	e := audit.Entry{
+		TS:         start.UTC().Format(time.RFC3339Nano),
+		Kind:       audit.KindWebSocket,
+		Host:       host,
+		Method:     "websocket.connect",
+		DurationMS: time.Since(start).Milliseconds(),
+	}
+	if err != nil {
+		e.Error = "dial_failed"
+		if class := audit.ErrorClass(ctx, err); class != "network" {
+			e.Error = class
+		}
+	} else {
+		e.Status = http.StatusSwitchingProtocols
+	}
+	audit.Record(e)
 }
 
 // serve reads ws until it fails, ctx is done or Slack says goodbye. It

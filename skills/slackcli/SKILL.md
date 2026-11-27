@@ -58,6 +58,7 @@ One call each. Messages carry `time` (their `ts` as a local date and time) and `
 - `channel invite` exits non-zero on partial failure but still prints which invites went through: read the JSON before retrying.
 - Commands are cut after 30 s (exit code 124; `SLACKCLI_COMMAND_TIMEOUT_MS`), except `watch`, `message wait`, `message compose` and the uploading ones (`message send --attach`, `message draft create/update`). A rate-limited call fails at once unless `SLACKCLI_RATE_LIMIT_MAX_WAIT_MS` is set. After a timeout or an interrupt (exit code 130) of a write, the change may still have gone through: check before retrying.
 - A slow or timed-out command: the timeout message on stderr says where the time went (which Slack calls, rate-limit waits, keychain) and what was still running. To see it for any command, run it again with `SLACKCLI_DEBUG=1`: each call and wait is traced on stderr with its duration (`[slackcli +1.2s] api conversations.history: 800ms, HTTP 200`). Do not combine it with `2>&1 | jq`.
+- How often Slack was called, by what: every request (API call attempts, downloads, uploads, `watch` connections) is a JSON line of the audit log (`audit path`; `SLACKCLI_AUDIT_LOG=off` disables it). `audit stats --since 1h` prints totals, `by_method`, `by_source` (program, looking through shells and wrappers, and command), `by_hour`, `peak_minute`, errors and rate limits; `audit tail -n 50` the last lines. Check it before running slackcli in a loop: Slack signs out sessions that call it too often.
 
 ## Conditional references
 

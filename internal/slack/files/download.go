@@ -18,6 +18,7 @@ import (
 	"strings"
 
 	"github.com/maelvls/slackcli/internal/appinfo"
+	"github.com/maelvls/slackcli/internal/audit"
 	"github.com/maelvls/slackcli/internal/slackapi"
 	"github.com/maelvls/slackcli/internal/trace"
 )
@@ -148,6 +149,8 @@ func Get(ctx context.Context, client *slackapi.Client, rawURL string) (*http.Res
 	// not be able to send an authenticated request back to a Slack URL of
 	// its choosing.
 	hc := *client.HTTPClient()
+	// Every request of the chain is a line of the audit log.
+	hc.Transport = audit.Transport(hc.Transport, "files.download")
 	hc.CheckRedirect = func(next *http.Request, via []*http.Request) error {
 		if len(via) >= maxRedirects {
 			return fmt.Errorf("stopped after %d redirects", maxRedirects)

@@ -16,6 +16,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/maelvls/slackcli/internal/appinfo"
+	"github.com/maelvls/slackcli/internal/audit"
 	"github.com/maelvls/slackcli/internal/auth"
 	"github.com/maelvls/slackcli/internal/clictx"
 	"github.com/maelvls/slackcli/internal/slackapi"
@@ -470,6 +471,30 @@ func TestRunLiveTrace(t *testing.T) {
 	}
 }
 
+// The lines of the audit log name the command that made the calls, with
+// only what is safe to keep of its arguments.
+func TestRunNamesTheCommandInTheAuditLog(t *testing.T) {
+	log := filepath.Join(t.TempDir(), "audit.jsonl")
+	t.Setenv(appinfo.EnvName(audit.EnvSuffix), log)
+	work := one(&cobra.Command{Use: "work", RunE: func(cmd *cobra.Command, _ []string) error {
+		_, err := slackapi.NewFake(func(context.Context, string, map[string]any) (map[string]any, error) {
+			return nil, nil
+		}).API(cmd.Context(), "conversations.history", nil)
+		return err
+	}})
+	if got := runWith(t, time.Second, work, "work", "C0123ABCD", "secret-argument"); got.code != ExitOK {
+		t.Fatalf("%+v", got)
+	}
+	entries, skipped, err := audit.Read(log, time.Time{})
+	if err != nil || skipped != 0 || len(entries) != 1 {
+		t.Fatalf("entries = %+v, skipped %d, %v", entries, skipped, err)
+	}
+	e := entries[0]
+	if e.Cmd != "work" || strings.Join(e.Args, " ") != "work C0123ABCD "+audit.Placeholder || e.Method != "conversations.history" {
+		t.Errorf("entry = %+v", e)
+	}
+}
+
 // A command can ask how long it has left, for as long as it has a limit.
 func TestRunTellsTheCommandHowLongItHasLeft(t *testing.T) {
 	t.Setenv(appinfo.EnvName("COMMAND_TIMEOUT_MS"), "30000")
@@ -584,7 +609,7 @@ func TestCommandTree(t *testing.T) {
 		names = append(names, c.Name())
 	}
 	// "completion" and "help" are cobra's, added up front (see newRoot).
-	want := "auth canvas channel completion help inbox later message search unreads user watch workflow"
+	want := "audit auth canvas channel completion help inbox later message search unreads user watch workflow"
 	if got := strings.Join(names, " "); got != want {
 		t.Errorf("commands = %s, want %s", got, want)
 	}

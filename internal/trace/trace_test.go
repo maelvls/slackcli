@@ -113,10 +113,19 @@ func TestSummaryDoesNotWaitForALineBeingWritten(t *testing.T) {
 	out := blockedWriter{writing: make(chan struct{}), release: make(chan struct{})}
 	Reset(out)
 	t.Cleanup(func() { Reset(nil) })
+	// The writes are let through, and waited for, before the test ends
+	// (cleanups run last registered first, so before the Reset above):
+	// a line still on its way would otherwise end up in the trace of the
+	// next test.
+	var writers sync.WaitGroup
+	t.Cleanup(func() {
+		close(out.release)
+		writers.Wait()
+	})
 
-	go Begin("api users.info", "").End("HTTP 200")
-	<-out.writing       // the line is being written, and is stuck
-	go Logf("an event") // waits its turn behind it
+	writers.Go(func() { Begin("api users.info", "").End("HTTP 200") })
+	<-out.writing                           // the line is being written, and is stuck
+	writers.Go(func() { Logf("an event") }) // waits its turn behind it
 
 	got := make(chan string)
 	go func() {
@@ -131,7 +140,6 @@ func TestSummaryDoesNotWaitForALineBeingWritten(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("Summary waits for the write")
 	}
-	close(out.release)
 }
 
 // The lines of the live trace are written one at a time and in the order
