@@ -173,7 +173,9 @@ func TestSanitizeArgsKeepsOnlyKnownFlags(t *testing.T) {
 		// A boolean flag takes no value: what follows is positional.
 		{[]string{"--force", "C0123ABCD", "-v", "secret"}, []string{"--force", "C0123ABCD", "-v", Placeholder}},
 		{[]string{"--text=--secret", "--limit=5", "-n5", "-n=5"}, []string{"--text", "--limit", "-n", "-n"}},
-		{[]string{"-5"}, []string{"-5"}},
+		{[]string{"-5"}, []string{Placeholder}},
+		// A number may be the whole message (a code).
+		{[]string{"C0123ABCD", "482913"}, []string{"C0123ABCD", Placeholder}},
 	} {
 		if got := SanitizeArgs("", tc.args, testFlags); !slices.Equal(got, tc.want) {
 			t.Errorf("SanitizeArgs(%q) = %q, want %q", tc.args, got, tc.want)

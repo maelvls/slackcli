@@ -7,7 +7,7 @@
 // which methods, by which program and which command, and which calls
 // failed or were rate limited. It never holds a token, a cookie, a message
 // or a search query: of the command line it keeps the command, the names of
-// the flags, and the arguments that are Slack IDs, timestamps, numbers or
+// the flags, and the arguments that are Slack IDs, timestamps or
 // Slack URLs (see SanitizeArgs).
 //
 // Writing it never fails a command and costs next to nothing: each line is
@@ -185,6 +185,7 @@ func Record(e Entry) {
 	})
 	e.Parent, e.Ancestors = process.parent, process.ancestors
 	// The error code comes from the answer: a long one is not Slack's.
+	e.Error = RedactSecrets(e.Error)
 	if len(e.Error) > maxErrorLen {
 		e.Error = e.Error[:maxErrorLen] + Placeholder
 	}
@@ -361,7 +362,9 @@ var (
 	slackIDRe = regexp.MustCompile(`^[CDGUWTBFEAKLRSV][A-Z0-9]{6,20}$`)
 	// tsRe matches a message timestamp.
 	tsRe = regexp.MustCompile(`^\d{9,11}\.\d{1,6}$`)
-	// intRe matches a number (a limit, a count).
+	// intRe matches a number, which tells a negative number from a
+	// shorthand flag. A number given as a positional argument is not
+	// kept: it may be the whole message (a code).
 	intRe = regexp.MustCompile(`^-?\d{1,10}$`)
 )
 
@@ -373,7 +376,7 @@ type FlagLookup func(name string, short bool) (known, takesValue bool)
 // SanitizeArgs returns the command line args (without the program name)
 // with only what is safe to keep: the words of cmd, the names of the flags
 // that lookup knows (not their values), and the arguments that are Slack
-// IDs, message timestamps, numbers or Slack URLs (of which the scheme,
+// IDs, message timestamps or Slack URLs (of which the scheme,
 // host and path are kept). Every other argument, which may be a message, a
 // search query, a name or a secret, is replaced by Placeholder. So is an
 // argument that starts with a dash but is not a known flag (message text
@@ -432,11 +435,11 @@ func SanitizeArgs(cmd string, args []string, lookup FlagLookup) []string {
 	return out
 }
 
-// safeValue returns a, or as much of it as is safe to keep, or
+// safeValue returns a (a positional argument), or as much of it as is safe to keep, or
 // Placeholder.
 func safeValue(a string) string {
 	switch {
-	case slackIDRe.MatchString(a), tsRe.MatchString(a), intRe.MatchString(a):
+	case slackIDRe.MatchString(a), tsRe.MatchString(a):
 		return a
 	}
 	if u, err := url.Parse(a); err == nil && (u.Scheme == "https" || u.Scheme == "http") && isSlackHost(u.Hostname()) {
