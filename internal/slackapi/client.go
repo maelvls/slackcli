@@ -414,7 +414,7 @@ func (c *Client) callOnce(ctx context.Context, method string, params map[string]
 		}
 		if ok, present := resp["ok"]; present && ok != true {
 			apiErr := newAPIError(method, resp)
-			rec.done(0, resp, apiErr.Code)
+			rec.done(0, resp, failureCode(apiErr.Code))
 			return nil, apiErr
 		}
 		rec.done(0, resp, "")
@@ -444,8 +444,10 @@ func (c *Client) callOnce(ctx context.Context, method string, params map[string]
 		status, header, body, err := c.post(ctx, endpoint, fields, multi, timeout)
 		if err != nil {
 			if ctx.Err() != nil {
+				// "timeout" when the caller's deadline expired,
+				// "cancelled" when it gave up.
 				span.Fail("cancelled: " + ctx.Err().Error())
-				rec.done(0, nil, "cancelled")
+				rec.done(0, nil, audit.ErrorClass(ctx, err))
 				return nil, ctx.Err()
 			}
 			var ne interface{ Timeout() bool }
@@ -489,6 +491,10 @@ func (c *Client) callOnce(ctx context.Context, method string, params map[string]
 			rec.done(status, nil, "http_status")
 		case data == nil:
 			rec.done(status, nil, "not_json")
+		case data["ok"] != true:
+			// An "ok" that is false, missing ({}) or not a boolean
+			// ("false"): the call fails below.
+			rec.done(status, data, failureCode(code))
 		default:
 			rec.done(status, data, code)
 		}
@@ -591,6 +597,16 @@ func (a *auditCall) done(status int, data map[string]any, code string) {
 	}
 	a.entry.Error = code
 	audit.Record(a.entry)
+}
+
+// failureCode is the audit error code of an answer that was rejected
+// with Slack's code, which may be empty (an answer whose "ok" is missing,
+// or not a boolean): "not_ok" then, so that the line counts as a failure.
+func failureCode(code string) string {
+	if code == "" {
+		return "not_ok"
+	}
+	return code
 }
 
 // rateLimited writes the line of an attempt that Slack answered with HTTP

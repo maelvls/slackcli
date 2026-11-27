@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -19,6 +20,7 @@ import (
 	"github.com/maelvls/slackcli/internal/audit"
 	"github.com/maelvls/slackcli/internal/auth"
 	"github.com/maelvls/slackcli/internal/clictx"
+	"github.com/maelvls/slackcli/internal/cmd/cmdutil"
 	"github.com/maelvls/slackcli/internal/slackapi"
 	"github.com/maelvls/slackcli/internal/testenv"
 	"github.com/maelvls/slackcli/internal/trace"
@@ -29,6 +31,36 @@ type result struct {
 	code           int
 	stdout, stderr string
 	rt             *clictx.Context
+	// wait waits for what the run left running (see track); the test
+	// waits for it in any case when it ends.
+	wait func()
+}
+
+// track makes r count the goroutines its run starts, and returns what
+// waits for them, which t also does when it ends. A run that timed out or
+// was interrupted returns without waiting for its command, which is the
+// point; but a command of one test that is still running in the next
+// one ends its spans in the trace of the next one, which a summary of
+// that one then holds.
+func track(t *testing.T, r *runner) (wait func()) {
+	t.Helper()
+	var goroutines sync.WaitGroup
+	r.goroutines = &goroutines
+	wait = func() {
+		t.Helper()
+		done := make(chan struct{})
+		go func() {
+			goroutines.Wait()
+			close(done)
+		}()
+		select {
+		case <-done:
+		case <-time.After(10 * time.Second):
+			t.Error("the command, or a write to stderr, is still running 10s after the run")
+		}
+	}
+	t.Cleanup(wait)
+	return wait
 }
 
 // runWith runs the real root (flags, watchdog, exit codes) over the given
@@ -57,8 +89,9 @@ func runRunner(t *testing.T, r runner, args ...string) result {
 		rt.Store(c)
 		return c
 	}
+	wait := track(t, &r)
 	code := r.run(args, &stdout, &stderr)
-	return result{code: code, stdout: stdout.String(), stderr: stderr.String(), rt: rt.Load()}
+	return result{code: code, stdout: stdout.String(), stderr: stderr.String(), rt: rt.Load(), wait: wait}
 }
 
 // The tests expect an exact stderr: a live trace that the developer left
@@ -166,9 +199,7 @@ func TestRunTimeoutCancelsTheCommandAndLetsItCleanUp(t *testing.T) {
 func TestRunTimeoutDoesNotWaitForACommandThatIgnoresCancellation(t *testing.T) {
 	t.Setenv(appinfo.EnvName("COMMAND_TIMEOUT_MS"), "30")
 	release := make(chan struct{})
-	finished := make(chan struct{})
 	stuck := &cobra.Command{Use: "stuck", RunE: func(*cobra.Command, []string) error {
-		defer close(finished)
 		<-release
 		return nil
 	}}
@@ -178,7 +209,7 @@ func TestRunTimeoutDoesNotWaitForACommandThatIgnoresCancellation(t *testing.T) {
 		t.Errorf("code = %d after %s", got.code, time.Since(start))
 	}
 	close(release)
-	<-finished
+	got.wait()
 }
 
 // The watchdog is running before anything else is: what a command does
@@ -212,6 +243,7 @@ func TestRunTimeoutDoesNotStartACommandWhoseSetUpWasLate(t *testing.T) {
 			return nil
 		}, PersistentPostRun: func(*cobra.Command, []string) { close(finished) }}}
 	}, "remove")
+	got.wait() // the set-up, and what follows it, is over
 	if got.code != ExitTimeout || started.Load() {
 		t.Errorf("code = %d, command started = %v (%q)", got.code, started.Load(), got.stderr)
 	}
@@ -228,9 +260,7 @@ func TestRunTimeoutDoesNotStartACommandWhileItIsReported(t *testing.T) {
 	t.Setenv(appinfo.EnvName("COMMAND_TIMEOUT_MS"), "30")
 	testenv.Isolate(t)
 	var started atomic.Bool
-	hookRan := make(chan struct{})
 	stderr := blockedWriter{release: make(chan struct{})}
-	defer close(stderr.release)
 	r := runner{
 		newContext: func() *clictx.Context {
 			return &clictx.Context{Store: &auth.Store{Path: filepath.Join(t.TempDir(), "credentials.json")}}
@@ -239,7 +269,6 @@ func TestRunTimeoutDoesNotStartACommandWhileItIsReported(t *testing.T) {
 			// Past the timeout, and well within the time the message
 			// of the timeout is given to be written (the grace period).
 			time.Sleep(300 * time.Millisecond)
-			defer close(hookRan)
 			return []*cobra.Command{{Use: "remove", RunE: func(*cobra.Command, []string) error {
 				started.Store(true)
 				return nil
@@ -247,11 +276,13 @@ func TestRunTimeoutDoesNotStartACommandWhileItIsReported(t *testing.T) {
 		},
 		grace: 2 * time.Second,
 	}
+	wait := track(t, &r)
 	var stdout bytes.Buffer
 	if code := r.run([]string{"remove"}, &stdout, stderr); code != ExitTimeout {
 		t.Errorf("code = %d", code)
 	}
-	<-hookRan
+	close(stderr.release)
+	wait() // the set-up, and what follows it, is over
 	if started.Load() {
 		t.Error("the command was started after the timeout")
 	}
@@ -312,13 +343,17 @@ func TestRunTimeoutDoesNotWaitOnABlockedStderr(t *testing.T) {
 			}}),
 			grace: 100 * time.Millisecond,
 		}
+		wait := track(t, &r)
 		start := time.Now()
 		var stdout bytes.Buffer
 		code := r.run([]string{"slow"}, &stdout, stderr)
 		if elapsed := time.Since(start); code != ExitTimeout || elapsed > 3*time.Second {
 			t.Errorf("debug=%q: code = %d after %s", debug, code, elapsed)
 		}
+		// The command and the writes go on once stderr is read; they are
+		// over before the next run, or the next test, resets the trace.
 		close(stderr.release)
+		wait()
 	}
 }
 
@@ -366,7 +401,9 @@ func TestRunTimeoutEndsACommandTheMachineSleptThrough(t *testing.T) {
 		elapsed: func() (time.Duration, time.Duration) {
 			awake, _ := real()
 			if asleep.Load() {
-				return awake, awake + 8*time.Minute
+				// The wall clock shows 8 minutes since the start, however
+				// long the command took to get there.
+				return awake, 8 * time.Minute
 			}
 			return awake, awake
 		},
@@ -378,7 +415,7 @@ func TestRunTimeoutEndsACommandTheMachineSleptThrough(t *testing.T) {
 	}
 	for _, want := range []string{
 		appinfo.Name + " command timed out after 30s.",
-		"\nThe clock moved 8m0", "s forward while the command only ran for ", "the machine was asleep",
+		"\nThe clock moved 8m0s forward while the command only ran for ", "the machine was asleep",
 	} {
 		if !strings.Contains(got.stderr, want) {
 			t.Errorf("stderr %q does not contain %q", got.stderr, want)
@@ -492,6 +529,38 @@ func TestRunNamesTheCommandInTheAuditLog(t *testing.T) {
 	e := entries[0]
 	if e.Cmd != "work" || strings.Join(e.Args, " ") != "work C0123ABCD "+audit.Placeholder || e.Method != "conversations.history" {
 		t.Errorf("entry = %+v", e)
+	}
+}
+
+// Of the arguments that start with a dash, only the flags of the command
+// are kept, by name: not the value of a flag, even one that looks like a
+// flag, nor message text that starts with a dash, nor what follows "--".
+func TestAuditLogKeepsOnlyTheFlagsOfTheCommand(t *testing.T) {
+	log := filepath.Join(t.TempDir(), "audit.jsonl")
+	t.Setenv(appinfo.EnvName(audit.EnvSuffix), log)
+	work := &cobra.Command{Use: "work", Args: cobra.ArbitraryArgs, RunE: func(cmd *cobra.Command, _ []string) error {
+		_, err := slackapi.NewFake(func(context.Context, string, map[string]any) (map[string]any, error) {
+			return nil, nil
+		}).API(cmd.Context(), "chat.postMessage", nil)
+		return err
+	}}
+	work.Flags().String("text", "", "")
+	work.Flags().Bool("force", false, "")
+	work.Flags().IntP("limit", "n", 0, "")
+	cmdutil.AllowDashText(work)
+	got := runWith(t, time.Second, one(work), "work", "C0123ABCD", "--text", "--confidential plan",
+		"- first item", "--force", "-n", "5", "--", "--secret", "-1")
+	if got.code != ExitOK {
+		t.Fatalf("%+v", got)
+	}
+	entries, _, err := audit.Read(log, time.Time{})
+	if err != nil || len(entries) != 1 {
+		t.Fatalf("entries = %+v, %v", entries, err)
+	}
+	p := audit.Placeholder
+	want := strings.Join([]string{"work", "C0123ABCD", "--text", p, p, "--force", "-n", p, "--", p, p}, " ")
+	if args := strings.Join(entries[0].Args, " "); args != want {
+		t.Errorf("args = %q, want %q", args, want)
 	}
 }
 

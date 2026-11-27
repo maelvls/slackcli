@@ -7,7 +7,7 @@
 // which methods, by which program and which command, and which calls
 // failed or were rate limited. It never holds a token, a cookie, a message
 // or a search query: of the command line it keeps the command, the names of
-// the flags, and the arguments that are Slack IDs, timestamps, numbers or
+// the flags, and the arguments that are Slack IDs, timestamps or
 // Slack URLs (see SanitizeArgs).
 //
 // Writing it never fails a command and costs next to nothing: each line is
@@ -22,10 +22,13 @@ package audit
 
 import (
 	"encoding/json"
+	"errors"
+	"fmt"
 	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -84,7 +87,7 @@ type Entry struct {
 	// Error is the error code Slack gave ("ratelimited",
 	// "invalid_auth"…) or, for a request that got no usable answer, one
 	// of "network", "timeout", "cancelled", "redirect", "http_status",
-	// "not_json", "dial_failed". Never the text of an error.
+	// "not_json", "not_ok", "dial_failed". Never the text of an error.
 	Error string `json:"error,omitempty"`
 	// DurationMS is how long the request took, in milliseconds.
 	DurationMS int64 `json:"duration_ms"`
@@ -147,9 +150,10 @@ var process struct {
 }
 
 // SetCommand records the command that runs ("message list") and its
-// command line, which is kept as SanitizeArgs makes it.
-func SetCommand(cmd string, args []string) {
-	safe := SanitizeArgs(cmd, args)
+// command line, which is kept as SanitizeArgs makes it with the flags that
+// lookup knows.
+func SetCommand(cmd string, args []string, lookup FlagLookup) {
+	safe := SanitizeArgs(cmd, args, lookup)
 	process.mu.Lock()
 	process.cmd, process.args = cmd, safe
 	process.mu.Unlock()
@@ -181,6 +185,11 @@ func Record(e Entry) {
 		}
 	})
 	e.Parent, e.Ancestors = process.parent, process.ancestors
+	// The error code comes from the answer: a long one is not Slack's.
+	e.Error = RedactSecrets(e.Error)
+	if len(e.Error) > maxErrorLen {
+		e.Error = e.Error[:maxErrorLen] + Placeholder
+	}
 	process.mu.Lock()
 	e.Cmd, e.Args = process.cmd, process.args
 	process.mu.Unlock()
@@ -194,6 +203,9 @@ func Record(e Entry) {
 		reportOnce(err)
 	}
 }
+
+// maxErrorLen bounds the error code that is kept.
+const maxErrorLen = 100
 
 // maxAncestors is how many processes up from slackcli are named.
 const maxAncestors = 5
@@ -211,28 +223,55 @@ func reportOnce(err error) {
 // appendLine writes line at the end of the file at path in one write,
 // creating the file (0600) and its directory (0700) when needed, and
 // rotating the file first when it is full.
+//
+// The write is made under a shared lock on the file, and rotate renames it
+// under an exclusive one (on Unix): a line is never written to a file that
+// was rotated away after it was opened, which would lose it once a second
+// rotation replaced <path>.1.
 func appendLine(path string, line []byte) error {
-	f, err := openAppend(path)
-	if err != nil {
-		return err
-	}
-	if info, err := f.Stat(); err == nil && info.Size()+int64(len(line)) > maxSize {
-		// rotate closes f; the line goes to the file that replaces it.
-		if err := rotate(f, info, path); err != nil {
+	for range 3 {
+		f, err := openAppend(path)
+		if err != nil {
 			return err
 		}
-		if f, err = openAppend(path); err != nil {
+		if err := lockShared(f); err != nil {
+			f.Close()
 			return err
 		}
+		info, err := f.Stat()
+		if err != nil {
+			f.Close()
+			return err
+		}
+		if now, err := os.Stat(path); err != nil || !os.SameFile(info, now) {
+			// Rotated (or removed) between the open and the lock.
+			f.Close()
+			continue
+		}
+		if info.Size()+int64(len(line)) > maxSize && info.Size() >= maxSize/2 {
+			// rotate closes f; the line goes to the file that replaces
+			// it. A file under half the limit is not rotated (see
+			// renameIfSame): a long line is appended to it instead.
+			unlock(f)
+			if err := rotate(f, info, path); err != nil {
+				return err
+			}
+			continue
+		}
+		_, werr := f.Write(line)
+		cerr := f.Close() // releases the lock
+		if werr != nil {
+			return werr
+		}
+		return cerr
 	}
-	_, werr := f.Write(line)
-	cerr := f.Close()
-	if werr != nil {
-		return werr
-	}
-	return cerr
+	return errors.New("the log kept being rotated by other processes")
 }
 
+// openAppend opens the log for appending, creating it (0600) and its
+// directory (0700) when needed. A file that already exists with a broader
+// mode (created by hand, or by "touch" with a usual umask) is made 0600
+// first: the log says which commands ran, and when.
 func openAppend(path string) (*os.File, error) {
 	f, err := os.OpenFile(path, os.O_WRONLY|os.O_APPEND|os.O_CREATE, 0o600)
 	if err != nil && os.IsNotExist(err) {
@@ -241,7 +280,33 @@ func openAppend(path string) (*os.File, error) {
 		}
 		f, err = os.OpenFile(path, os.O_WRONLY|os.O_APPEND|os.O_CREATE, 0o600)
 	}
-	return f, err
+	if err != nil {
+		return nil, err
+	}
+	if err := restrictMode(f); err != nil {
+		f.Close()
+		return nil, err
+	}
+	return f, nil
+}
+
+// restrictMode makes f 0600 when others than its owner may read or write
+// it. Windows has no such mode bits.
+func restrictMode(f *os.File) error {
+	if runtime.GOOS == "windows" {
+		return nil
+	}
+	info, err := f.Stat()
+	if err != nil {
+		return err
+	}
+	if !info.Mode().IsRegular() || info.Mode().Perm()&0o077 == 0 {
+		return nil
+	}
+	if err := f.Chmod(0o600); err != nil {
+		return fmt.Errorf("the log is readable by others (mode %#o) and could not be made 0600: %w", info.Mode().Perm(), err)
+	}
+	return nil
 }
 
 // rotatedPath is where a full log goes.
@@ -298,20 +363,35 @@ var (
 	slackIDRe = regexp.MustCompile(`^[CDGUWTBFEAKLRSV][A-Z0-9]{6,20}$`)
 	// tsRe matches a message timestamp.
 	tsRe = regexp.MustCompile(`^\d{9,11}\.\d{1,6}$`)
-	// intRe matches a number (a limit, a count).
+	// intRe matches a number, which tells a negative number from a
+	// shorthand flag. A number given as a positional argument is not
+	// kept: it may be the whole message (a code).
 	intRe = regexp.MustCompile(`^-?\d{1,10}$`)
 )
 
+// FlagLookup tells whether name is a flag of the command that runs (short
+// for a one-letter shorthand, given without its dash), and whether it takes
+// a value (that is the argument after it, unless given as --name=value).
+type FlagLookup func(name string, short bool) (known, takesValue bool)
+
 // SanitizeArgs returns the command line args (without the program name)
 // with only what is safe to keep: the words of cmd, the names of the flags
-// (not their values after "="), and the arguments that are Slack IDs,
-// message timestamps, numbers or Slack URLs (of which the scheme, host and
-// path are kept). Every other argument, which may be a message, a search
-// query, a name or a secret, is replaced by Placeholder. Anything that
-// still looks like a token is redacted.
-func SanitizeArgs(cmd string, args []string) []string {
+// that lookup knows (not their values), and the arguments that are Slack
+// IDs, message timestamps or Slack URLs (of which the scheme,
+// host and path are kept). Every other argument, which may be a message, a
+// search query, a name or a secret, is replaced by Placeholder. So is an
+// argument that starts with a dash but is not a known flag (message text
+// such as "--> see below"), the value of a flag (--text 123456, or one
+// that looks like a flag), and every argument after "--", whatever their
+// shape. Anything that still looks
+// like a token is redacted. A nil lookup knows no flag.
+func SanitizeArgs(cmd string, args []string, lookup FlagLookup) []string {
+	if lookup == nil {
+		lookup = func(string, bool) (bool, bool) { return false, false }
+	}
 	words := strings.Fields(cmd)
 	out := make([]string, 0, min(len(args), maxArgs+1))
+	terminated, valueNext := false, false
 	for i, a := range args {
 		if len(out) == maxArgs {
 			out = append(out, Placeholder+"+"+itoa(len(args)-i))
@@ -319,13 +399,31 @@ func SanitizeArgs(cmd string, args []string) []string {
 		}
 		var kept string
 		switch {
+		case valueNext || terminated:
+			// The value of a flag and what follows "--" may be message
+			// text of any shape, a number or an ID included.
+			valueNext = false
+			kept = Placeholder
+		case a == "--":
+			kept, terminated = a, true
 		case len(words) > 0 && a == words[0]:
 			kept, words = a, words[1:]
 		case strings.HasPrefix(a, "--"):
-			kept, _, _ = strings.Cut(a, "=")
-		case strings.HasPrefix(a, "-") && !intRe.MatchString(a):
-			// -n5, -n=5: the flag is the first letter.
-			kept = a[:min(len(a), 2)]
+			name, _, inline := strings.Cut(a[2:], "=")
+			known, takesValue := lookup(name, false)
+			if !known {
+				kept = Placeholder
+				break
+			}
+			kept, valueNext = "--"+name, takesValue && !inline
+		case strings.HasPrefix(a, "-") && len(a) > 1 && !intRe.MatchString(a):
+			// -n 5, -n5, -n=5: the flag is the first letter.
+			known, takesValue := lookup(a[1:2], true)
+			if !known {
+				kept = Placeholder
+				break
+			}
+			kept, valueNext = a[:2], takesValue && len(a) == 2
 		default:
 			kept = safeValue(a)
 		}
@@ -338,11 +436,11 @@ func SanitizeArgs(cmd string, args []string) []string {
 	return out
 }
 
-// safeValue returns a, or as much of it as is safe to keep, or
+// safeValue returns a (a positional argument), or as much of it as is safe to keep, or
 // Placeholder.
 func safeValue(a string) string {
 	switch {
-	case slackIDRe.MatchString(a), tsRe.MatchString(a), intRe.MatchString(a):
+	case slackIDRe.MatchString(a), tsRe.MatchString(a):
 		return a
 	}
 	if u, err := url.Parse(a); err == nil && (u.Scheme == "https" || u.Scheme == "http") && isSlackHost(u.Hostname()) {

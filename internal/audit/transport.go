@@ -3,7 +3,11 @@ package audit
 import (
 	"context"
 	"errors"
+	"io"
 	"net/http"
+	"strconv"
+	"strings"
+	"sync"
 	"time"
 )
 
@@ -12,39 +16,142 @@ import (
 // included, as a KindFile entry for method ("files.download",
 // "files.upload"). Only the host of a request is recorded, never its path
 // or query, which name a file or carry a signature.
-func Transport(base http.RoundTripper, method string) http.RoundTripper {
+//
+// A request that got an answer is recorded once its body has been read to
+// the end, failed to read, or was closed, so that a transfer that breaks
+// halfway is a failure and its duration the whole transfer's. When
+// followsRedirects is false (the caller refuses every redirect, as an
+// upload does), a 3xx answer is recorded as the failure "redirect".
+func Transport(base http.RoundTripper, method string, followsRedirects bool) http.RoundTripper {
 	if base == nil {
 		base = http.DefaultTransport
 	}
-	return &transport{base: base, method: method}
+	return &transport{base: base, method: method, followsRedirects: followsRedirects}
 }
 
 type transport struct {
-	base   http.RoundTripper
-	method string
+	base             http.RoundTripper
+	method           string
+	followsRedirects bool
 }
 
 func (t *transport) RoundTrip(req *http.Request) (*http.Response, error) {
 	start := time.Now()
 	resp, err := t.base.RoundTrip(req)
 	e := Entry{
-		TS:         start.UTC().Format(time.RFC3339Nano),
-		Kind:       KindFile,
-		Host:       req.URL.Host,
-		Method:     t.method,
-		DurationMS: time.Since(start).Milliseconds(),
+		TS:     start.UTC().Format(time.RFC3339Nano),
+		Kind:   KindFile,
+		Host:   req.URL.Host,
+		Method: t.method,
 	}
-	switch {
-	case err != nil:
+	if err != nil {
 		e.Error = ErrorClass(req.Context(), err)
-	default:
-		e.Status = resp.StatusCode
-		if resp.StatusCode == http.StatusTooManyRequests {
-			e.RateLimited = true
-		}
+		e.DurationMS = time.Since(start).Milliseconds()
+		Record(e)
+		return resp, err
 	}
-	Record(e)
-	return resp, err
+	e.Status = resp.StatusCode
+	switch {
+	case resp.StatusCode == http.StatusTooManyRequests:
+		e.RateLimited = true
+		e.RetryAfterS = retryAfterSeconds(resp.Header.Get("Retry-After"), start)
+	case resp.StatusCode >= 300 && resp.StatusCode <= 399 && !t.followsRedirects:
+		e.Error = "redirect"
+	}
+	// An empty body (http.NoBody) is wrapped too: a redirect without one
+	// may still be refused (RefuseRedirect) before it is closed.
+	if resp.Body == nil {
+		e.DurationMS = time.Since(start).Milliseconds()
+		Record(e)
+		return resp, nil
+	}
+	resp.Body = &recordingBody{ReadCloser: resp.Body, ctx: req.Context(), start: start, entry: e}
+	return resp, nil
+}
+
+// recordingBody writes the entry of a request once its body is done with.
+type recordingBody struct {
+	io.ReadCloser
+	ctx   context.Context
+	start time.Time
+
+	mu    sync.Mutex
+	entry Entry
+	done  bool
+}
+
+func (b *recordingBody) Read(p []byte) (int, error) {
+	n, err := b.ReadCloser.Read(p)
+	switch {
+	case err == io.EOF:
+		b.finish("")
+	case err != nil:
+		b.finish(ErrorClass(b.ctx, err))
+	}
+	return n, err
+}
+
+func (b *recordingBody) Close() error {
+	err := b.ReadCloser.Close()
+	// Closed before the end: the caller stopped reading, which is only a
+	// failure of the request if its context ended.
+	class := ""
+	if b.ctx.Err() != nil {
+		class = ErrorClass(b.ctx, b.ctx.Err())
+	}
+	b.finish(class)
+	return err
+}
+
+// finish records the entry, once, with the error class of the transfer
+// ("" for none) unless the answer itself already failed.
+func (b *recordingBody) finish(class string) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.done {
+		return
+	}
+	b.done = true
+	if b.entry.Error == "" {
+		b.entry.Error = class
+	}
+	b.entry.DurationMS = time.Since(b.start).Milliseconds()
+	Record(b.entry)
+}
+
+// RefuseRedirect marks resp, a redirect answered through Transport that
+// the caller's CheckRedirect refuses to follow (next.Response), as the
+// failure "redirect": the request it was part of fails. net/http closes
+// its body afterwards, which writes the line.
+func RefuseRedirect(resp *http.Response) {
+	if resp == nil {
+		return
+	}
+	b, ok := resp.Body.(*recordingBody)
+	if !ok {
+		return
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if !b.done && b.entry.Error == "" {
+		b.entry.Error = "redirect"
+	}
+}
+
+// retryAfterSeconds reads a Retry-After header, in seconds or as an HTTP
+// date (relative to now); 0 when absent or unreadable.
+func retryAfterSeconds(h string, now time.Time) float64 {
+	h = strings.TrimSpace(h)
+	if h == "" {
+		return 0
+	}
+	if secs, err := strconv.ParseFloat(h, 64); err == nil && secs >= 0 && secs < 1e9 {
+		return secs
+	}
+	if at, err := http.ParseTime(h); err == nil {
+		return max(0, at.Sub(now).Seconds())
+	}
+	return 0
 }
 
 // ErrorClass names the way a request that got no answer failed:
@@ -61,9 +168,9 @@ func ErrorClass(ctx context.Context, err error) string {
 	}
 	var ne interface{ Timeout() bool }
 	switch {
-	case ctx.Err() == context.Canceled || errors.Is(err, context.Canceled):
+	case errors.Is(ctx.Err(), context.Canceled) || errors.Is(err, context.Canceled):
 		return "cancelled"
-	case errors.Is(err, context.DeadlineExceeded) || (errors.As(err, &ne) && ne.Timeout()):
+	case errors.Is(ctx.Err(), context.DeadlineExceeded) || errors.Is(err, context.DeadlineExceeded) || (errors.As(err, &ne) && ne.Timeout()):
 		return "timeout"
 	}
 	return "network"

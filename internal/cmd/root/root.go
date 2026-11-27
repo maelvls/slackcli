@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/spf13/pflag"
 
 	"github.com/maelvls/slackcli/internal/appinfo"
 	"github.com/maelvls/slackcli/internal/audit"
@@ -218,6 +219,21 @@ type runner struct {
 	// elapsed is the clock of the watchdog (see stopwatch); nil means the
 	// real one. Tests replace it to put the machine to sleep.
 	elapsed func() (awake, wall time.Duration)
+	// goroutines, when set, counts every goroutine the run starts (the
+	// command, the watchdog, the writes to stderr that are not waited
+	// for). A process exits with what it leaves running; a test waits on
+	// it instead, for nothing it started to outlive it and write to the
+	// trace or the audit log of the next one.
+	goroutines *sync.WaitGroup
+}
+
+// spawn runs f on a goroutine of its own, counted in r.goroutines.
+func (r runner) spawn(f func()) {
+	if r.goroutines == nil {
+		go f()
+		return
+	}
+	r.goroutines.Go(f)
 }
 
 // run runs the command and, when the live trace is on, ends it with the
@@ -226,7 +242,7 @@ func (r runner) run(args []string, stdout, stderr io.Writer) int {
 	code := r.execute(args, stdout, stderr)
 	// Not waited for longer than the grace period: a stderr that is a
 	// full pipe nobody reads must not keep the process from exiting.
-	within(r.grace, func() {
+	r.within(r.grace, func() {
 		if summary := trace.Summary(); summary != "" {
 			trace.Logf("exit code %d; %s", code, summary)
 		} else {
@@ -238,12 +254,12 @@ func (r runner) run(args []string, stdout, stderr io.Writer) int {
 
 // within runs f and returns once it is done or d has passed, whichever
 // comes first; f is left running in the second case.
-func within(d time.Duration, f func()) {
+func (r runner) within(d time.Duration, f func()) {
 	done := make(chan struct{})
-	go func() {
+	r.spawn(func() {
 		defer close(done)
 		f()
-	}()
+	})
 	t := time.NewTimer(d)
 	defer t.Stop()
 	select {
@@ -279,7 +295,7 @@ func (r runner) execute(args []string, stdout, stderr io.Writer) int {
 		timedOut = make(chan expiry, 1)
 	)
 	stopWatchdog := func() { once.Do(func() { close(stopped) }) }
-	go watch(timeout, elapsed, stopped, timedOut)
+	r.spawn(func() { watch(timeout, elapsed, stopped, timedOut) })
 
 	signalCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -335,7 +351,7 @@ func (r runner) execute(args []string, stdout, stderr io.Writer) int {
 			c.FlushNotes()
 		}
 	}
-	go func() {
+	r.spawn(func() {
 		rt := r.newContext()
 		rt.Stdout, rt.Stderr = stdout, stderr
 		rt.SetWatchdogCanceller(stopWatchdog)
@@ -367,7 +383,7 @@ func (r runner) execute(args []string, stdout, stderr io.Writer) int {
 			ran.Store(c)
 			// The audit log names the command on each of its lines, with
 			// only what is safe to keep of its arguments.
-			audit.SetCommand(commandName(c), args)
+			audit.SetCommand(commandName(c), args, flagLookup(c))
 			// The trace names the command, not its arguments: they may
 			// hold a message or a secret.
 			if clictx.HasNoTimeout(c) {
@@ -381,7 +397,7 @@ func (r runner) execute(args []string, stdout, stderr io.Writer) int {
 			return nil
 		}
 		done <- cmd.ExecuteContext(ctx)
-	}()
+	})
 
 	// interrupted says so, the way that fits the command.
 	interrupted := func() int {
@@ -412,7 +428,7 @@ func (r runner) execute(args []string, stdout, stderr io.Writer) int {
 		case <-grace.C:
 			// What the command had to say so far, then that it was
 			// interrupted; neither holds the exit when stderr blocks.
-			within(r.grace, func() {
+			r.within(r.grace, func() {
 				flushNotes()
 				interrupted()
 			})
@@ -430,7 +446,7 @@ func (r runner) execute(args []string, stdout, stderr io.Writer) int {
 		// them; but neither that nor the exit waits on a stderr that
 		// blocks.
 		timedOutFlag.Store(true)
-		within(r.grace, func() {
+		r.within(r.grace, func() {
 			fmt.Fprintf(stderr, "%s command timed out after %s. If it was sending or changing something, that may still have gone through: check before retrying. Set %s (milliseconds) to adjust.\n",
 				appinfo.Name, timeout, appinfo.EnvName("COMMAND_TIMEOUT_MS"))
 			if late.asleep(timeout) {
@@ -459,7 +475,7 @@ func (r runner) execute(args []string, stdout, stderr io.Writer) int {
 		}
 		// What the command said while it was cleaning up; like the
 		// messages above, not waited for when stderr blocks.
-		within(r.grace, flushNotes)
+		r.within(r.grace, flushNotes)
 		return ExitTimeout
 	}
 
@@ -628,4 +644,24 @@ func ErrorMessage(err error) string {
 		return ""
 	}
 	return err.Error()
+}
+
+// flagLookup tells the audit log which arguments of c's command line are
+// its flags (its own and those it inherits), and which of them take a
+// value: only their names are kept.
+func flagLookup(c *cobra.Command) audit.FlagLookup {
+	return func(name string, short bool) (bool, bool) {
+		for _, fs := range []*pflag.FlagSet{c.Flags(), c.InheritedFlags()} {
+			var f *pflag.Flag
+			if short {
+				f = fs.ShorthandLookup(name)
+			} else {
+				f = fs.Lookup(name)
+			}
+			if f != nil {
+				return true, f.NoOptDefVal == ""
+			}
+		}
+		return false, false
+	}
 }
